@@ -1,11 +1,20 @@
 const { pool } = require('../config/database');
-const { ack, nack } = require('../utils/response');
 const { saveONDCOrder } = require('./order.controller');
 const logger = require('../utils/logger');
-const axios = require('axios');
+const axios  = require('axios');
 const { v4: uuidv4 } = require('uuid');
+const {
+  buildQuote,
+  buildOrderObject,
+  getTenantByBppId,
+  sendCallback,
+  updateOrderStatus,
+} = require('../services/ondc/order.service');
+const cottKartOrder = require('../services/cloudkart/order.service');
 
-// Get all active tenants with their ONDC config
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+// Get all active tenants (used only by /search which is broadcast)
 const getActiveTenants = async () => {
   const [tenants] = await pool.query(`
     SELECT t.*, oc.subscriber_id, oc.subscriber_url,
@@ -20,208 +29,660 @@ const getActiveTenants = async () => {
 // Build ONDC catalog from DB for a tenant
 const buildCatalog = async (tenantId, ondcConfig) => {
   try {
-    const [vendors] = await pool.query(`
-      SELECT v.* FROM vendors v
-      WHERE v.tenant_id = ? AND v.status = 'active'
-    `, [tenantId]);
+    const [vendors] = await pool.query(
+      `SELECT * FROM vendors WHERE tenant_id = ? AND status = 'active'`,
+      [tenantId]
+    );
 
     const providers = [];
 
     for (const vendor of vendors) {
-      const [products] = await pool.query(`
-        SELECT * FROM products
-        WHERE tenant_id = ? AND vendor_id = ? AND is_active = 1 AND stock > 0
-        LIMIT 100
-      `, [tenantId, vendor.id]);
+      const [products] = await pool.query(
+        `SELECT * FROM products
+         WHERE tenant_id = ? AND vendor_id = ? AND is_active = 1 AND stock > 0
+         LIMIT 100`,
+        [tenantId, vendor.id]
+      );
 
-      if (products.length === 0) continue;
+      if (!products.length) continue;
 
       const items = products.map(p => ({
         id: p.external_product_id,
         descriptor: {
-          name: p.name,
+          name:       p.name,
           short_desc: p.short_description || p.name,
-          long_desc: p.description || p.name,
-          images: p.images ? JSON.parse(p.images).map(url => ({ url })) :
-                  p.image_url ? [{ url: p.image_url }] : []
+          long_desc:  p.description       || p.name,
+          images:     p.images ? JSON.parse(p.images).map(url => ({ url }))
+                               : p.image_url ? [{ url: p.image_url }] : [],
         },
         price: {
-          currency: p.currency || 'INR',
-          value: String(p.price),
-          maximum_value: String(p.mrp || p.price)
+          currency:      p.currency || 'INR',
+          value:         String(p.price),
+          maximum_value: String(p.mrp || p.price),
         },
         quantity: {
           available: { count: String(p.stock || 0) },
-          maximum: { count: '10' }
+          maximum:   { count: '10' },
         },
-        category_id: 'grocery',
+        category_id:   'grocery',
         fulfillment_id: 'f1',
-        location_id: 'l1',
-        '@ondc/org/returnable': p.is_returnable === 1,
-        '@ondc/org/cancellable': p.is_cancellable === 1,
-        '@ondc/org/return_window': p.return_window || 'P1D',
-        '@ondc/org/seller_pickup_return': false,
-        '@ondc/org/time_to_ship': p.time_to_ship || 'PT24H',
-        '@ondc/org/available_on_cod': p.available_on_cod === 1,
+        location_id:   'l1',
+        '@ondc/org/returnable':              p.is_returnable  === 1,
+        '@ondc/org/cancellable':             p.is_cancellable === 1,
+        '@ondc/org/return_window':           p.return_window  || 'P1D',
+        '@ondc/org/seller_pickup_return':    false,
+        '@ondc/org/time_to_ship':            p.time_to_ship   || 'PT24H',
+        '@ondc/org/available_on_cod':        p.available_on_cod === 1,
         '@ondc/org/contact_details_consumer_care': vendor.phone || '',
         '@ondc/org/statutory_reqs_packaged_commodities': {
-          manufacturer_or_packer_name: vendor.business_name,
+          manufacturer_or_packer_name:    vendor.business_name,
           manufacturer_or_packer_address: `${vendor.address || ''}, ${vendor.city || ''}`,
-          common_or_generic_name_of_commodity: p.name,
+          common_or_generic_name_of_commodity:        p.name,
           net_quantity_or_measure_of_commodity_in_pkg: '1',
-          month_year_of_manufacture_packing_import: new Date().toISOString().substring(0, 7)
-        }
+          month_year_of_manufacture_packing_import:   new Date().toISOString().substring(0, 7),
+        },
       }));
 
       providers.push({
         id: vendor.external_vendor_id || String(vendor.id),
         descriptor: {
-          name: vendor.business_name,
+          name:       vendor.business_name,
           short_desc: vendor.business_name,
-          images: vendor.logo_url ? [{ url: vendor.logo_url }] : []
+          images:     vendor.logo_url ? [{ url: vendor.logo_url }] : [],
         },
         '@ondc/org/fssai_license_no': vendor.fssai_number || '',
         locations: [{
-          id: 'l1',
+          id:  'l1',
           gps: vendor.gps || '13.0827,80.2707',
           address: {
-            locality: vendor.address || vendor.city,
-            city: vendor.city || 'Chennai',
-            state: vendor.state || 'Tamil Nadu',
-            country: 'IND',
-            area_code: vendor.pincode || '600001'
+            locality:  vendor.address || vendor.city,
+            city:      vendor.city    || 'Chennai',
+            state:     vendor.state   || 'Tamil Nadu',
+            country:   'IND',
+            area_code: vendor.pincode || '600001',
           },
           time: {
-            label: 'enable',
+            label:     'enable',
             timestamp: new Date().toISOString(),
-            days: '1,2,3,4,5,6,7',
-            schedule: { holidays: [] },
-            range: { start: '0900', end: '2100' }
+            days:      '1,2,3,4,5,6,7',
+            schedule:  { holidays: [] },
+            range:     { start: '0900', end: '2100' },
           },
           circle: {
-            gps: vendor.gps || '13.0827,80.2707',
-            radius: { unit: 'km', value: '10' }
-          }
+            gps:    vendor.gps || '13.0827,80.2707',
+            radius: { unit: 'km', value: '10' },
+          },
         }],
         items,
         fulfillments: [{
-          id: 'f1',
+          id:   'f1',
           type: 'Delivery',
-          contact: {
-            phone: vendor.phone || '',
-            email: vendor.email || ''
-          }
+          contact: { phone: vendor.phone || '', email: vendor.email || '' },
         }],
         payment_methods: [{
-          '@ondc/org/buyer_app_finder_fee_type': 'percent',
-          '@ondc/org/buyer_app_finder_fee_amount': '3'
-        }]
+          '@ondc/org/buyer_app_finder_fee_type':   'percent',
+          '@ondc/org/buyer_app_finder_fee_amount': '3',
+        }],
       });
     }
 
-    return providers.length > 0 ? {
-      'bpp/descriptor': {
-        name: ondcConfig?.subscriber_id || 'ONDC Connector',
-        short_desc: 'ONDC Seller Platform'
-      },
-      'bpp/providers': providers
-    } : null;
+    return providers.length
+      ? {
+          'bpp/descriptor': {
+            name:       ondcConfig?.subscriber_id || 'ONDC Connector',
+            short_desc: 'ONDC Seller Platform',
+            long_desc:  'Multi-vendor ONDC Seller Platform powered by CottKart',
+          },
+          'bpp/providers': providers,
+          // Required at catalog level per ONDC API v1.2 spec
+          'bpp/fulfillments': [{
+            id:   'f1',
+            type: 'Delivery',
+          }],
+          'bpp/payments': [{
+            '@ondc/org/buyer_app_finder_fee_type':   'percent',
+            '@ondc/org/buyer_app_finder_fee_amount': '3',
+          }],
+          'bpp/offers': [],
+        }
+      : null;
   } catch (err) {
-    logger.error('Build catalog failed:', err.message);
+    logger.error('buildCatalog failed:', err.message);
     return null;
   }
 };
 
-// Send on_search callback to BAP
+// Send on_search callback (signed)
 const sendOnSearch = async (context, catalog, ondcConfig) => {
   try {
+    const { createAuthHeader } = require('../utils/crypto');
     const callbackUrl = `${context.bap_uri}/on_search`;
     const payload = {
       context: {
         ...context,
-        action: 'on_search',
-        bpp_id: ondcConfig?.subscriber_id,
-        bpp_uri: ondcConfig?.subscriber_url,
-        timestamp: new Date().toISOString(),
-        message_id: uuidv4()
+        action:     'on_search',
+        bpp_id:     ondcConfig?.subscriber_id,
+        bpp_uri:    ondcConfig?.subscriber_url,
+        timestamp:  new Date().toISOString(),
+        message_id: uuidv4(),
+        ttl:        'PT30S',
       },
-      message: { catalog }
+      message: { catalog },
     };
 
-    logger.info(`Sending on_search to: ${callbackUrl}`);
-    const response = await axios.post(callbackUrl, payload, {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 10000
-    });
-    logger.info(`on_search sent to ${callbackUrl}: ${response.status}`);
-    return response.data;
+    const headers = { 'Content-Type': 'application/json' };
+    if (ondcConfig?.signing_private_key) {
+      try {
+        headers['Authorization'] = createAuthHeader(
+          ondcConfig.signing_private_key,
+          ondcConfig.subscriber_id,
+          ondcConfig.unique_key_id,
+          payload
+        );
+      } catch (e) {
+        logger.warn('on_search auth header skipped:', e.message);
+      }
+    }
+
+    logger.info(`Sending on_search → ${callbackUrl}`);
+    const response = await axios.post(callbackUrl, payload, { headers, timeout: 10000 });
+    logger.info(`on_search sent [${response.status}]`);
   } catch (err) {
     logger.error(`on_search callback failed to ${context.bap_uri}:`, err.message);
   }
 };
 
-// Handle /search from ONDC
+// ─── handlers ────────────────────────────────────────────────────────────────
+
 const handleSearch = async (req, res) => {
   try {
-    const body = req.body;
-    const context = body.context;
+    const { context } = req.body;
+    logger.info('ONDC /search received', { bap_id: context?.bap_id, domain: context?.domain });
 
-    logger.info('ONDC /search received', {
-      bap_id: context?.bap_id,
-      city: context?.city,
-      domain: context?.domain
-    });
-
-    // Send ACK immediately
     res.json({ message: { ack: { status: 'ACK' } } });
 
-    // Get ALL active tenants
     const tenants = await getActiveTenants();
+    if (!tenants.length) { logger.info('No active tenants for /search'); return; }
 
-    if (!tenants.length) {
-      logger.info('No active tenants found');
-      return;
-    }
-
-    // Send catalog for each tenant
     for (const tenant of tenants) {
-      const ondcConfig = {
-        subscriber_id: tenant.subscriber_id,
-        subscriber_url: tenant.subscriber_url
-      };
-
+      const ondcConfig = { subscriber_id: tenant.subscriber_id, subscriber_url: tenant.subscriber_url };
       const catalog = await buildCatalog(tenant.id, ondcConfig);
-
-      if (catalog && catalog['bpp/providers']?.length > 0) {
-        logger.info(`Sending catalog for tenant: ${tenant.slug} with ${catalog['bpp/providers'].length} providers`);
+      if (catalog?.['bpp/providers']?.length) {
         await sendOnSearch(context, catalog, ondcConfig);
-      } else {
-        logger.info(`No active products for tenant: ${tenant.slug}`);
       }
     }
   } catch (err) {
-    logger.error('Search handler failed:', err.message);
+    logger.error('handleSearch failed:', err.message);
   }
 };
 
-// Handle /confirm
-const handleConfirm = async (req, res) => {
+const handleSelect = async (req, res) => {
   try {
-    logger.info('ONDC /confirm received');
+    const body    = req.body;
+    const context = body.context;
+    logger.info('ONDC /select received', { transaction_id: context?.transaction_id });
+
     res.json({ message: { ack: { status: 'ACK' } } });
-    const tenants = await getActiveTenants();
-    if (tenants.length) {
-      await saveONDCOrder(tenants[0].id, req.body, req.body);
+
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) { logger.warn('/select: no tenant found'); return; }
+
+    const order       = body.message?.order || {};
+    const items       = order.items         || [];
+    const fulfillments = order.fulfillments || [];
+
+    try {
+      const quote = await buildQuote(items, tenant.id);
+      await sendCallback(context.bap_uri, 'on_select', context, {
+        order: {
+          provider: order.provider,
+          items,
+          quote,
+          fulfillments: fulfillments.map(f => ({
+            ...f,
+            '@ondc/org/TAT': 'PT24H',
+            tracking: false,
+          })),
+        },
+      }, tenant);
+    } catch (err) {
+      logger.error('handleSelect processing failed:', err.message);
     }
   } catch (err) {
-    logger.error('Confirm handler failed:', err.message);
+    logger.error('handleSelect failed:', err.message);
   }
 };
 
-// Generic ACK handler
+const handleInit = async (req, res) => {
+  try {
+    const body    = req.body;
+    const context = body.context;
+    logger.info('ONDC /init received', { transaction_id: context?.transaction_id });
+
+    res.json({ message: { ack: { status: 'ACK' } } });
+
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return;
+
+    const order = body.message?.order || {};
+    const items = order.items         || [];
+
+    try {
+      const quote    = await buildQuote(items, tenant.id);
+      const orderObj = buildOrderObject(context, body.message, 'Created', quote, tenant);
+
+      await sendCallback(context.bap_uri, 'on_init', context, {
+        order: {
+          ...orderObj,
+          payment: {
+            ...order.payment,
+            '@ondc/org/buyer_app_finder_fee_type':   'percent',
+            '@ondc/org/buyer_app_finder_fee_amount': '3',
+            type: 'ON-ORDER',
+          },
+        },
+      }, tenant);
+    } catch (err) {
+      logger.error('handleInit processing failed:', err.message);
+    }
+  } catch (err) {
+    logger.error('handleInit failed:', err.message);
+  }
+};
+
+const handleConfirm = async (req, res) => {
+  try {
+    const body    = req.body;
+    const context = body.context;
+    logger.info('ONDC /confirm received', { transaction_id: context?.transaction_id });
+
+    res.json({ message: { ack: { status: 'ACK' } } });
+
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return;
+
+    const order = body.message?.order || {};
+
+    try {
+      // 1. Save to DB
+      await saveONDCOrder(tenant.id, body, body);
+
+      // 2. Push to CottKart
+      let cottKartOrderId = null;
+      try {
+        const ckResult = await cottKartOrder.pushOrder(body);
+        cottKartOrderId = ckResult?.id || ckResult?.order_id;
+        if (cottKartOrderId) {
+          await pool.query(
+            `UPDATE ondc_orders SET cottkart_order_id = ? WHERE ondc_order_id = ?`,
+            [String(cottKartOrderId), order.id]
+          );
+        }
+      } catch (ckErr) {
+        logger.error('CottKart pushOrder failed (non-blocking):', ckErr.message);
+      }
+
+      // 3. Send on_confirm
+      const quote    = await buildQuote(order.items || [], tenant.id).catch(() => order.quote);
+      const orderObj = buildOrderObject(context, body.message, 'Created', quote, tenant);
+
+      await sendCallback(context.bap_uri, 'on_confirm', context, {
+        order: {
+          ...orderObj,
+          id:      order.id,
+          payment: { ...order.payment, status: 'PAID' },
+        },
+      }, tenant);
+    } catch (err) {
+      logger.error('handleConfirm processing failed:', err.message);
+    }
+  } catch (err) {
+    logger.error('handleConfirm failed:', err.message);
+  }
+};
+
+const handleStatus = async (req, res) => {
+  try {
+    const body       = req.body;
+    const context    = body.context;
+    const ondcOrderId = body.message?.order_id;
+    logger.info('ONDC /status received', { order_id: ondcOrderId });
+
+    res.json({ message: { ack: { status: 'ACK' } } });
+
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return;
+
+    try {
+      const [rows] = await pool.query(
+        `SELECT * FROM ondc_orders WHERE ondc_order_id = ? AND tenant_id = ?`,
+        [ondcOrderId, tenant.id]
+      );
+      if (!rows.length) return;
+
+      const dbOrder = rows[0];
+      let currentStatus = dbOrder.status;
+
+      if (dbOrder.cottkart_order_id) {
+        try {
+          const ckStatus = await cottKartOrder.fetchOrderStatus(dbOrder.cottkart_order_id);
+          if (ckStatus?.status && ckStatus.status !== currentStatus) {
+            currentStatus = ckStatus.status;
+            await updateOrderStatus(ondcOrderId, currentStatus);
+          }
+        } catch (e) {
+          logger.warn('CottKart status fetch failed:', e.message);
+        }
+      }
+
+      await sendCallback(context.bap_uri, 'on_status', context, {
+        order: {
+          id:    ondcOrderId,
+          state: currentStatus,
+          fulfillments: [{
+            id:   'f1',
+            type: 'Delivery',
+            state: { descriptor: { code: currentStatus } },
+            tracking: false,
+          }],
+          updated_at: new Date().toISOString(),
+        },
+      }, tenant);
+    } catch (err) {
+      logger.error('handleStatus processing failed:', err.message);
+    }
+  } catch (err) {
+    logger.error('handleStatus failed:', err.message);
+  }
+};
+
+const handleCancel = async (req, res) => {
+  try {
+    const body    = req.body;
+    const context = body.context;
+    const { order_id, cancellation_reason_id } = body.message || {};
+    logger.info('ONDC /cancel received', { order_id });
+
+    res.json({ message: { ack: { status: 'ACK' } } });
+
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return;
+
+    try {
+      const [rows] = await pool.query(
+        `SELECT * FROM ondc_orders WHERE ondc_order_id = ? AND tenant_id = ?`,
+        [order_id, tenant.id]
+      );
+      if (!rows.length) return;
+
+      const dbOrder = rows[0];
+
+      if (dbOrder.cottkart_order_id) {
+        try {
+          await cottKartOrder.cancelOrder(dbOrder.cottkart_order_id, cancellation_reason_id);
+        } catch (e) {
+          logger.warn('CottKart cancel failed:', e.message);
+        }
+      }
+
+      await pool.query(
+        `UPDATE ondc_orders SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
+         WHERE ondc_order_id = ?`,
+        [order_id]
+      );
+
+      await sendCallback(context.bap_uri, 'on_cancel', context, {
+        order: {
+          id:    order_id,
+          state: 'Cancelled',
+          cancellation: {
+            cancelled_by: 'CONSUMER',
+            reason: { id: cancellation_reason_id || '001' },
+          },
+          fulfillments: [{
+            id: 'f1',
+            state: { descriptor: { code: 'Cancelled' } },
+          }],
+          updated_at: new Date().toISOString(),
+        },
+      }, tenant);
+    } catch (err) {
+      logger.error('handleCancel processing failed:', err.message);
+    }
+  } catch (err) {
+    logger.error('handleCancel failed:', err.message);
+  }
+};
+
+const handleTrack = async (req, res) => {
+  try {
+    const body     = req.body;
+    const context  = body.context;
+    const order_id = body.message?.order_id;
+    logger.info('ONDC /track received', { order_id });
+
+    res.json({ message: { ack: { status: 'ACK' } } });
+
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return;
+
+    try {
+      const [rows] = await pool.query(
+        `SELECT * FROM ondc_orders WHERE ondc_order_id = ? AND tenant_id = ?`,
+        [order_id, tenant.id]
+      );
+      const dbOrder = rows[0];
+
+      let trackingUrl    = null;
+      let trackingStatus = 'active';
+
+      if (dbOrder?.cottkart_order_id) {
+        try {
+          const tracking = await cottKartOrder.fetchTrackingInfo(dbOrder.cottkart_order_id);
+          if (tracking?.tracking_url) trackingUrl    = tracking.tracking_url;
+          if (tracking?.status)       trackingStatus = tracking.status;
+        } catch (e) {
+          logger.warn('Tracking fetch failed:', e.message);
+        }
+      }
+
+      await sendCallback(context.bap_uri, 'on_track', context, {
+        tracking: {
+          id:     order_id,
+          url:    trackingUrl || `${tenant.subscriber_url}/track/${order_id}`,
+          status: trackingStatus,
+        },
+      }, tenant);
+    } catch (err) {
+      logger.error('handleTrack processing failed:', err.message);
+    }
+  } catch (err) {
+    logger.error('handleTrack failed:', err.message);
+  }
+};
+
+const handleSupport = async (req, res) => {
+  try {
+    const body    = req.body;
+    const context = body.context;
+    logger.info('ONDC /support received');
+
+    res.json({ message: { ack: { status: 'ACK' } } });
+
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return;
+
+    await sendCallback(context.bap_uri, 'on_support', context, {
+      support: {
+        ref_id:          body.message?.ref_id,
+        callback_phone:  process.env.SUPPORT_PHONE || '+919999999999',
+        email:           process.env.SUPPORT_EMAIL || 'support@cottkart.com',
+        chat_link:       `${tenant.subscriber_url}/support`,
+      },
+    }, tenant);
+  } catch (err) {
+    logger.error('handleSupport failed:', err.message);
+  }
+};
+
+const handleRating = async (req, res) => {
+  try {
+    const body    = req.body;
+    const context = body.context;
+    const { id, rating_category, value } = body.message || {};
+    logger.info('ONDC /rating received', { id, rating_category, value });
+
+    res.json({ message: { ack: { status: 'ACK' } } });
+
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return;
+
+    // Persist rating in sync_logs (no dedicated ratings table yet)
+    pool.query(
+      `INSERT INTO sync_logs (tenant_id, sync_type, status, details, completed_at)
+       VALUES (?, 'rating', 'success', ?, NOW())`,
+      [tenant.id, JSON.stringify({ id, rating_category, value, transaction_id: context?.transaction_id })]
+    ).catch(() => {});
+
+    await sendCallback(context.bap_uri, 'on_rating', context, {
+      feedback_form: {
+        form:     { url: `${tenant.subscriber_url}/feedback` },
+        required: false,
+      },
+    }, tenant);
+  } catch (err) {
+    logger.error('handleRating failed:', err.message);
+  }
+};
+
+const handleIssue = async (req, res) => {
+  try {
+    const body    = req.body;
+    const context = body.context;
+    const issue   = body.message?.issue || {};
+    logger.info('ONDC /issue received', { transaction_id: context?.transaction_id });
+
+    res.json({ message: { ack: { status: 'ACK' } } });
+
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return;
+
+    const issueId = issue.id || uuidv4();
+
+    try {
+      await pool.query(`
+        INSERT INTO issue_grievances
+          (tenant_id, transaction_id, issue_id, order_id, issue_type, category,
+           sub_category, description, status,
+           complainant_name, complainant_phone, complainant_email, raw_payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE status = 'open', updated_at = NOW()
+      `, [
+        tenant.id,
+        context.transaction_id,
+        issueId,
+        issue.order_details?.id,
+        issue.issue_type  || 'FULFILLMENT',
+        issue.category,
+        issue.sub_category,
+        issue.description,
+        issue.complainant_info?.person?.name,
+        issue.complainant_info?.contact?.phone,
+        issue.complainant_info?.contact?.email,
+        JSON.stringify(body),
+      ]);
+    } catch (e) {
+      logger.warn('Issue save failed:', e.message);
+    }
+
+    await sendCallback(context.bap_uri, 'on_issue', context, {
+      issue: {
+        id: issueId,
+        issue_actions: {
+          respondent_actions: [{
+            respondent_action: 'PROCESSING',
+            short_desc:        'Issue received and being processed',
+            updated_at:        new Date().toISOString(),
+            updated_by: {
+              org:     { name: tenant.subscriber_id },
+              contact: {
+                phone: process.env.SUPPORT_PHONE || '',
+                email: process.env.SUPPORT_EMAIL || '',
+              },
+            },
+          }],
+        },
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        status:     'OPEN',
+      },
+    }, tenant);
+  } catch (err) {
+    logger.error('handleIssue failed:', err.message);
+  }
+};
+
+const handleIssueStatus = async (req, res) => {
+  try {
+    const body     = req.body;
+    const context  = body.context;
+    const issue_id = body.message?.issue_id;
+    logger.info('ONDC /issue_status received', { issue_id });
+
+    res.json({ message: { ack: { status: 'ACK' } } });
+
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return;
+
+    let issueStatus = 'OPEN';
+    let resolution  = null;
+    try {
+      const [rows] = await pool.query(
+        `SELECT * FROM issue_grievances WHERE issue_id = ? AND tenant_id = ?`,
+        [issue_id, tenant.id]
+      );
+      if (rows.length) {
+        issueStatus = (rows[0].status || 'open').toUpperCase();
+        resolution  = rows[0].resolution;
+      }
+    } catch (e) {}
+
+    await sendCallback(context.bap_uri, 'on_issue_status', context, {
+      issue: {
+        id: issue_id,
+        issue_actions: {
+          respondent_actions: [{
+            respondent_action: issueStatus === 'RESOLVED' ? 'RESOLVED' : 'PROCESSING',
+            short_desc:        resolution || 'Being processed',
+            updated_at:        new Date().toISOString(),
+          }],
+        },
+        status:     issueStatus,
+        updated_at: new Date().toISOString(),
+      },
+    }, tenant);
+  } catch (err) {
+    logger.error('handleIssueStatus failed:', err.message);
+  }
+};
+
+// Generic ACK for ONDC callbacks we receive (on_*)
 const handleACK = (action) => async (req, res) => {
-  logger.info(`ONDC /${action} received`, { context: req.body?.context });
+  logger.info(`ONDC /${action} received`);
   res.json({ message: { ack: { status: 'ACK' } } });
 };
 
-module.exports = { handleSearch, handleConfirm, handleACK };
+module.exports = {
+  handleSearch,
+  handleSelect,
+  handleInit,
+  handleConfirm,
+  handleStatus,
+  handleCancel,
+  handleTrack,
+  handleSupport,
+  handleRating,
+  handleIssue,
+  handleIssueStatus,
+  handleACK,
+};

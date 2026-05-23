@@ -66,12 +66,36 @@ const registerTenant = async (req, res) => {
 const getTenantInfo = async (req, res) => {
   try {
     const tenant = req.tenant;
+
     const [vendors] = await pool.query('SELECT COUNT(*) as count FROM vendors WHERE tenant_id = ?', [tenant.id]);
     const [products] = await pool.query('SELECT COUNT(*) as count FROM products WHERE tenant_id = ?', [tenant.id]);
     const [orders] = await pool.query('SELECT COUNT(*) as count FROM ondc_orders WHERE tenant_id = ?', [tenant.id]);
 
+    // Fetch active API key
+    const [apiKeys] = await pool.query(
+      'SELECT key_value FROM api_keys WHERE tenant_id = ? AND is_active = 1 ORDER BY created_at DESC LIMIT 1',
+      [tenant.id]
+    );
+
+    // Fetch ONDC config
+    const [ondcRows] = await pool.query(
+      'SELECT * FROM tenant_ondc_config WHERE tenant_id = ? AND is_active = 1 LIMIT 1',
+      [tenant.id]
+    );
+    const ondcConfig = ondcRows[0] || null;
+
     return success(res, {
       ...tenant,
+      api_key: apiKeys[0]?.key_value || null,
+      ondc: ondcConfig ? {
+        subscriber_id:   ondcConfig.subscriber_id,
+        subscriber_url:  ondcConfig.subscriber_url,
+        unique_key_id:   ondcConfig.unique_key_id,
+        environment:     ondcConfig.ondc_env,
+        key_valid_from:  ondcConfig.key_valid_from,
+        key_valid_until: ondcConfig.key_valid_until,
+        connected:       true,
+      } : null,
       stats: {
         vendors: vendors[0].count,
         products: products[0].count,
