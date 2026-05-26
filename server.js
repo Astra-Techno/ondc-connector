@@ -96,7 +96,7 @@ app.post('/update',       handleACK('update'));
 
 // GCR catalog validation feedback
 app.post('/catalog_rejection', (req, res) => {
-  logger.warn('GCR catalog_rejection received:', JSON.stringify(req.body));
+  logger.warn(`GCR catalog_rejection: ${JSON.stringify(req.body)}`);
   res.json({ message: { ack: { status: 'ACK' } } });
 });
 
