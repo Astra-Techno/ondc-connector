@@ -94,6 +94,12 @@ app.post('/issue',        handleIssue);
 app.post('/issue_status', handleIssueStatus);
 app.post('/update',       handleACK('update'));
 
+// GCR catalog validation feedback
+app.post('/catalog_rejection', (req, res) => {
+  logger.warn('GCR catalog_rejection received:', JSON.stringify(req.body));
+  res.json({ message: { ack: { status: 'ACK' } } });
+});
+
 // Callbacks we may receive from BAP (just ACK)
 app.post('/on_search',       handleACK('on_search'));
 app.post('/on_select',       handleACK('on_select'));
