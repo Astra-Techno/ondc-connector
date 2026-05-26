@@ -186,9 +186,11 @@ const sendOnSearch = async (context, catalog, ondcConfig) => {
 
     logger.info(`Sending on_search → ${callbackUrl}`);
     const response = await axios.post(callbackUrl, payload, { headers, timeout: 10000 });
-    logger.info(`on_search sent [${response.status}]`);
+    logger.info(`on_search sent to ${callbackUrl}: ${response.status}`);
   } catch (err) {
-    logger.error(`on_search callback failed to ${context.bap_uri}:`, err.message);
+    const status = err.response?.status;
+    const detail = err.response?.data ? JSON.stringify(err.response.data).slice(0, 300) : err.message;
+    logger.error(`on_search callback failed to ${callbackUrl} [${status || err.code || 'no-response'}]: ${detail}`);
   }
 };
 
