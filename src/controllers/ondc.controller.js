@@ -203,7 +203,7 @@ const sendOnSearch = async (context, catalog, ondcConfig) => {
 const handleSearch = async (req, res) => {
   try {
     const { context } = req.body;
-    logger.info('ONDC /search received', { bap_id: context?.bap_id, domain: context?.domain });
+    logger.info('ONDC /search received', { bap_id: context?.bap_id, domain: context?.domain, city: context?.city });
 
     res.json({ message: { ack: { status: 'ACK' } } });
 
