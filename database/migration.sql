@@ -116,8 +116,8 @@ CREATE TABLE IF NOT EXISTS `vendors` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Add missing vendor columns (safe — skipped if already exist)
-CALL AddColIfNotExists('vendors', 'bank_account', "VARCHAR(50) DEFAULT NULL AFTER `logo_url`");
-CALL AddColIfNotExists('vendors', 'bank_ifsc',    "VARCHAR(20) DEFAULT NULL AFTER `bank_account`");
+CALL AddColIfNotExists('vendors', 'bank_account', "VARCHAR(50) DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'bank_ifsc',    "VARCHAR(20) DEFAULT NULL");
 
 -- ============================================================
 -- TABLE: products
@@ -157,10 +157,10 @@ CREATE TABLE IF NOT EXISTS `products` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Add missing product columns
-CALL AddColIfNotExists('products', 'short_description', "VARCHAR(500) DEFAULT NULL AFTER `name`");
-CALL AddColIfNotExists('products', 'return_window',     "VARCHAR(20) DEFAULT 'P1D' AFTER `is_cancellable`");
-CALL AddColIfNotExists('products', 'currency',          "VARCHAR(10) DEFAULT 'INR' AFTER `unit`");
-CALL AddColIfNotExists('products', 'last_synced_at',    "DATETIME DEFAULT NULL AFTER `ondc_sync_status`");
+CALL AddColIfNotExists('products', 'short_description', "VARCHAR(500) DEFAULT NULL");
+CALL AddColIfNotExists('products', 'return_window',     "VARCHAR(20) DEFAULT 'P1D'");
+CALL AddColIfNotExists('products', 'currency',          "VARCHAR(10) DEFAULT 'INR'");
+CALL AddColIfNotExists('products', 'last_synced_at',    "DATETIME DEFAULT NULL");
 
 -- ============================================================
 -- TABLE: ondc_orders
@@ -202,10 +202,10 @@ CREATE TABLE IF NOT EXISTS `ondc_orders` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Add missing order columns
-CALL AddColIfNotExists('ondc_orders', 'cottkart_order_id', "VARCHAR(100) DEFAULT NULL AFTER `ondc_message_id`");
-CALL AddColIfNotExists('ondc_orders', 'shipped_at',        "DATETIME DEFAULT NULL AFTER `raw_payload`");
-CALL AddColIfNotExists('ondc_orders', 'delivered_at',      "DATETIME DEFAULT NULL AFTER `shipped_at`");
-CALL AddColIfNotExists('ondc_orders', 'cancelled_at',      "DATETIME DEFAULT NULL AFTER `delivered_at`");
+CALL AddColIfNotExists('ondc_orders', 'cottkart_order_id', "VARCHAR(100) DEFAULT NULL");
+CALL AddColIfNotExists('ondc_orders', 'shipped_at',        "DATETIME DEFAULT NULL");
+CALL AddColIfNotExists('ondc_orders', 'delivered_at',      "DATETIME DEFAULT NULL");
+CALL AddColIfNotExists('ondc_orders', 'cancelled_at',      "DATETIME DEFAULT NULL");
 
 -- ============================================================
 -- TABLE: sync_logs
@@ -227,10 +227,10 @@ CREATE TABLE IF NOT EXISTS `sync_logs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Add missing sync_log columns
-CALL AddColIfNotExists('sync_logs', 'records_synced', "INT(11) DEFAULT 0 AFTER `status`");
-CALL AddColIfNotExists('sync_logs', 'records_failed', "INT(11) DEFAULT 0 AFTER `records_synced`");
-CALL AddColIfNotExists('sync_logs', 'details',        "TEXT DEFAULT NULL AFTER `records_failed`");
-CALL AddColIfNotExists('sync_logs', 'started_at',     "DATETIME DEFAULT NULL AFTER `details`");
+CALL AddColIfNotExists('sync_logs', 'records_synced', "INT(11) DEFAULT 0");
+CALL AddColIfNotExists('sync_logs', 'records_failed', "INT(11) DEFAULT 0");
+CALL AddColIfNotExists('sync_logs', 'details',        "TEXT DEFAULT NULL");
+CALL AddColIfNotExists('sync_logs', 'started_at',     "DATETIME DEFAULT NULL");
 
 -- ============================================================
 -- TABLE: ondc_transactions  (NEW)
