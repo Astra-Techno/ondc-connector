@@ -154,9 +154,10 @@ const buildCatalog = async (tenantId, ondcConfig) => {
 
 // Send on_search callback (signed)
 const sendOnSearch = async (context, catalog, ondcConfig) => {
+  const callbackUrl = context.bap_uri ? `${context.bap_uri}/on_search` : null;
   try {
     const { createAuthHeader } = require('../utils/crypto');
-    const callbackUrl = `${context.bap_uri}/on_search`;
+    if (!callbackUrl) { logger.warn('on_search: no bap_uri in context'); return; }
     const payload = {
       context: {
         ...context,
