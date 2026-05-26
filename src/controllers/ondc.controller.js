@@ -27,11 +27,14 @@ const getActiveTenants = async () => {
 };
 
 // Build ONDC catalog from DB for a tenant
-const buildCatalog = async (tenantId, ondcConfig) => {
+const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
   try {
+    // Filter vendors by city: include nationwide vendors (std_city_code IS NULL)
+    // and vendors whose city code matches the searched city
     const [vendors] = await pool.query(
-      `SELECT * FROM vendors WHERE tenant_id = ? AND status = 'active'`,
-      [tenantId]
+      `SELECT * FROM vendors WHERE tenant_id = ? AND status = 'active'
+       AND (std_city_code IS NULL OR ? IS NULL OR std_city_code = ?)`,
+      [tenantId, contextCity, contextCity]
     );
 
     const providers = [];
@@ -214,7 +217,7 @@ const handleSearch = async (req, res) => {
         signing_private_key: tenant.signing_private_key,
         unique_key_id:       tenant.unique_key_id,
       };
-      const catalog = await buildCatalog(tenant.id, ondcConfig);
+      const catalog = await buildCatalog(tenant.id, ondcConfig, context?.city);
       if (catalog?.['bpp/providers']?.length) {
         await sendOnSearch(context, catalog, ondcConfig);
       }

@@ -116,8 +116,10 @@ CREATE TABLE IF NOT EXISTS `vendors` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Add missing vendor columns (safe — skipped if already exist)
-CALL AddColIfNotExists('vendors', 'bank_account', "VARCHAR(50) DEFAULT NULL");
-CALL AddColIfNotExists('vendors', 'bank_ifsc',    "VARCHAR(20) DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'bank_account',   "VARCHAR(50) DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'bank_ifsc',      "VARCHAR(20) DEFAULT NULL");
+-- std_city_code: ONDC city code like 'std:044' for Chennai, NULL = nationwide
+CALL AddColIfNotExists('vendors', 'std_city_code',  "VARCHAR(20) DEFAULT NULL");
 
 -- ============================================================
 -- TABLE: products
