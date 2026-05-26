@@ -208,7 +208,12 @@ const handleSearch = async (req, res) => {
     if (!tenants.length) { logger.info('No active tenants for /search'); return; }
 
     for (const tenant of tenants) {
-      const ondcConfig = { subscriber_id: tenant.subscriber_id, subscriber_url: tenant.subscriber_url };
+      const ondcConfig = {
+        subscriber_id:       tenant.subscriber_id,
+        subscriber_url:      tenant.subscriber_url,
+        signing_private_key: tenant.signing_private_key,
+        unique_key_id:       tenant.unique_key_id,
+      };
       const catalog = await buildCatalog(tenant.id, ondcConfig);
       if (catalog?.['bpp/providers']?.length) {
         await sendOnSearch(context, catalog, ondcConfig);
