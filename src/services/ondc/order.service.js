@@ -152,11 +152,13 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
 
       return response.data;
     } catch (err) {
-      logger.warn(`${action} attempt ${attempt}/${retries} failed: ${err.message}`);
+      const status = err.response?.status;
+      const detail = err.response?.data ? JSON.stringify(err.response.data).slice(0, 200) : err.message;
+      logger.warn(`${action} attempt ${attempt}/${retries} failed [${status || 'no-response'}]: ${detail}`);
       if (attempt < retries) {
         await new Promise(r => setTimeout(r, 1000 * attempt));
       } else {
-        logger.error(`${action} callback failed after ${retries} attempts → ${callbackUrl}`);
+        logger.error(`${action} callback failed after ${retries} attempts → ${callbackUrl} [${status || 'no-response'}]: ${detail}`);
         pool.query(
           `UPDATE ondc_transactions SET status = 'failed'
            WHERE transaction_id = ? AND action = ? AND direction = 'out'`,

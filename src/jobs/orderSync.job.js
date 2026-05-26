@@ -78,7 +78,9 @@ const runOrderSync = async () => {
       }
     }
   } catch (err) {
-    logger.error('[OrderSync] Fatal error:', err.message);
+    logger.error('[OrderSync] Fatal error:', err.message || String(err));
+    if (err.code) logger.error('[OrderSync] Error code:', err.code);
+    if (err.sql) logger.error('[OrderSync] SQL:', err.sql);
   }
 
   logger.info('[OrderSync] Done');
