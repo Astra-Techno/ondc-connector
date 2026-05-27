@@ -53,6 +53,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         id: p.external_product_id,
         descriptor: {
           name:       p.name,
+          code:       p.external_product_id,
           short_desc: p.short_description || p.name,
           long_desc:  p.description       || p.name,
           images:     p.images ? JSON.parse(p.images).map(url => ({ url }))
