@@ -100,6 +100,9 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         },
         ttl: 'P1D',
         '@ondc/org/fssai_license_no': vendor.fssai_number || '',
+        categories: [
+          { id: 'Grocery', descriptor: { name: 'Grocery' } },
+        ],
         locations: [{
           id:  'l1',
           gps: vendor.gps || '13.0827,80.2707',
@@ -142,6 +145,9 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
             short_desc: 'ONDC Seller Platform',
             long_desc:  'Multi-vendor ONDC Seller Platform powered by CottKart',
           },
+          'bpp/categories': [
+            { id: 'Grocery', descriptor: { name: 'Grocery' } },
+          ],
           'bpp/providers': providers,
           // Required at catalog level per ONDC API v1.2 spec
           'bpp/fulfillments': [{
