@@ -206,12 +206,12 @@ const sendOnSearch = async (context, catalog, ondcConfig) => {
     const payload = {
       context: {
         ...context,
-        action:     'on_search',
-        bpp_id:     ondcConfig?.subscriber_id,
-        bpp_uri:    ondcConfig?.subscriber_url,
-        timestamp:  new Date().toISOString(),
-        message_id: uuidv4(),
-        ttl:        'PT30S',
+        action:    'on_search',
+        bpp_id:    ondcConfig?.subscriber_id,
+        bpp_uri:   ondcConfig?.subscriber_url,
+        timestamp: new Date().toISOString(),
+        // message_id must match the search request's message_id (Beckn protocol)
+        ttl:       'PT30S',
       },
       message: { catalog },
     };
