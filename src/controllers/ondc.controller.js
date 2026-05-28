@@ -66,8 +66,8 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         },
         quantity: {
           unitized: { measure: { unit: p.unit || 'unit', value: '1' } },
-          available: { count: String(p.stock || 0) },
-          maximum:   { count: '10' },
+          available: { count: (p.stock > 0) ? '99' : '0' },
+          maximum:   { count: '99' },
         },
         category_id:    'Grocery',
         fulfillment_id: 'f1',
@@ -136,6 +136,27 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           '@ondc/org/buyer_app_finder_fee_type':   'percent',
           '@ondc/org/buyer_app_finder_fee_amount': '3',
         }],
+        tags: [
+          {
+            code: 'serviceability',
+            list: [
+              { code: 'location', value: 'l1' },
+              { code: 'category', value: 'Grocery' },
+              { code: 'type',     value: '10' },
+              { code: 'val',      value: '10' },
+              { code: 'unit',     value: 'km' },
+            ],
+          },
+          {
+            code: 'timing',
+            list: [
+              { code: 'day_from',  value: '1'    },
+              { code: 'day_to',    value: '7'    },
+              { code: 'time_from', value: '0900' },
+              { code: 'time_to',   value: '2100' },
+            ],
+          },
+        ],
       });
     }
 
@@ -145,6 +166,14 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
             name:       ondcConfig?.subscriber_id || 'ONDC Connector',
             short_desc: 'ONDC Seller Platform',
             long_desc:  'Multi-vendor ONDC Seller Platform powered by CottKart',
+            images:     [],
+            tags: [{
+              code: 'bpp_terms',
+              list: [
+                { code: 'np_type',         value: 'MSN' },
+                { code: 'accept_bap_terms', value: 'Y'  },
+              ],
+            }],
           },
           'bpp/categories': [
             { id: 'Grocery', descriptor: { name: 'Grocery' } },
