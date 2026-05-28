@@ -81,10 +81,11 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         '@ondc/org/contact_details_consumer_care': `phone:${vendor.phone || ''},email:${vendor.email || ''}`,
         '@ondc/org/statutory_reqs_packaged_commodities': {
           manufacturer_or_packer_name:                  vendor.business_name,
-          manufacturer_or_packer_address:               `${vendor.address || ''}, ${vendor.city || ''}`,
+          manufacturer_or_packer_address:               [vendor.address, vendor.city].filter(Boolean).join(', ') || vendor.city || 'India',
           common_or_generic_name_of_commodity:          p.name,
-          net_quantity_or_measure_of_commodity_in_pkg:  '1',
+          net_quantity_or_measure_of_commodity_in_pkg:  `1 ${p.unit || 'unit'}`,
           month_year_of_manufacture_packing_import:     new Date().toISOString().substring(0, 7),
+          imported_product_country_of_origin:           'IND',
         },
         tags: [
           { code: 'origin', list: [{ code: 'country', value: 'IND' }] },
