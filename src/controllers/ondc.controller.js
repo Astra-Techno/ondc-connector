@@ -219,6 +219,12 @@ const handleSearch = async (req, res) => {
 
     res.json({ message: { ack: { status: 'ACK' } } });
 
+    // Only respond to grocery domain — our catalog is ONDC:RET10
+    if (context?.domain && context.domain !== 'ONDC:RET10') {
+      logger.info(`Ignoring /search for unsupported domain: ${context.domain}`);
+      return;
+    }
+
     const tenants = await getActiveTenants();
     if (!tenants.length) { logger.info('No active tenants for /search'); return; }
 
