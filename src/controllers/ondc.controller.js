@@ -53,7 +53,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         id: p.external_product_id,
         descriptor: {
           name:       p.name,
-          code:       p.external_product_id,
+          code:       `5:${p.external_product_id}`,
           short_desc: p.short_description || p.name,
           long_desc:  p.description       || p.name,
           images:     p.images ? JSON.parse(p.images).map(url => ({ url }))
@@ -78,7 +78,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         '@ondc/org/seller_pickup_return': false,
         '@ondc/org/time_to_ship':         p.time_to_ship  || 'PT45M',
         '@ondc/org/available_on_cod':     Boolean(p.available_on_cod),
-        '@ondc/org/contact_details_consumer_care': `phone:${vendor.phone || ''},email:${vendor.email || ''}`,
+        '@ondc/org/contact_details_consumer_care': `phone:${(vendor.phone || '').replace(/^\+91/, '')},email:${vendor.email || ''}`,
         '@ondc/org/statutory_reqs_packaged_commodities': {
           manufacturer_or_packer_name:                  vendor.business_name,
           manufacturer_or_packer_address:               [vendor.address, vendor.city].filter(Boolean).join(', ') || vendor.city || 'India',
@@ -130,7 +130,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         fulfillments: [{
           id:   'f1',
           type: 'Delivery',
-          contact: { phone: vendor.phone || '', email: vendor.email || '' },
+          contact: { phone: (vendor.phone || '').replace(/^\+91/, ''), email: vendor.email || '' },
         }],
         payment_methods: [{
           '@ondc/org/buyer_app_finder_fee_type':   'percent',
