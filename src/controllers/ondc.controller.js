@@ -510,11 +510,9 @@ const handleCancel = async (req, res) => {
         `SELECT * FROM ondc_orders WHERE ondc_order_id = ? AND tenant_id = ?`,
         [order_id, tenant.id]
       );
-      if (!rows.length) return;
+      const dbOrder = rows[0] || null;
 
-      const dbOrder = rows[0];
-
-      if (dbOrder.cottkart_order_id) {
+      if (dbOrder?.cottkart_order_id) {
         try {
           await cottKartOrder.cancelOrder(dbOrder.cottkart_order_id, cancellation_reason_id);
         } catch (e) {
@@ -522,26 +520,48 @@ const handleCancel = async (req, res) => {
         }
       }
 
-      await pool.query(
-        `UPDATE ondc_orders SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
-         WHERE ondc_order_id = ?`,
-        [order_id]
-      );
+      if (dbOrder) {
+        await pool.query(
+          `UPDATE ondc_orders SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
+           WHERE ondc_order_id = ?`,
+          [order_id]
+        );
+      }
+
+      const cachedOrder = confirmedOrderCache.get(order_id) || null;
+      const now = new Date().toISOString();
+
+      const cancelPayload = cachedOrder ? {
+        id:    order_id,
+        state: 'Cancelled',
+        provider:  cachedOrder.provider,
+        items:     cachedOrder.items,
+        billing:   cachedOrder.billing,
+        quote:     cachedOrder.quote,
+        payment:   cachedOrder.payment,
+        cancellation: {
+          cancelled_by: 'CONSUMER',
+          reason: { id: cancellation_reason_id || '001' },
+        },
+        fulfillments: (cachedOrder.fulfillments || []).map(f => ({
+          ...f,
+          state: { descriptor: { code: 'Cancelled' } },
+        })),
+        created_at:  cachedOrder.created_at || now,
+        updated_at:  now,
+      } : {
+        id:    order_id,
+        state: 'Cancelled',
+        cancellation: {
+          cancelled_by: 'CONSUMER',
+          reason: { id: cancellation_reason_id || '001' },
+        },
+        fulfillments: [{ id: 'f1', state: { descriptor: { code: 'Cancelled' } } }],
+        updated_at: now,
+      };
 
       await sendCallback(context.bap_uri, 'on_cancel', context, {
-        order: {
-          id:    order_id,
-          state: 'Cancelled',
-          cancellation: {
-            cancelled_by: 'CONSUMER',
-            reason: { id: cancellation_reason_id || '001' },
-          },
-          fulfillments: [{
-            id: 'f1',
-            state: { descriptor: { code: 'Cancelled' } },
-          }],
-          updated_at: new Date().toISOString(),
-        },
+        order: cancelPayload,
       }, tenant);
     } catch (err) {
       logger.error('handleCancel processing failed:', err.message);
