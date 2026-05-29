@@ -12,8 +12,9 @@ const {
 } = require('../services/ondc/order.service');
 const cottKartOrder = require('../services/cloudkart/order.service');
 
-// In-memory cache: order_id → confirmed order object (for on_status when DB save fails)
+// In-memory cache: order_id → { order, context } (for on_status/on_update/on_cancel callbacks)
 const confirmedOrderCache = new Map();
+let lastConfirmedOrderId = null; // track most recent for /latest shortcut
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -368,6 +369,7 @@ const handleConfirm = async (req, res) => {
     // Cache order + context (for on_status, on_update, on_cancel callbacks)
     if (order.id) {
       confirmedOrderCache.set(order.id, { order, context });
+      lastConfirmedOrderId = order.id;
       logger.info('Cached confirmed order', { order_id: order.id });
     }
 
@@ -623,7 +625,9 @@ const handleUpdate = async (req, res) => {
 // Used for Flow 3A (Partial Cancellation) testing
 const triggerMerchantUpdate = async (req, res) => {
   try {
-    const { order_id } = req.params;
+    const rawId = req.params.order_id;
+    const order_id = rawId === 'latest' ? lastConfirmedOrderId : rawId;
+    if (!order_id) return res.status(404).json({ error: 'No confirmed order in cache' });
     const cachedEntry = confirmedOrderCache.get(order_id);
     if (!cachedEntry) {
       return res.status(404).json({ error: 'Order not found in cache' });
@@ -685,7 +689,9 @@ const triggerMerchantUpdate = async (req, res) => {
 // Used for Flow 3B/3C testing
 const triggerMerchantCancel = async (req, res) => {
   try {
-    const { order_id } = req.params;
+    const rawId = req.params.order_id;
+    const order_id = rawId === 'latest' ? lastConfirmedOrderId : rawId;
+    if (!order_id) return res.status(404).json({ error: 'No confirmed order in cache' });
     const { reason_id = '011', rto = false } = req.body || {};
     const cachedEntry = confirmedOrderCache.get(order_id);
     if (!cachedEntry) {
