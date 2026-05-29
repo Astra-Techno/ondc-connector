@@ -732,6 +732,47 @@ const triggerMerchantCancel = async (req, res) => {
   }
 };
 
+// triggerMerchantStatus — proactively send on_status (for flows that need it unsolicited)
+const triggerMerchantStatus = async (req, res) => {
+  try {
+    const rawId = req.params.order_id;
+    const order_id = rawId === 'latest' ? lastConfirmedOrderId : rawId;
+    if (!order_id) return res.status(404).json({ error: 'No confirmed order in cache' });
+
+    const cachedEntry = confirmedOrderCache.get(order_id);
+    if (!cachedEntry) return res.status(404).json({ error: 'Order not found in cache' });
+
+    const { order, context } = cachedEntry;
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    const now = new Date().toISOString();
+    const statusPayload = {
+      id:           order_id,
+      state:        'Accepted',
+      provider:     order.provider,
+      items:        order.items,
+      billing:      order.billing,
+      fulfillments: (order.fulfillments || []).map(f => ({
+        ...f,
+        state: { descriptor: { code: 'Pending' } },
+        tracking: false,
+      })),
+      quote:        order.quote,
+      payment:      order.payment,
+      created_at:   order.created_at || now,
+      updated_at:   now,
+    };
+
+    await sendCallback(context.bap_uri, 'on_status', context, { order: statusPayload }, tenant);
+    logger.info('Proactive on_status sent', { order_id });
+    res.json({ success: true, message: 'on_status sent', order_id });
+  } catch (err) {
+    logger.error('triggerMerchantStatus failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 const handleTrack = async (req, res) => {
   try {
     const body     = req.body;
@@ -966,4 +1007,5 @@ module.exports = {
   handleACK,
   triggerMerchantUpdate,
   triggerMerchantCancel,
+  triggerMerchantStatus,
 };

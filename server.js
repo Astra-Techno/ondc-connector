@@ -22,6 +22,7 @@ const {
   handleACK,
   triggerMerchantUpdate,
   triggerMerchantCancel,
+  triggerMerchantStatus,
 } = require('./src/controllers/ondc.controller');
 
 const app  = express();
@@ -100,6 +101,7 @@ app.post('/update',       handleUpdate);
 // Merchant-initiated trigger endpoints (for Flow 3A/3B/3C testing)
 app.post('/trigger/merchant-update/:order_id',  triggerMerchantUpdate);
 app.post('/trigger/merchant-cancel/:order_id',  triggerMerchantCancel);
+app.post('/trigger/merchant-status/:order_id',  triggerMerchantStatus);
 
 // GCR catalog validation feedback
 app.post('/catalog_rejection', (req, res) => {
