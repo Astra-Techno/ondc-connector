@@ -365,9 +365,9 @@ const handleConfirm = async (req, res) => {
 
     const order = body.message?.order || {};
 
-    // Cache order for on_status (survives DB save failure)
+    // Cache order + context (for on_status, on_update, on_cancel callbacks)
     if (order.id) {
-      confirmedOrderCache.set(order.id, order);
+      confirmedOrderCache.set(order.id, { order, context });
       logger.info('Cached confirmed order', { order_id: order.id });
     }
 
@@ -453,7 +453,8 @@ const handleStatus = async (req, res) => {
       const fulfillmentCode = fulfillmentStateMap[currentStatus] || 'Pending';
 
       // Build full order object — use cached confirm order if available
-      const cachedOrder = confirmedOrderCache.get(ondcOrderId) || null;
+      const cachedEntry = confirmedOrderCache.get(ondcOrderId) || null;
+      const cachedOrder = cachedEntry?.order || null;
       const now = new Date().toISOString();
 
       const orderPayload = cachedOrder ? {
@@ -528,7 +529,8 @@ const handleCancel = async (req, res) => {
         );
       }
 
-      const cachedOrder = confirmedOrderCache.get(order_id) || null;
+      const cachedEntry = confirmedOrderCache.get(order_id) || null;
+      const cachedOrder = cachedEntry?.order || null;
       const now = new Date().toISOString();
 
       const cancelPayload = cachedOrder ? {
@@ -568,6 +570,125 @@ const handleCancel = async (req, res) => {
     }
   } catch (err) {
     logger.error('handleCancel failed:', err.message);
+  }
+};
+
+// handleUpdate — receives /update from BAP (e.g. return requests)
+const handleUpdate = async (req, res) => {
+  try {
+    const body    = req.body;
+    const context = body.context;
+    logger.info('ONDC /update received', { transaction_id: context?.transaction_id });
+    res.json({ message: { ack: { status: 'ACK' } } });
+  } catch (err) {
+    logger.error('handleUpdate failed:', err.message);
+  }
+};
+
+// triggerMerchantUpdate — internal endpoint to initiate merchant-side on_update
+// Used for Flow 3A (Partial Cancellation) testing
+const triggerMerchantUpdate = async (req, res) => {
+  try {
+    const { order_id } = req.params;
+    const cachedEntry = confirmedOrderCache.get(order_id);
+    if (!cachedEntry) {
+      return res.status(404).json({ error: 'Order not found in cache' });
+    }
+    const { order, context } = cachedEntry;
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    // Partial cancel: mark first item as cancelled, keep rest
+    const allItems = order.items || [];
+    const cancelledItem = allItems[0];
+    const remainingItems = allItems.slice(1);
+
+    // Recalculate quote — remove cancelled item price from total
+    const originalBreakup = order.quote?.breakup || [];
+    const updatedBreakup = originalBreakup.filter(b =>
+      !(b['@ondc/org/title_type'] === 'item' && b['@ondc/org/item_id'] === cancelledItem?.id)
+    );
+    const updatedTotal = updatedBreakup
+      .reduce((sum, b) => sum + parseFloat(b.price?.value || 0), 0)
+      .toFixed(2);
+
+    const now = new Date().toISOString();
+
+    const updatePayload = {
+      id:    order_id,
+      state: 'Accepted',
+      provider: order.provider,
+      items: [
+        ...(remainingItems.length ? remainingItems : allItems).map(i => ({ ...i })),
+        ...(cancelledItem ? [{ ...cancelledItem, tags: [{ code: 'cancellation', list: [{ code: 'reason_id', value: '001' }] }] }] : []),
+      ],
+      billing:  order.billing,
+      quote: {
+        price: { currency: 'INR', value: updatedTotal },
+        breakup: updatedBreakup,
+        ttl: order.quote?.ttl || 'P1D',
+      },
+      payment:  order.payment,
+      fulfillments: (order.fulfillments || []).map(f => ({
+        ...f,
+        state: { descriptor: { code: 'Pending' } },
+      })),
+      created_at:  order.created_at || now,
+      updated_at:  now,
+      tags: [{ code: 'cancellation_initiated_by', list: [{ code: 'reason_id', value: '001' }] }],
+    };
+
+    await sendCallback(context.bap_uri, 'on_update', context, { order: updatePayload }, tenant);
+    logger.info('Merchant on_update sent', { order_id });
+    res.json({ success: true, message: 'on_update sent', order_id });
+  } catch (err) {
+    logger.error('triggerMerchantUpdate failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// triggerMerchantCancel — internal endpoint to initiate merchant-side on_cancel
+// Used for Flow 3B/3C testing
+const triggerMerchantCancel = async (req, res) => {
+  try {
+    const { order_id } = req.params;
+    const { reason_id = '011', rto = false } = req.body || {};
+    const cachedEntry = confirmedOrderCache.get(order_id);
+    if (!cachedEntry) {
+      return res.status(404).json({ error: 'Order not found in cache' });
+    }
+    const { order, context } = cachedEntry;
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    const now = new Date().toISOString();
+    const cancelPayload = {
+      id:    order_id,
+      state: 'Cancelled',
+      provider:  order.provider,
+      items:     order.items,
+      billing:   order.billing,
+      quote:     order.quote,
+      payment:   order.payment,
+      cancellation: {
+        cancelled_by: 'SELLER',
+        reason: { id: reason_id },
+        ...(rto ? { return_reason: { id: reason_id } } : {}),
+      },
+      fulfillments: (order.fulfillments || []).map(f => ({
+        ...f,
+        state: { descriptor: { code: rto ? 'RTO-Initiated' : 'Cancelled' } },
+      })),
+      created_at:  order.created_at || now,
+      updated_at:  now,
+    };
+
+    await sendCallback(context.bap_uri, 'on_cancel', context, { order: cancelPayload }, tenant);
+    logger.info('Merchant on_cancel sent', { order_id, reason_id, rto });
+    res.json({ success: true, message: 'on_cancel sent', order_id });
+  } catch (err) {
+    logger.error('triggerMerchantCancel failed:', err.message);
+    res.status(500).json({ error: err.message });
   }
 };
 
@@ -796,10 +917,13 @@ module.exports = {
   handleConfirm,
   handleStatus,
   handleCancel,
+  handleUpdate,
   handleTrack,
   handleSupport,
   handleRating,
   handleIssue,
   handleIssueStatus,
   handleACK,
+  triggerMerchantUpdate,
+  triggerMerchantCancel,
 };
