@@ -12,6 +12,9 @@ const {
 } = require('../services/ondc/order.service');
 const cottKartOrder = require('../services/cloudkart/order.service');
 
+// In-memory cache: order_id → confirmed order object (for on_status when DB save fails)
+const confirmedOrderCache = new Map();
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 // Get all active tenants (used only by /search which is broadcast)
@@ -362,6 +365,12 @@ const handleConfirm = async (req, res) => {
 
     const order = body.message?.order || {};
 
+    // Cache order for on_status (survives DB save failure)
+    if (order.id) {
+      confirmedOrderCache.set(order.id, order);
+      logger.info('Cached confirmed order', { order_id: order.id });
+    }
+
     try {
       // 1. Save to DB
       await saveONDCOrder(tenant.id, body, body);
@@ -443,18 +452,38 @@ const handleStatus = async (req, res) => {
       };
       const fulfillmentCode = fulfillmentStateMap[currentStatus] || 'Pending';
 
+      // Build full order object — use cached confirm order if available
+      const cachedOrder = confirmedOrderCache.get(ondcOrderId) || null;
+      const now = new Date().toISOString();
+
+      const orderPayload = cachedOrder ? {
+        id:           ondcOrderId,
+        state:        currentStatus,
+        provider:     cachedOrder.provider,
+        items:        cachedOrder.items,
+        billing:      cachedOrder.billing,
+        fulfillments: (cachedOrder.fulfillments || []).map(f => ({
+          ...f,
+          state: { descriptor: { code: fulfillmentCode } },
+          tracking: false,
+        })),
+        quote:        cachedOrder.quote,
+        payment:      cachedOrder.payment,
+        created_at:   cachedOrder.created_at || now,
+        updated_at:   now,
+      } : {
+        id:    ondcOrderId,
+        state: currentStatus,
+        fulfillments: [{
+          id: 'f1', type: 'Delivery',
+          state: { descriptor: { code: fulfillmentCode } },
+          tracking: false,
+        }],
+        updated_at: now,
+      };
+
       await sendCallback(context.bap_uri, 'on_status', context, {
-        order: {
-          id:    ondcOrderId,
-          state: currentStatus,
-          fulfillments: [{
-            id:   'f1',
-            type: 'Delivery',
-            state: { descriptor: { code: fulfillmentCode } },
-            tracking: false,
-          }],
-          updated_at: new Date().toISOString(),
-        },
+        order: orderPayload,
       }, tenant);
     } catch (err) {
       logger.error('handleStatus processing failed:', err.message);
