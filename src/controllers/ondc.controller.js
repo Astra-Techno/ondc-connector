@@ -433,6 +433,16 @@ const handleStatus = async (req, res) => {
         }
       }
 
+      // Map order state → valid ONDC fulfillment state code
+      const fulfillmentStateMap = {
+        'Created':     'Pending',
+        'Accepted':    'Pending',
+        'In-progress': 'Order-picked-up',
+        'Completed':   'Order-delivered',
+        'Cancelled':   'Cancelled',
+      };
+      const fulfillmentCode = fulfillmentStateMap[currentStatus] || 'Pending';
+
       await sendCallback(context.bap_uri, 'on_status', context, {
         order: {
           id:    ondcOrderId,
@@ -440,7 +450,7 @@ const handleStatus = async (req, res) => {
           fulfillments: [{
             id:   'f1',
             type: 'Delivery',
-            state: { descriptor: { code: currentStatus } },
+            state: { descriptor: { code: fulfillmentCode } },
             tracking: false,
           }],
           updated_at: new Date().toISOString(),
