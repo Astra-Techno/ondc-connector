@@ -573,13 +573,47 @@ const handleCancel = async (req, res) => {
   }
 };
 
-// handleUpdate — receives /update from BAP (e.g. return requests)
+// handleUpdate — receives /update from BAP (settlement update, return requests, etc.)
 const handleUpdate = async (req, res) => {
   try {
     const body    = req.body;
     const context = body.context;
-    logger.info('ONDC /update received', { transaction_id: context?.transaction_id });
+    const order   = body.message?.order || {};
+    logger.info('ONDC /update received', { transaction_id: context?.transaction_id, order_id: order.id });
+
     res.json({ message: { ack: { status: 'ACK' } } });
+
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return;
+
+    try {
+      // Retrieve cached confirmed order for full payload
+      const cachedEntry = confirmedOrderCache.get(order.id) || null;
+      const cachedOrder = cachedEntry?.order || order;
+      const now = new Date().toISOString();
+
+      // Echo back on_update with current order state + updated payment if provided
+      const updatePayload = {
+        id:          order.id || cachedOrder.id,
+        state:       cachedOrder.state || 'Accepted',
+        provider:    cachedOrder.provider,
+        items:       cachedOrder.items,
+        billing:     cachedOrder.billing,
+        fulfillments: (cachedOrder.fulfillments || []).map(f => ({
+          ...f,
+          state: { descriptor: { code: 'Pending' } },
+        })),
+        quote:   order.quote   || cachedOrder.quote,
+        payment: order.payment || cachedOrder.payment,
+        created_at: cachedOrder.created_at || now,
+        updated_at: now,
+      };
+
+      await sendCallback(context.bap_uri, 'on_update', context, { order: updatePayload }, tenant);
+      logger.info('on_update sent (from /update request)', { order_id: order.id });
+    } catch (err) {
+      logger.error('handleUpdate processing failed:', err.message);
+    }
   } catch (err) {
     logger.error('handleUpdate failed:', err.message);
   }
