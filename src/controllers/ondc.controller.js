@@ -417,12 +417,11 @@ const handleStatus = async (req, res) => {
         `SELECT * FROM ondc_orders WHERE ondc_order_id = ? AND tenant_id = ?`,
         [ondcOrderId, tenant.id]
       );
-      if (!rows.length) return;
+      const dbOrder = rows[0] || null;
+      let currentStatus = dbOrder?.status || 'Accepted';
+      logger.info('handleStatus order lookup', { ondcOrderId, found: !!dbOrder, status: currentStatus });
 
-      const dbOrder = rows[0];
-      let currentStatus = dbOrder.status;
-
-      if (dbOrder.cottkart_order_id) {
+      if (dbOrder?.cottkart_order_id) {
         try {
           const ckStatus = await cottKartOrder.fetchOrderStatus(dbOrder.cottkart_order_id);
           if (ckStatus?.status && ckStatus.status !== currentStatus) {
