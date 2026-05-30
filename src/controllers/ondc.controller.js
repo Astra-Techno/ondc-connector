@@ -576,46 +576,16 @@ const handleCancel = async (req, res) => {
 };
 
 // handleUpdate — receives /update from BAP (settlement update, return requests, etc.)
+// Per ONDC Flow 3A: settlement /update should ONLY be ACK'd — no on_update callback
 const handleUpdate = async (req, res) => {
   try {
     const body    = req.body;
     const context = body.context;
     const order   = body.message?.order || {};
-    logger.info('ONDC /update received', { transaction_id: context?.transaction_id, order_id: order.id });
+    logger.info('ONDC /update received (ACK only)', { transaction_id: context?.transaction_id, order_id: order.id });
 
+    // Just ACK — do not send on_update back for settlement updates
     res.json({ message: { ack: { status: 'ACK' } } });
-
-    const tenant = await getTenantByBppId(context?.bpp_id);
-    if (!tenant) return;
-
-    try {
-      // Retrieve cached confirmed order for full payload
-      const cachedEntry = confirmedOrderCache.get(order.id) || null;
-      const cachedOrder = cachedEntry?.order || order;
-      const now = new Date().toISOString();
-
-      // Echo back on_update with current order state + updated payment if provided
-      const updatePayload = {
-        id:          order.id || cachedOrder.id,
-        state:       cachedOrder.state || 'Accepted',
-        provider:    cachedOrder.provider,
-        items:       cachedOrder.items,
-        billing:     cachedOrder.billing,
-        fulfillments: (cachedOrder.fulfillments || []).map(f => ({
-          ...f,
-          state: { descriptor: { code: 'Pending' } },
-        })),
-        quote:   order.quote   || cachedOrder.quote,
-        payment: order.payment || cachedOrder.payment,
-        created_at: cachedOrder.created_at || now,
-        updated_at: now,
-      };
-
-      await sendCallback(context.bap_uri, 'on_update', context, { order: updatePayload }, tenant);
-      logger.info('on_update sent (from /update request)', { order_id: order.id });
-    } catch (err) {
-      logger.error('handleUpdate processing failed:', err.message);
-    }
   } catch (err) {
     logger.error('handleUpdate failed:', err.message);
   }
@@ -732,7 +702,8 @@ const triggerMerchantCancel = async (req, res) => {
   }
 };
 
-// triggerMerchantStatus — proactively send on_status (for flows that need it unsolicited)
+// triggerMerchantStatus — proactively send a single on_status
+// Body: { state: 'Packed', order_state: 'Accepted' } (defaults to Pending/Accepted)
 const triggerMerchantStatus = async (req, res) => {
   try {
     const rawId = req.params.order_id;
@@ -746,16 +717,19 @@ const triggerMerchantStatus = async (req, res) => {
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
 
+    const fulfillmentState = req.body?.state || 'Pending';
+    const orderState       = req.body?.order_state || 'Accepted';
+
     const now = new Date().toISOString();
     const statusPayload = {
       id:           order_id,
-      state:        'Accepted',
+      state:        orderState,
       provider:     order.provider,
       items:        order.items,
       billing:      order.billing,
       fulfillments: (order.fulfillments || []).map(f => ({
         ...f,
-        state: { descriptor: { code: 'Pending' } },
+        state: { descriptor: { code: fulfillmentState } },
         tracking: false,
       })),
       quote:        order.quote,
@@ -765,11 +739,91 @@ const triggerMerchantStatus = async (req, res) => {
     };
 
     await sendCallback(context.bap_uri, 'on_status', context, { order: statusPayload }, tenant);
-    logger.info('Proactive on_status sent', { order_id });
-    res.json({ success: true, message: 'on_status sent', order_id });
+    logger.info('Proactive on_status sent', { order_id, fulfillmentState, orderState });
+    res.json({ success: true, message: 'on_status sent', order_id, state: fulfillmentState });
   } catch (err) {
     logger.error('triggerMerchantStatus failed:', err.message);
     res.status(500).json({ error: err.message });
+  }
+};
+
+// Helper: build an on_status payload for a given fulfillment state + order state
+const buildStatusPayload = (order_id, order, fulfillmentState, orderState) => {
+  const now = new Date().toISOString();
+  return {
+    id:           order_id,
+    state:        orderState,
+    provider:     order.provider,
+    items:        order.items,
+    billing:      order.billing,
+    fulfillments: (order.fulfillments || []).map(f => ({
+      ...f,
+      state: { descriptor: { code: fulfillmentState } },
+      tracking: false,
+    })),
+    quote:        order.quote,
+    payment:      order.payment,
+    created_at:   order.created_at || now,
+    updated_at:   now,
+  };
+};
+
+// triggerMerchantStatusSequence — sends sequential on_status calls
+// Body: { type: '3a' } (default, full delivery: 5 states)
+//       { type: '3b' } (pre-RTO: 4 states, stops at Out-for-delivery)
+//       { type: 'rto_delivered' } (single RTO-Delivered + Cancelled, for after on_cancel RTO)
+const triggerMerchantStatusSequence = async (req, res) => {
+  try {
+    const rawId = req.params.order_id;
+    const order_id = rawId === 'latest' ? lastConfirmedOrderId : rawId;
+    if (!order_id) return res.status(404).json({ error: 'No confirmed order in cache' });
+
+    const cachedEntry = confirmedOrderCache.get(order_id);
+    if (!cachedEntry) return res.status(404).json({ error: 'Order not found in cache' });
+
+    const { order, context } = cachedEntry;
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    const type = req.body?.type || '3a';
+
+    // Define sequences per flow type
+    const sequences = {
+      '3a': [
+        { fulfillmentState: 'Packed',           orderState: 'Accepted' },
+        { fulfillmentState: 'Agent-assigned',    orderState: 'Accepted' },
+        { fulfillmentState: 'Order-picked-up',   orderState: 'Accepted' },
+        { fulfillmentState: 'Out-for-delivery',  orderState: 'Accepted' },
+        { fulfillmentState: 'Order-delivered',   orderState: 'Completed' },
+      ],
+      '3b': [
+        { fulfillmentState: 'Packed',           orderState: 'Accepted' },
+        { fulfillmentState: 'Agent-assigned',   orderState: 'Accepted' },
+        { fulfillmentState: 'Order-picked-up',  orderState: 'Accepted' },
+        { fulfillmentState: 'Out-for-delivery', orderState: 'Accepted' },
+      ],
+      'rto_delivered': [
+        { fulfillmentState: 'RTO-Delivered', orderState: 'Cancelled' },
+      ],
+    };
+
+    const steps = sequences[type];
+    if (!steps) return res.status(400).json({ error: `Unknown type: ${type}. Use 3a, 3b, or rto_delivered` });
+
+    // Respond immediately, send callbacks in background
+    res.json({ success: true, message: `on_status sequence (${type}) started`, steps: steps.length, order_id });
+
+    // Send each state with 2s delay
+    const delay = ms => new Promise(r => setTimeout(r, ms));
+    for (const step of steps) {
+      const payload = buildStatusPayload(order_id, order, step.fulfillmentState, step.orderState);
+      await sendCallback(context.bap_uri, 'on_status', context, { order: payload }, tenant);
+      logger.info('on_status sequence step sent', { order_id, ...step });
+      await delay(2000);
+    }
+    logger.info('on_status sequence complete', { order_id, type });
+  } catch (err) {
+    logger.error('triggerMerchantStatusSequence failed:', err.message);
   }
 };
 
@@ -1008,4 +1062,5 @@ module.exports = {
   triggerMerchantUpdate,
   triggerMerchantCancel,
   triggerMerchantStatus,
+  triggerMerchantStatusSequence,
 };
