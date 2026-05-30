@@ -576,16 +576,55 @@ const handleCancel = async (req, res) => {
 };
 
 // handleUpdate — receives /update from BAP (settlement update, return requests, etc.)
-// Per ONDC Flow 3A: settlement /update should ONLY be ACK'd — no on_update callback
+// Flow 3A (settlement): update_target = 'payment' → ACK only
+// Flow 4A/4B (return):  update_target = 'fulfillment' → ACK + on_update (Return_Initiated)
 const handleUpdate = async (req, res) => {
   try {
-    const body    = req.body;
-    const context = body.context;
-    const order   = body.message?.order || {};
-    logger.info('ONDC /update received (ACK only)', { transaction_id: context?.transaction_id, order_id: order.id });
+    const body          = req.body;
+    const context       = body.context;
+    const order         = body.message?.order || {};
+    const update_target = body.message?.update_target || '';
+    logger.info('ONDC /update received', { transaction_id: context?.transaction_id, order_id: order.id, update_target });
 
-    // Just ACK — do not send on_update back for settlement updates
+    // Always ACK first
     res.json({ message: { ack: { status: 'ACK' } } });
+
+    // For return updates (fulfillment target), send on_update with Return_Initiated
+    if (update_target === 'fulfillment') {
+      try {
+        const tenant = await getTenantByBppId(context?.bpp_id);
+        if (!tenant) return;
+
+        const now = new Date().toISOString();
+        const returnPayload = {
+          id:    order.id,
+          state: 'Completed',
+          provider:  order.provider,
+          items:     order.items,
+          billing:   order.billing,
+          quote:     order.quote,
+          payment:   order.payment,
+          fulfillments: (order.fulfillments || []).map(f => ({
+            ...f,
+            state: { descriptor: { code: 'Return_Initiated' } },
+          })),
+          created_at: order.created_at || now,
+          updated_at: now,
+        };
+
+        await sendCallback(context.bap_uri, 'on_update', context, { order: returnPayload }, tenant);
+        logger.info('on_update (Return_Initiated) sent', { order_id: order.id });
+
+        // Cache the order for subsequent return trigger calls
+        if (order.id) {
+          confirmedOrderCache.set(order.id, { order, context });
+          lastConfirmedOrderId = order.id;
+        }
+      } catch (err) {
+        logger.error('handleUpdate return callback failed:', err.message);
+      }
+    }
+    // For settlement updates (payment target) — ACK only, no callback
   } catch (err) {
     logger.error('handleUpdate failed:', err.message);
   }
@@ -652,6 +691,71 @@ const triggerMerchantUpdate = async (req, res) => {
   } catch (err) {
     logger.error('triggerMerchantUpdate failed:', err.message);
     res.status(500).json({ error: err.message });
+  }
+};
+
+// triggerMerchantReturnUpdate — sends unsolicited on_update for return flow states
+// Flow 4A (seller-approved return): Return_Approved → Return_Picked → Return_Delivered
+// Flow 4B (seller-rejected return): Return_Rejected
+// Body: { state: 'Return_Approved' | 'Return_Picked' | 'Return_Delivered' | 'Return_Rejected' }
+// Or:   { type: '4a' }  → sends full Return_Approved + Return_Picked + Return_Delivered sequence
+// Or:   { type: '4b' }  → sends Return_Rejected
+const triggerMerchantReturnUpdate = async (req, res) => {
+  try {
+    const rawId = req.params.order_id;
+    const order_id = rawId === 'latest' ? lastConfirmedOrderId : rawId;
+    if (!order_id) return res.status(404).json({ error: 'No confirmed order in cache' });
+
+    const cachedEntry = confirmedOrderCache.get(order_id);
+    if (!cachedEntry) return res.status(404).json({ error: 'Order not found in cache' });
+
+    const { order, context } = cachedEntry;
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    const type  = req.body?.type;
+    const state = req.body?.state;
+
+    // Determine the sequence of states to send
+    let steps;
+    if (type === '4a') {
+      steps = ['Return_Approved', 'Return_Picked', 'Return_Delivered'];
+    } else if (type === '4b') {
+      steps = ['Return_Rejected'];
+    } else if (state) {
+      steps = [state];
+    } else {
+      return res.status(400).json({ error: 'Provide type (4a/4b) or state in body' });
+    }
+
+    // Respond immediately, send callbacks in background
+    res.json({ success: true, message: `on_update return sequence started`, steps, order_id });
+
+    const delay = ms => new Promise(r => setTimeout(r, ms));
+    for (const returnState of steps) {
+      const now = new Date().toISOString();
+      const returnPayload = {
+        id:    order_id,
+        state: 'Completed',
+        provider:  order.provider,
+        items:     order.items,
+        billing:   order.billing,
+        quote:     order.quote,
+        payment:   order.payment,
+        fulfillments: (order.fulfillments || []).map(f => ({
+          ...f,
+          state: { descriptor: { code: returnState } },
+        })),
+        created_at: order.created_at || now,
+        updated_at: now,
+      };
+      await sendCallback(context.bap_uri, 'on_update', context, { order: returnPayload }, tenant);
+      logger.info('on_update (return state) sent', { order_id, returnState });
+      await delay(2000);
+    }
+    logger.info('on_update return sequence complete', { order_id, steps });
+  } catch (err) {
+    logger.error('triggerMerchantReturnUpdate failed:', err.message);
   }
 };
 
@@ -788,19 +892,20 @@ const triggerMerchantStatusSequence = async (req, res) => {
     const type = req.body?.type || '3a';
 
     // Define sequences per flow type
+    // Per Pramaan PDF: order state must be "In-progress" for transit states, "Completed" for delivered
     const sequences = {
       '3a': [
-        { fulfillmentState: 'Packed',           orderState: 'Accepted' },
-        { fulfillmentState: 'Agent-assigned',    orderState: 'Accepted' },
-        { fulfillmentState: 'Order-picked-up',   orderState: 'Accepted' },
-        { fulfillmentState: 'Out-for-delivery',  orderState: 'Accepted' },
+        { fulfillmentState: 'Packed',           orderState: 'In-progress' },
+        { fulfillmentState: 'Agent-assigned',    orderState: 'In-progress' },
+        { fulfillmentState: 'Order-picked-up',   orderState: 'In-progress' },
+        { fulfillmentState: 'Out-for-delivery',  orderState: 'In-progress' },
         { fulfillmentState: 'Order-delivered',   orderState: 'Completed' },
       ],
       '3b': [
-        { fulfillmentState: 'Packed',           orderState: 'Accepted' },
-        { fulfillmentState: 'Agent-assigned',   orderState: 'Accepted' },
-        { fulfillmentState: 'Order-picked-up',  orderState: 'Accepted' },
-        { fulfillmentState: 'Out-for-delivery', orderState: 'Accepted' },
+        { fulfillmentState: 'Packed',           orderState: 'In-progress' },
+        { fulfillmentState: 'Agent-assigned',   orderState: 'In-progress' },
+        { fulfillmentState: 'Order-picked-up',  orderState: 'In-progress' },
+        { fulfillmentState: 'Out-for-delivery', orderState: 'In-progress' },
       ],
       'rto_delivered': [
         { fulfillmentState: 'RTO-Delivered', orderState: 'Cancelled' },
@@ -1060,6 +1165,7 @@ module.exports = {
   handleIssueStatus,
   handleACK,
   triggerMerchantUpdate,
+  triggerMerchantReturnUpdate,
   triggerMerchantCancel,
   triggerMerchantStatus,
   triggerMerchantStatusSequence,
