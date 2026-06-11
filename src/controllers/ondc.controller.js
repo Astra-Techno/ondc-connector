@@ -46,7 +46,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
     for (const vendor of vendors) {
       const [products] = await pool.query(
         `SELECT * FROM products
-         WHERE tenant_id = ? AND vendor_id = ? AND is_active = 1 AND stock > 0
+         WHERE tenant_id = ? AND vendor_id = ? AND is_active = 1
          LIMIT 100`,
         [tenantId, vendor.id]
       );
@@ -70,8 +70,8 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         },
         quantity: {
           unitized: { measure: { unit: p.unit || 'unit', value: '1' } },
-          available: { count: (p.stock > 0) ? '99' : '0' },
-          maximum:   { count: '99' },
+          available: { count: String(Math.max(p.stock || 0, 0)) },
+          maximum:   { count: String(Math.max(p.stock || 0, 0)) },
         },
         category_id:    'Grocery',
         fulfillment_id: 'f1',
