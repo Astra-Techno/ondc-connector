@@ -295,8 +295,9 @@ const handleSelect = async (req, res) => {
     const fulfillments = order.fulfillments || [];
 
     try {
-      const quote = await buildQuote(items, tenant.id);
-      await sendCallback(context.bap_uri, 'on_select', context, {
+      const { quote, outOfStockItems } = await buildQuote(items, tenant.id);
+
+      const payload = {
         order: {
           provider: order.provider,
           items,
@@ -307,7 +308,19 @@ const handleSelect = async (req, res) => {
             tracking: false,
           })),
         },
-      }, tenant);
+      };
+
+      // Add error for out-of-stock items (ONDC error code 40002)
+      if (outOfStockItems.length > 0) {
+        payload.error = {
+          type: 'DOMAIN-ERROR',
+          code: '40002',
+          message: `Items out of stock: ${outOfStockItems.join(', ')}`,
+        };
+        logger.warn('Out of stock items in /select', { outOfStockItems });
+      }
+
+      await sendCallback(context.bap_uri, 'on_select', context, payload, tenant);
     } catch (err) {
       logger.error('handleSelect processing failed:', err.message);
     }
@@ -331,7 +344,7 @@ const handleInit = async (req, res) => {
     const items = order.items         || [];
 
     try {
-      const quote    = await buildQuote(items, tenant.id);
+      const { quote } = await buildQuote(items, tenant.id);
       const orderObj = buildOrderObject(context, body.message, 'Created', quote, tenant);
 
       await sendCallback(context.bap_uri, 'on_init', context, {
@@ -393,7 +406,7 @@ const handleConfirm = async (req, res) => {
       }
 
       // 3. Send on_confirm
-      const quote    = await buildQuote(order.items || [], tenant.id).catch(() => order.quote);
+      const quote    = await buildQuote(order.items || [], tenant.id).then(r => r.quote).catch(() => order.quote);
       const orderObj = buildOrderObject(context, body.message, 'Created', quote, tenant);
 
       await sendCallback(context.bap_uri, 'on_confirm', context, {

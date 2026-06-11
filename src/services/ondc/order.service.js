@@ -7,11 +7,12 @@ const { createAuthHeader } = require('../../utils/crypto');
 const DELIVERY_CHARGE = 30;
 
 // Build ONDC quote from selected items
+// Returns { quote, outOfStockItems } — outOfStockItems is an array of item IDs with insufficient stock
 const buildQuote = async (items, tenantId) => {
   const productIds = items.map(item => item.id);
 
   const [products] = await pool.query(
-    `SELECT external_product_id, name, price FROM products
+    `SELECT external_product_id, name, price, stock FROM products
      WHERE tenant_id = ? AND external_product_id IN (?)`,
     [tenantId, productIds]
   );
@@ -21,11 +22,15 @@ const buildQuote = async (items, tenantId) => {
 
   let itemTotal = 0;
   const breakup = [];
+  const outOfStockItems = [];
 
   for (const item of items) {
     const product = productMap[item.id];
-    if (!product) continue;
     const qty = item.quantity?.count || 1;
+    if (!product || product.stock < qty) {
+      outOfStockItems.push(item.id);
+      continue;
+    }
     const price = parseFloat(product.price);
     const lineTotal = price * qty;
     itemTotal += lineTotal;
@@ -45,7 +50,10 @@ const buildQuote = async (items, tenantId) => {
   });
 
   const total = (itemTotal + DELIVERY_CHARGE).toFixed(2);
-  return { price: { currency: 'INR', value: total }, breakup, ttl: 'P1D' };
+  return {
+    quote: { price: { currency: 'INR', value: total }, breakup, ttl: 'P1D' },
+    outOfStockItems,
+  };
 };
 
 // Build a full ONDC order object
