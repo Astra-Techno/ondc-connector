@@ -16,6 +16,10 @@ const cottKartOrder = require('../services/cloudkart/order.service');
 const confirmedOrderCache = new Map();
 let lastConfirmedOrderId = null; // track most recent for /latest shortcut
 
+// In-memory cache: issue_id → { issue, context } (for proactive on_issue_status)
+const issueCache = new Map();
+let lastIssueId = null;
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 // Get all active tenants (used only by /search which is broadcast)
@@ -1086,6 +1090,11 @@ const handleIssue = async (req, res) => {
       logger.warn('Issue save failed:', e.message);
     }
 
+    // Cache for proactive on_issue_status trigger
+    issueCache.set(issueId, { issue, context, tenant });
+    lastIssueId = issueId;
+    logger.info('Cached issue', { issue_id: issueId });
+
     await sendCallback(context.bap_uri, 'on_issue', context, {
       issue: {
         id: issueId,
@@ -1157,6 +1166,74 @@ const handleIssueStatus = async (req, res) => {
   }
 };
 
+// triggerIssueResolve — sends proactive on_issue_status with RESOLVED
+// Body: { action: 'REFUND' | 'REPLACEMENT' | 'CANCEL' | 'NO_ACTION', short_desc?: string }
+const triggerIssueResolve = async (req, res) => {
+  try {
+    const rawId = req.params.issue_id;
+    const issue_id = rawId === 'latest' ? lastIssueId : rawId;
+    if (!issue_id) return res.status(404).json({ error: 'No issue in cache' });
+
+    const cached = issueCache.get(issue_id);
+    if (!cached) return res.status(404).json({ error: 'Issue not found in cache' });
+
+    const { context, tenant } = cached;
+    const action    = req.body?.action || 'REFUND';
+    const shortDesc = req.body?.short_desc || `Issue resolved with ${action.toLowerCase()}`;
+
+    const now = new Date().toISOString();
+
+    await sendCallback(context.bap_uri, 'on_issue_status', context, {
+      issue: {
+        id: issue_id,
+        issue_actions: {
+          respondent_actions: [
+            {
+              respondent_action: 'PROCESSING',
+              short_desc:        'Issue received and being processed',
+              updated_at:        now,
+              updated_by: {
+                org:     { name: tenant.subscriber_id },
+                contact: {
+                  phone: process.env.SUPPORT_PHONE || '',
+                  email: process.env.SUPPORT_EMAIL || '',
+                },
+              },
+            },
+            {
+              respondent_action: 'RESOLVED',
+              short_desc:        shortDesc,
+              updated_at:        now,
+              updated_by: {
+                org:     { name: tenant.subscriber_id },
+                contact: {
+                  phone: process.env.SUPPORT_PHONE || '',
+                  email: process.env.SUPPORT_EMAIL || '',
+                },
+              },
+            },
+          ],
+        },
+        resolution: {
+          short_desc:    shortDesc,
+          long_desc:     shortDesc,
+          action_triggered: action,
+          refund_amount: '0.00',
+        },
+        created_at: now,
+        updated_at: now,
+        status:     'RESOLVED',
+      },
+    }, tenant);
+
+    logger.info('Proactive on_issue_status (RESOLVED) sent', { issue_id, action });
+    res.json({ success: true, message: `on_issue_status RESOLVED sent`, issue_id, action });
+  } catch (err) {
+    logger.error('triggerIssueResolve failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 // Generic ACK for ONDC callbacks we receive (on_*)
 const handleACK = (action) => async (req, res) => {
   logger.info(`ONDC /${action} received`);
@@ -1177,6 +1254,7 @@ module.exports = {
   handleIssue,
   handleIssueStatus,
   handleACK,
+  triggerIssueResolve,
   triggerMerchantUpdate,
   triggerMerchantReturnUpdate,
   triggerMerchantCancel,
