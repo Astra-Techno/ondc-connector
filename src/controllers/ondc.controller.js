@@ -1063,6 +1063,13 @@ const handleIssue = async (req, res) => {
     if (!tenant) return;
 
     const issueId = issue.id || uuidv4();
+    const issueStatus = issue.status;
+
+    // If issue status is CLOSED, just ACK — no on_issue callback (per PDF §11.12)
+    if (issueStatus === 'CLOSED') {
+      logger.info('Issue CLOSED received — ACK only', { issue_id: issueId });
+      return;
+    }
 
     try {
       await pool.query(`
@@ -1076,47 +1083,124 @@ const handleIssue = async (req, res) => {
         tenant.id,
         context.transaction_id,
         issueId,
-        issue.order_details?.id,
+        issue.order_details?.id || issue.refs?.[0]?.ref_id,
         issue.issue_type  || 'FULFILLMENT',
-        issue.category,
+        issue.category || issue.descriptor?.code,
         issue.sub_category,
-        issue.description,
-        issue.complainant_info?.person?.name,
-        issue.complainant_info?.contact?.phone,
-        issue.complainant_info?.contact?.email,
+        issue.description || issue.descriptor?.short_desc,
+        issue.complainant_info?.person?.name || issue.actors?.[0]?.info?.person?.name,
+        issue.complainant_info?.contact?.phone || issue.actors?.[0]?.info?.contact?.phone,
+        issue.complainant_info?.contact?.email || issue.actors?.[0]?.info?.contact?.email,
         JSON.stringify(body),
       ]);
     } catch (e) {
       logger.warn('Issue save failed:', e.message);
     }
 
-    // Cache for proactive on_issue_status trigger
-    issueCache.set(issueId, { issue, context, tenant });
-    lastIssueId = issueId;
-    logger.info('Cached issue', { issue_id: issueId });
+    // Check if this is a subsequent /issue call (info shared or resolution selected)
+    const cached = issueCache.get(issueId);
+    const stage  = cached?.stage || 0;
+    const now    = new Date().toISOString();
+    const updatedBy = {
+      org:     { name: tenant.subscriber_id },
+      contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+      person:  { name: 'Support Desk' },
+    };
 
-    await sendCallback(context.bap_uri, 'on_issue', context, {
-      issue: {
-        id: issueId,
-        issue_actions: {
-          respondent_actions: [{
-            respondent_action: 'PROCESSING',
-            short_desc:        'Issue received and being processed',
-            updated_at:        new Date().toISOString(),
-            updated_by: {
-              org:     { name: tenant.subscriber_id },
-              contact: {
-                phone: process.env.SUPPORT_PHONE || '',
-                email: process.env.SUPPORT_EMAIL || '',
-              },
-            },
-          }],
+    if (stage === 0) {
+      // First /issue — send PROCESSING, then auto-send NEED-MORE-INFO after 2s
+      issueCache.set(issueId, { issue, context, tenant, stage: 1 });
+      lastIssueId = issueId;
+      logger.info('Cached issue (stage 0→1)', { issue_id: issueId });
+
+      await sendCallback(context.bap_uri, 'on_issue', context, {
+        issue: {
+          id: issueId,
+          issue_actions: {
+            respondent_actions: [{
+              respondent_action: 'PROCESSING',
+              short_desc:        'Issue received and being processed',
+              updated_at:        now,
+              updated_by:        updatedBy,
+            }],
+          },
+          created_at: now, updated_at: now, status: 'OPEN',
         },
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        status:     'OPEN',
-      },
-    }, tenant);
+      }, tenant);
+
+      // Auto-send NEED-MORE-INFO after 2s (triggers "Share Information" button in Pramaan)
+      setTimeout(async () => {
+        try {
+          await sendCallback(context.bap_uri, 'on_issue', context, {
+            issue: {
+              id: issueId,
+              issue_actions: {
+                respondent_actions: [{
+                  respondent_action: 'PROCESSING',
+                  short_desc:        'Issue received and being processed',
+                  updated_at:        now,
+                  updated_by:        updatedBy,
+                }, {
+                  respondent_action: 'NEED-MORE-INFO',
+                  short_desc:        'Please share additional details about the issue',
+                  updated_at:        new Date().toISOString(),
+                  updated_by:        updatedBy,
+                }],
+              },
+              created_at: now, updated_at: new Date().toISOString(), status: 'OPEN',
+            },
+          }, tenant);
+          logger.info('on_issue (NEED-MORE-INFO) sent', { issue_id: issueId });
+        } catch (err) {
+          logger.error('on_issue NEED-MORE-INFO failed:', err.message);
+        }
+      }, 2000);
+
+    } else if (stage === 1) {
+      // Second /issue — buyer shared info → send on_issue with resolution options
+      issueCache.set(issueId, { ...cached, stage: 2 });
+      logger.info('Issue info received (stage 1→2), sending resolution options', { issue_id: issueId });
+
+      const resolutionAction = issueCache.get(issueId)?.resolveAction || 'REFUND';
+      await sendCallback(context.bap_uri, 'on_issue', context, {
+        issue: {
+          id: issueId,
+          issue_actions: {
+            respondent_actions: [{
+              respondent_action: 'PROCESSING',
+              short_desc:        'Issue received and being processed',
+              updated_at:        now,
+              updated_by:        updatedBy,
+            }, {
+              respondent_action: 'NEED-MORE-INFO',
+              short_desc:        'Please share additional details',
+              updated_at:        now,
+              updated_by:        updatedBy,
+            }, {
+              respondent_action: 'RESOLVED',
+              short_desc:        `Issue resolved with ${resolutionAction.toLowerCase()}`,
+              updated_at:        now,
+              updated_by:        updatedBy,
+            }],
+          },
+          resolution: {
+            short_desc:        `${resolutionAction} - Issue resolved`,
+            long_desc:         `Issue has been resolved with ${resolutionAction.toLowerCase()}`,
+            action_triggered:  resolutionAction,
+            refund_amount:     '0.00',
+          },
+          resolution_provider: {
+            respondent_info: updatedBy,
+          },
+          created_at: now, updated_at: now, status: 'RESOLVED',
+        },
+      }, tenant);
+      logger.info('on_issue (resolution options) sent', { issue_id: issueId });
+
+    } else {
+      // Stage 2+ — buyer selected resolution, just ACK (already sent above)
+      logger.info('Issue resolution selected — ACK only', { issue_id: issueId, stage });
+    }
   } catch (err) {
     logger.error('handleIssue failed:', err.message);
   }
@@ -1180,6 +1264,9 @@ const triggerIssueResolve = async (req, res) => {
     const { context, tenant } = cached;
     const action    = req.body?.action || 'REFUND';
     const shortDesc = req.body?.short_desc || `Issue resolved with ${action.toLowerCase()}`;
+
+    // Pre-set resolve action in cache for on_issue resolution options
+    issueCache.set(issue_id, { ...cached, resolveAction: action });
 
     const now = new Date().toISOString();
 
