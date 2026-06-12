@@ -1128,9 +1128,11 @@ const handleIssue = async (req, res) => {
         },
       }, tenant);
 
-      // Auto-send NEED-MORE-INFO after 2s (triggers "Share Information" button in Pramaan)
-      setTimeout(async () => {
+      // Auto-chain: NEED-MORE-INFO (2s) → Resolution Options (5s)
+      const autoChain = async () => {
         try {
+          // Step 2: NEED-MORE-INFO
+          await new Promise(r => setTimeout(r, 2000));
           await sendCallback(context.bap_uri, 'on_issue', context, {
             issue: {
               id: issueId,
@@ -1151,10 +1153,50 @@ const handleIssue = async (req, res) => {
             },
           }, tenant);
           logger.info('on_issue (NEED-MORE-INFO) sent', { issue_id: issueId });
+
+          // Step 3: Resolution Options (after 3s more)
+          await new Promise(r => setTimeout(r, 3000));
+          const resAction = issueCache.get(issueId)?.resolveAction || 'REFUND';
+          await sendCallback(context.bap_uri, 'on_issue', context, {
+            issue: {
+              id: issueId,
+              issue_actions: {
+                respondent_actions: [{
+                  respondent_action: 'PROCESSING',
+                  short_desc:        'Issue received and being processed',
+                  updated_at:        now,
+                  updated_by:        updatedBy,
+                }, {
+                  respondent_action: 'NEED-MORE-INFO',
+                  short_desc:        'Please share additional details',
+                  updated_at:        now,
+                  updated_by:        updatedBy,
+                }, {
+                  respondent_action: 'RESOLVED',
+                  short_desc:        `${resAction} - Issue resolved with ${resAction.toLowerCase()}`,
+                  updated_at:        new Date().toISOString(),
+                  updated_by:        updatedBy,
+                }],
+              },
+              resolution: {
+                short_desc:        `${resAction} - Issue resolved`,
+                long_desc:         `Issue has been resolved with ${resAction.toLowerCase()}`,
+                action_triggered:  resAction,
+                refund_amount:     '0.00',
+              },
+              resolution_provider: {
+                respondent_info: updatedBy,
+              },
+              created_at: now, updated_at: new Date().toISOString(), status: 'RESOLVED',
+            },
+          }, tenant);
+          issueCache.set(issueId, { ...issueCache.get(issueId), stage: 2 });
+          logger.info('on_issue (resolution options) auto-sent', { issue_id: issueId, resAction });
         } catch (err) {
-          logger.error('on_issue NEED-MORE-INFO failed:', err.message);
+          logger.error('on_issue auto-chain failed:', err.message);
         }
-      }, 2000);
+      };
+      autoChain();
 
     } else if (stage === 1) {
       // Second /issue — buyer shared info → send on_issue with resolution options
