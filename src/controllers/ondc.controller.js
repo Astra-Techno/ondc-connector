@@ -339,14 +339,31 @@ const handleSelect = async (req, res) => {
     try {
       const { quote, outOfStockItems } = await buildQuote(items, tenant.id);
 
+      // Fetch provider name for fulfillment @ondc/org/provider_name
+      let providerName = '';
+      try {
+        const providerId = order.provider?.id;
+        if (providerId) {
+          const [vRows] = await pool.query(
+            `SELECT business_name FROM vendors WHERE tenant_id = ? AND (external_vendor_id = ? OR id = ?) LIMIT 1`,
+            [tenant.id, String(providerId), providerId]
+          );
+          providerName = vRows[0]?.business_name || '';
+        }
+      } catch (_) {}
+
       const payload = {
         order: {
           provider: order.provider,
-          items,
+          items: items.map(i => ({ ...i, fulfillment_id: i.fulfillment_id || 'f1' })),
           quote,
-          fulfillments: fulfillments.map(f => ({
+          fulfillments: (fulfillments.length > 0 ? fulfillments : [{ id: 'f1', type: 'Delivery' }]).map(f => ({
             ...f,
+            type: f.type || 'Delivery',
+            state: f.state || { descriptor: { code: 'Serviceable' } },
             '@ondc/org/TAT': 'PT24H',
+            '@ondc/org/category': f['@ondc/org/category'] || 'Grocery',
+            '@ondc/org/provider_name': f['@ondc/org/provider_name'] || providerName,
             tracking: false,
           })),
         },
