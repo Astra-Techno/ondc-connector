@@ -60,7 +60,11 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
       const now = new Date().toISOString();
       const defaultImg = 'https://ondc.cottkart.com/assets/placeholder.png';
       const itemImages = (p) => {
-        if (p.images) { const arr = JSON.parse(p.images); return arr.length ? arr : [defaultImg]; }
+        if (p.images) {
+          const raw = JSON.parse(p.images);
+          const arr = raw.map(i => typeof i === 'string' ? i : (i.url || defaultImg));
+          return arr.length ? arr : [defaultImg];
+        }
         if (p.image_url) return [p.image_url];
         return [defaultImg];
       };
