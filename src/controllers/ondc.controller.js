@@ -57,15 +57,24 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
 
       if (!products.length) continue;
 
+      const now = new Date().toISOString();
+      const defaultImg = 'https://ondc.cottkart.com/assets/placeholder.png';
+      const itemImages = (p) => {
+        if (p.images) { const arr = JSON.parse(p.images).map(url => ({ url })); return arr.length ? arr : [{ url: defaultImg }]; }
+        if (p.image_url) return [{ url: p.image_url }];
+        return [{ url: defaultImg }];
+      };
+
       const items = products.map(p => ({
         id: p.external_product_id,
+        time: { label: 'enable', timestamp: now },
         descriptor: {
           name:       p.name,
+          symbol:     itemImages(p)[0].url,
           code:       `5:${p.external_product_id}`,
           short_desc: p.short_description || p.name,
           long_desc:  p.description       || p.name,
-          images:     p.images ? JSON.parse(p.images).map(url => ({ url }))
-                               : p.image_url ? [{ url: p.image_url }] : [],
+          images:     itemImages(p),
         },
         price: {
           currency:      p.currency || 'INR',
@@ -100,12 +109,23 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         ],
       }));
 
+      // Ensure GPS has 6+ decimal places
+      const rawGps = vendor.gps || '13.0827,80.2707';
+      const gps6 = rawGps.split(',').map(c => {
+        const parts = c.trim().split('.');
+        return parts[0] + '.' + (parts[1] || '0').padEnd(6, '0');
+      }).join(',');
+      const providerImg = vendor.logo_url || defaultImg;
+
       providers.push({
         id: vendor.external_vendor_id || String(vendor.id),
+        time: { label: 'enable', timestamp: now },
         descriptor: {
           name:       vendor.business_name,
+          symbol:     providerImg,
           short_desc: vendor.business_name,
-          images:     vendor.logo_url ? [{ url: vendor.logo_url }] : [],
+          long_desc:  vendor.description || vendor.business_name,
+          images:     [{ url: providerImg }],
         },
         ttl: 'P1D',
         '@ondc/org/fssai_license_no': vendor.fssai_number || '',
@@ -114,9 +134,10 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         ],
         locations: [{
           id:  'l1',
-          gps: vendor.gps || '13.0827,80.2707',
+          gps: gps6,
           address: {
-            locality:  vendor.address || vendor.city,
+            locality:  vendor.address || vendor.city || 'Main Road',
+            street:    vendor.street || vendor.address || 'Main Road',
             city:      vendor.city    || 'Chennai',
             state:     vendor.state   || 'Tamil Nadu',
             country:   'IND',
@@ -124,13 +145,13 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           },
           time: {
             label:     'enable',
-            timestamp: new Date().toISOString(),
+            timestamp: now,
             days:      '1,2,3,4,5,6,7',
-            schedule:  { holidays: [] },
+            schedule:  { holidays: ['2026-01-26', '2026-08-15'] },
             range:     { start: '0900', end: '2100' },
           },
           circle: {
-            gps:    vendor.gps || '13.0827,80.2707',
+            gps:    gps6,
             radius: { unit: 'km', value: '10' },
           },
         }],
@@ -172,9 +193,10 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
       ? {
           'bpp/descriptor': {
             name:       ondcConfig?.subscriber_id || 'ONDC Connector',
+            symbol:     'https://ondc.cottkart.com/assets/logo.png',
             short_desc: 'ONDC Seller Platform',
             long_desc:  'Multi-vendor ONDC Seller Platform powered by CottKart',
-            images:     [],
+            images:     [{ url: 'https://ondc.cottkart.com/assets/logo.png' }],
             tags: [{
               code: 'bpp_terms',
               list: [
