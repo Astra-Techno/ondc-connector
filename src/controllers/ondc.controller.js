@@ -72,16 +72,18 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         return [defaultImg];
       };
 
-      const items = products.map(p => ({
+      const items = products.map(p => {
+        const imgs = itemImages(p);
+        return {
         id: p.external_product_id,
         time: { label: 'enable', timestamp: now },
         descriptor: {
           name:       p.name,
-          symbol:     itemImages(p)[0],
+          symbol:     imgs[0] || defaultImg,
           code:       `5:${p.external_product_id}`,
           short_desc: p.short_description || p.name,
           long_desc:  p.description       || p.name,
-          images:     itemImages(p),
+          images:     imgs,
         },
         price: {
           currency:      p.currency || 'INR',
@@ -114,7 +116,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         tags: [
           { code: 'origin', list: [{ code: 'country', value: 'IND' }] },
         ],
-      }));
+      };});
 
       // Ensure GPS has 6+ decimal places
       const rawGps = vendor.gps || '13.0827,80.2707';
