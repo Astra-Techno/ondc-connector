@@ -60,9 +60,9 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
       const now = new Date().toISOString();
       const defaultImg = 'https://ondc.cottkart.com/assets/placeholder.png';
       const itemImages = (p) => {
-        if (p.images) { const arr = JSON.parse(p.images).map(url => ({ url })); return arr.length ? arr : [{ url: defaultImg }]; }
-        if (p.image_url) return [{ url: p.image_url }];
-        return [{ url: defaultImg }];
+        if (p.images) { const arr = JSON.parse(p.images); return arr.length ? arr : [defaultImg]; }
+        if (p.image_url) return [p.image_url];
+        return [defaultImg];
       };
 
       const items = products.map(p => ({
@@ -125,7 +125,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           symbol:     providerImg,
           short_desc: vendor.business_name,
           long_desc:  vendor.description || vendor.business_name,
-          images:     [{ url: providerImg }],
+          images:     [providerImg],
         },
         ttl: 'P1D',
         '@ondc/org/fssai_license_no': vendor.fssai_number || '',
@@ -196,7 +196,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
             symbol:     'https://ondc.cottkart.com/assets/logo.png',
             short_desc: 'ONDC Seller Platform',
             long_desc:  'Multi-vendor ONDC Seller Platform powered by CottKart',
-            images:     [{ url: 'https://ondc.cottkart.com/assets/logo.png' }],
+            images:     ['https://ondc.cottkart.com/assets/logo.png'],
             tags: [{
               code: 'bpp_terms',
               list: [
