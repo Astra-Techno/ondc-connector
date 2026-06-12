@@ -70,7 +70,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         time: { label: 'enable', timestamp: now },
         descriptor: {
           name:       p.name,
-          symbol:     itemImages(p)[0].url,
+          symbol:     itemImages(p)[0],
           code:       `5:${p.external_product_id}`,
           short_desc: p.short_description || p.name,
           long_desc:  p.description       || p.name,
