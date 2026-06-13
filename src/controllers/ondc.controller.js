@@ -359,6 +359,7 @@ const handleSelect = async (req, res) => {
           quote,
           fulfillments: (fulfillments.length > 0 ? fulfillments : [{ id: 'f1', type: 'Delivery' }]).map(f => ({
             ...f,
+            id: f.id || 'f1',
             type: f.type || 'Delivery',
             state: f.state || { descriptor: { code: 'Serviceable' } },
             '@ondc/org/TAT': 'PT24H',
