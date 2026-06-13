@@ -35,16 +35,24 @@ const buildQuote = async (items, tenantId) => {
     const lineTotal = price * qty;
     itemTotal += lineTotal;
     breakup.push({
-      title: `${product.name} x${qty}`,
-      '@ondc/org/item_id': item.id,
-      '@ondc/org/item_quantity': { count: qty },
+      title: product.name,
+      '@ondc/org/item_id': String(item.id),
+      '@ondc/org/item_quantity': { count: String(qty) },
       '@ondc/org/title_type': 'item',
       price: { currency: 'INR', value: lineTotal.toFixed(2) },
+      item: {
+        quantity: {
+          available: { count: String(product.stock || qty) },
+          maximum:   { count: String(product.stock || qty) },
+        },
+        price: { currency: 'INR', value: price.toFixed(2) },
+      },
     });
   }
 
   breakup.push({
     title: 'Delivery charges',
+    '@ondc/org/item_id': 'f1',
     '@ondc/org/title_type': 'delivery',
     price: { currency: 'INR', value: String(DELIVERY_CHARGE) },
   });
