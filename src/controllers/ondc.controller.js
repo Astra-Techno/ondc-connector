@@ -23,15 +23,46 @@ let lastIssueId = null;
 // ─── constants ───────────────────────────────────────────────────────────────
 
 const CANCELLATION_TERMS = [
-  { fulfillment_state: { descriptor: { code: 'Pending'         } }, cancellation_fee: { percentage: '0'   } },
-  { fulfillment_state: { descriptor: { code: 'Order-picked-up' } }, cancellation_fee: { percentage: '100' } },
+  {
+    fulfillment_state: { descriptor: { code: 'Pending',         short_desc: 'Pending'         } },
+    refund_eligible:   true,
+    reason_required:   false,
+    cancellation_fee:  { percentage: '0',   amount: { currency: 'INR', value: '0.00'    } },
+  },
+  {
+    fulfillment_state: { descriptor: { code: 'Order-picked-up', short_desc: 'Order-picked-up' } },
+    refund_eligible:   false,
+    reason_required:   true,
+    cancellation_fee:  { percentage: '100', amount: { currency: 'INR', value: '0.00'    } },
+  },
 ];
+
+const ORDER_TAGS = [{
+  code: 'bpp_terms',
+  list: [
+    { code: 'max_liability',           value: '2'        },
+    { code: 'max_liability_cap',       value: '10000.00' },
+    { code: 'mandatory_arbitration',   value: 'false'    },
+    { code: 'court_jurisdiction',      value: 'Bengaluru'},
+    { code: 'delay_interest',          value: '1000.00'  },
+    { code: 'buyer_finder_fee_type',   value: 'percent'  },
+    { code: 'buyer_finder_fee_amount', value: '3.00'     },
+  ],
+}];
 
 const SETTLEMENT_DETAILS = [{
   settlement_counterparty: 'buyer-app',
   settlement_phase:        'sale-amount',
   settlement_type:         'upi',
 }];
+
+// Normalize GPS to at least 6 decimal places
+const normalizeGps = (gps) => {
+  if (!gps) return '12.914082,77.638980';
+  const [lat, lng] = gps.split(',').map(Number);
+  if (isNaN(lat) || isNaN(lng)) return '12.914082,77.638980';
+  return `${lat.toFixed(6)},${lng.toFixed(6)}`;
+};
 
 // Build a fulfillment object with all required ONDC fields (start/end location, provider_name, etc.)
 const buildFulfillmentWithLocation = (f, vendor, stateCode, now) => {
@@ -40,7 +71,7 @@ const buildFulfillmentWithLocation = (f, vendor, stateCode, now) => {
   const t24h = new Date(new Date(now).getTime() + 24 * 3600 * 1000).toISOString();
   const t48h = new Date(new Date(now).getTime() + 48 * 3600 * 1000).toISOString();
   const phone = (vendor?.phone || '9999999999').replace(/^\+91/, '');
-  const gps   = vendor?.gps || '12.914082,77.638980';
+  const gps   = normalizeGps(vendor?.gps);
 
   return {
     ...f,
@@ -483,14 +514,8 @@ const handleInit = async (req, res) => {
             type:   'ON-ORDER',
             status: 'NOT-PAID',
           },
-          cancellation_terms: [{
-            fulfillment_state: { descriptor: { code: 'Pending' } },
-            cancellation_fee:  { percentage: '0' },
-          }, {
-            fulfillment_state: { descriptor: { code: 'Order-picked-up' } },
-            cancellation_fee:  { percentage: '100' },
-          }],
-          tags: [],
+          cancellation_terms: CANCELLATION_TERMS,
+          tags: ORDER_TAGS,
         },
       }, tenant);
     } catch (err) {
@@ -569,7 +594,7 @@ const handleConfirm = async (req, res) => {
             '@ondc/org/settlement_details': SETTLEMENT_DETAILS,
           },
           cancellation_terms: CANCELLATION_TERMS,
-          tags:       [],
+          tags:       ORDER_TAGS,
           created_at: order.created_at || now,
           updated_at: order.updated_at || now,
         },
@@ -647,9 +672,9 @@ const handleStatus = async (req, res) => {
           ...(cachedOrder?.payment || {}),
           '@ondc/org/settlement_details': SETTLEMENT_DETAILS,
         },
-        tags:       [],
+        tags:       ORDER_TAGS,
         created_at: cachedOrder?.created_at || now,
-        updated_at: now,
+        updated_at: cachedOrder?.updated_at || now,
       };
 
       await sendCallback(context.bap_uri, 'on_status', context, {
@@ -1035,9 +1060,9 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
       ...order.payment,
       '@ondc/org/settlement_details': SETTLEMENT_DETAILS,
     },
-    tags:       [],
+    tags:       ORDER_TAGS,
     created_at: order.created_at || now,
-    updated_at: now,
+    updated_at: order.updated_at || now,
   };
 };
 
@@ -1149,7 +1174,7 @@ const handleTrack = async (req, res) => {
             updated_at: trackNow,
             time:       { timestamp: trackNow },
           },
-          tags: [],
+          tags: ORDER_TAGS,
         },
       }, tenant);
     } catch (err) {
