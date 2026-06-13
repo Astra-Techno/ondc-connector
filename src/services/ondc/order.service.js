@@ -37,7 +37,7 @@ const buildQuote = async (items, tenantId) => {
     breakup.push({
       title: product.name,
       '@ondc/org/item_id': String(item.id),
-      '@ondc/org/item_quantity': { count: String(qty) },
+      '@ondc/org/item_quantity': { count: qty },
       '@ondc/org/title_type': 'item',
       price: { currency: 'INR', value: lineTotal.toFixed(2) },
       item: {

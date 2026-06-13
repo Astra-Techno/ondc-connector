@@ -410,12 +410,22 @@ const handleInit = async (req, res) => {
       await sendCallback(context.bap_uri, 'on_init', context, {
         order: {
           ...orderObj,
+          fulfillments: (orderObj.fulfillments || []).map(f => ({ ...f, tracking: false })),
           payment: {
             ...order.payment,
             '@ondc/org/buyer_app_finder_fee_type':   'percent',
             '@ondc/org/buyer_app_finder_fee_amount': '3',
-            type: 'ON-ORDER',
+            type:   'ON-ORDER',
+            status: 'NOT-PAID',
           },
+          cancellation_terms: [{
+            fulfillment_state: { descriptor: { code: 'Pending' } },
+            cancellation_fee:  { percentage: '0' },
+          }, {
+            fulfillment_state: { descriptor: { code: 'Order-picked-up' } },
+            cancellation_fee:  { percentage: '100' },
+          }],
+          tags: [],
         },
       }, tenant);
     } catch (err) {
