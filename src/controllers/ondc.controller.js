@@ -45,8 +45,8 @@ const ORDER_TAGS = [{
     { code: 'mandatory_arbitration',   value: 'false'    },
     { code: 'court_jurisdiction',      value: 'Bengaluru'},
     { code: 'delay_interest',          value: '1000.00'  },
-    { code: 'buyer_finder_fee_type',   value: 'percent'  },
-    { code: 'buyer_finder_fee_amount', value: '3.00'     },
+    { code: 'np_type',                 value: 'MSN'      },
+    { code: 'accept_bap_terms',        value: 'Y'        },
   ],
 }];
 
