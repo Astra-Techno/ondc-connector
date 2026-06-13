@@ -79,8 +79,8 @@ const buildOrderObject = (context, message, state, quote, ondcConfig) => {
     })),
     quote: quote || order.quote,
     payment: order.payment,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+    created_at: order.created_at || new Date().toISOString(),
+    updated_at: order.updated_at || new Date().toISOString(),
   };
 };
 

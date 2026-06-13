@@ -20,6 +20,71 @@ let lastConfirmedOrderId = null; // track most recent for /latest shortcut
 const issueCache = new Map();
 let lastIssueId = null;
 
+// ─── constants ───────────────────────────────────────────────────────────────
+
+const CANCELLATION_TERMS = [
+  { fulfillment_state: { descriptor: { code: 'Pending'         } }, cancellation_fee: { percentage: '0'   } },
+  { fulfillment_state: { descriptor: { code: 'Order-picked-up' } }, cancellation_fee: { percentage: '100' } },
+];
+
+const SETTLEMENT_DETAILS = [{
+  settlement_counterparty: 'buyer-app',
+  settlement_phase:        'sale-amount',
+  settlement_type:         'upi',
+}];
+
+// Build a fulfillment object with all required ONDC fields (start/end location, provider_name, etc.)
+const buildFulfillmentWithLocation = (f, vendor, stateCode, now) => {
+  const t1h  = new Date(new Date(now).getTime() +  1 * 3600 * 1000).toISOString();
+  const t2h  = new Date(new Date(now).getTime() +  2 * 3600 * 1000).toISOString();
+  const t24h = new Date(new Date(now).getTime() + 24 * 3600 * 1000).toISOString();
+  const t48h = new Date(new Date(now).getTime() + 48 * 3600 * 1000).toISOString();
+  const phone = (vendor?.phone || '9999999999').replace(/^\+91/, '');
+  const gps   = vendor?.gps || '12.914082,77.638980';
+
+  return {
+    ...f,
+    id:       f.id   || 'f1',
+    type:     f.type || 'Delivery',
+    state:    { descriptor: { code: stateCode } },
+    tracking: false,
+    '@ondc/org/provider_name': vendor?.business_name || '',
+    '@ondc/org/category':      f['@ondc/org/category'] || 'Grocery',
+    '@ondc/org/TAT':           f['@ondc/org/TAT']      || 'PT24H',
+    start: {
+      location: {
+        id:  'l1',
+        gps,
+        descriptor: { name: vendor?.business_name || 'Store' },
+        address: {
+          locality:  vendor?.address   || vendor?.city || 'Bengaluru',
+          city:      vendor?.city      || 'Bengaluru',
+          area_code: vendor?.pincode   || '560001',
+          state:     vendor?.state     || 'Karnataka',
+        },
+      },
+      time:    { range: { start: t1h, end: t2h }, timestamp: t1h },
+      contact: { phone, email: vendor?.email || 'support@store.in' },
+    },
+    end: {
+      ...(f.end || {}),
+      time: { range: { start: t24h, end: t48h }, timestamp: t48h },
+    },
+  };
+};
+
+// Fetch vendor row from DB by provider id
+const fetchVendorForOrder = async (tenantId, providerId) => {
+  if (!providerId) return null;
+  try {
+    const [rows] = await pool.query(
+      `SELECT * FROM vendors WHERE tenant_id = ? AND (external_vendor_id = ? OR id = ?) LIMIT 1`,
+      [tenantId, String(providerId), providerId]
+    );
+    return rows[0] || null;
+  } catch (_) { return null; }
+};
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 // Get all active tenants (used only by /search which is broadcast)
@@ -449,9 +514,15 @@ const handleConfirm = async (req, res) => {
 
     const order = body.message?.order || {};
 
-    // Cache order + context (for on_status, on_update, on_cancel callbacks)
+    // Fetch vendor for fulfillment location data
+    const vendor = await fetchVendorForOrder(
+      (await getTenantByBppId(context?.bpp_id))?.id,
+      order.provider?.id
+    ).catch(() => null);
+
+    // Cache order + context + vendor (for on_status, on_update, on_cancel callbacks)
     if (order.id) {
-      confirmedOrderCache.set(order.id, { order, context });
+      confirmedOrderCache.set(order.id, { order, context, vendor });
       lastConfirmedOrderId = order.id;
       logger.info('Cached confirmed order', { order_id: order.id });
     }
@@ -476,14 +547,31 @@ const handleConfirm = async (req, res) => {
       }
 
       // 3. Send on_confirm
-      const quote    = await buildQuote(order.items || [], tenant.id).then(r => r.quote).catch(() => order.quote);
-      const orderObj = buildOrderObject(context, body.message, 'Created', quote, tenant);
+      const now   = new Date().toISOString();
+      const quote = await buildQuote(order.items || [], tenant.id).then(r => r.quote).catch(() => order.quote);
 
       await sendCallback(context.bap_uri, 'on_confirm', context, {
         order: {
-          ...orderObj,
-          id:      order.id,
-          payment: { ...order.payment, status: 'PAID' },
+          id:         order.id,
+          state:      'Created',
+          provider:   order.provider,
+          items:      order.items,
+          billing:    order.billing,
+          fulfillments: (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
+            buildFulfillmentWithLocation(f, vendor, 'Pending', now)
+          ),
+          quote,
+          payment: {
+            ...order.payment,
+            status: 'PAID',
+            '@ondc/org/buyer_app_finder_fee_type':   'percent',
+            '@ondc/org/buyer_app_finder_fee_amount': '3',
+            '@ondc/org/settlement_details': SETTLEMENT_DETAILS,
+          },
+          cancellation_terms: CANCELLATION_TERMS,
+          tags:       [],
+          created_at: order.created_at || now,
+          updated_at: order.updated_at || now,
         },
       }, tenant);
     } catch (err) {
@@ -540,31 +628,27 @@ const handleStatus = async (req, res) => {
       // Build full order object — use cached confirm order if available
       const cachedEntry = confirmedOrderCache.get(ondcOrderId) || null;
       const cachedOrder = cachedEntry?.order || null;
+      const cachedVendor = cachedEntry?.vendor || null;
+      const vendor = cachedVendor || await fetchVendorForOrder(tenant.id, cachedOrder?.provider?.id);
       const now = new Date().toISOString();
 
-      const orderPayload = cachedOrder ? {
-        id:           ondcOrderId,
-        state:        currentStatus,
-        provider:     cachedOrder.provider,
-        items:        cachedOrder.items,
-        billing:      cachedOrder.billing,
-        fulfillments: (cachedOrder.fulfillments || []).map(f => ({
-          ...f,
-          state: { descriptor: { code: fulfillmentCode } },
-          tracking: false,
-        })),
-        quote:        cachedOrder.quote,
-        payment:      cachedOrder.payment,
-        created_at:   cachedOrder.created_at || now,
-        updated_at:   now,
-      } : {
-        id:    ondcOrderId,
-        state: currentStatus,
-        fulfillments: [{
-          id: 'f1', type: 'Delivery',
-          state: { descriptor: { code: fulfillmentCode } },
-          tracking: false,
-        }],
+      const baseFulfillments = cachedOrder?.fulfillments || [{ id: 'f1', type: 'Delivery' }];
+      const orderPayload = {
+        id:       ondcOrderId,
+        state:    currentStatus,
+        provider: cachedOrder?.provider,
+        items:    cachedOrder?.items,
+        billing:  cachedOrder?.billing,
+        fulfillments: baseFulfillments.map(f =>
+          buildFulfillmentWithLocation(f, vendor, fulfillmentCode, now)
+        ),
+        quote:     cachedOrder?.quote,
+        payment: {
+          ...(cachedOrder?.payment || {}),
+          '@ondc/org/settlement_details': SETTLEMENT_DETAILS,
+        },
+        tags:       [],
+        created_at: cachedOrder?.created_at || now,
         updated_at: now,
       };
 
@@ -935,23 +1019,25 @@ const triggerMerchantStatus = async (req, res) => {
 };
 
 // Helper: build an on_status payload for a given fulfillment state + order state
-const buildStatusPayload = (order_id, order, fulfillmentState, orderState) => {
+const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendor) => {
   const now = new Date().toISOString();
   return {
-    id:           order_id,
-    state:        orderState,
-    provider:     order.provider,
-    items:        order.items,
-    billing:      order.billing,
-    fulfillments: (order.fulfillments || []).map(f => ({
-      ...f,
-      state: { descriptor: { code: fulfillmentState } },
-      tracking: false,
-    })),
-    quote:        order.quote,
-    payment:      order.payment,
-    created_at:   order.created_at || now,
-    updated_at:   now,
+    id:       order_id,
+    state:    orderState,
+    provider: order.provider,
+    items:    order.items,
+    billing:  order.billing,
+    fulfillments: (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
+      buildFulfillmentWithLocation(f, vendor, fulfillmentState, now)
+    ),
+    quote:     order.quote,
+    payment: {
+      ...order.payment,
+      '@ondc/org/settlement_details': SETTLEMENT_DETAILS,
+    },
+    tags:       [],
+    created_at: order.created_at || now,
+    updated_at: now,
   };
 };
 
@@ -968,10 +1054,11 @@ const triggerMerchantStatusSequence = async (req, res) => {
     const cachedEntry = confirmedOrderCache.get(order_id);
     if (!cachedEntry) return res.status(404).json({ error: 'Order not found in cache' });
 
-    const { order, context } = cachedEntry;
+    const { order, context, vendor: cachedVendor } = cachedEntry;
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
 
+    const vendor = cachedVendor || await fetchVendorForOrder(tenant.id, order.provider?.id);
     const type = req.body?.type || '3a';
 
     // Define sequences per flow type
@@ -1004,7 +1091,7 @@ const triggerMerchantStatusSequence = async (req, res) => {
     // Send each state with 2s delay
     const delay = ms => new Promise(r => setTimeout(r, ms));
     for (const step of steps) {
-      const payload = buildStatusPayload(order_id, order, step.fulfillmentState, step.orderState);
+      const payload = buildStatusPayload(order_id, order, step.fulfillmentState, step.orderState, vendor);
       await sendCallback(context.bap_uri, 'on_status', context, { order: payload }, tenant);
       logger.info('on_status sequence step sent', { order_id, ...step });
       await delay(2000);
@@ -1047,11 +1134,22 @@ const handleTrack = async (req, res) => {
         }
       }
 
+      const cachedTrack = confirmedOrderCache.get(order_id);
+      const trackVendor = cachedTrack?.vendor || await fetchVendorForOrder(tenant.id, cachedTrack?.order?.provider?.id);
+      const trackNow = new Date().toISOString();
+      const trackGps = trackVendor?.gps || '12.914082,77.638980';
+
       await sendCallback(context.bap_uri, 'on_track', context, {
         tracking: {
           id:     order_id,
           url:    trackingUrl || `${tenant.subscriber_url}/track/${order_id}`,
           status: trackingStatus,
+          location: {
+            gps:        trackGps,
+            updated_at: trackNow,
+            time:       { timestamp: trackNow },
+          },
+          tags: [],
         },
       }, tenant);
     } catch (err) {
