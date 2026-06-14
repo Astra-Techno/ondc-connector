@@ -133,11 +133,11 @@ const getActiveTenants = async () => {
 // Build ONDC catalog from DB for a tenant
 const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
   try {
-    // Filter vendors by city: include nationwide vendors (std_city_code IS NULL)
-    // and vendors whose city code matches the searched city
+    // Filter vendors strictly by city — prevents GCR catalog_rejection for area_code/city mismatch.
+    // Vendors with NULL std_city_code are excluded from city-specific searches (they have no registered city).
     const [vendors] = await pool.query(
       `SELECT * FROM vendors WHERE tenant_id = ? AND status = 'active'
-       AND (std_city_code IS NULL OR ? IS NULL OR std_city_code = ?)`,
+       AND (? IS NULL OR std_city_code = ?)`,
       [tenantId, contextCity, contextCity]
     );
 

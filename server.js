@@ -147,9 +147,35 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
+// ─── Startup migrations ───────────────────────────────────────────────────────
+const runMigrations = async () => {
+  const { pool } = require('./src/config/database');
+  try {
+    // Add std_city_code column if not present
+    await pool.query(`ALTER TABLE vendors ADD COLUMN IF NOT EXISTS std_city_code VARCHAR(20) NULL`);
+    // Populate std_city_code from pincode for known mappings
+    await pool.query(`
+      UPDATE vendors SET std_city_code = CASE
+        WHEN pincode LIKE '6%' THEN 'std:044'
+        WHEN pincode LIKE '56%' OR pincode LIKE '57%' OR pincode LIKE '58%' THEN 'std:080'
+        WHEN pincode LIKE '4%' THEN 'std:022'
+        WHEN pincode LIKE '11%' THEN 'std:011'
+        WHEN pincode LIKE '70%' THEN 'std:033'
+        WHEN pincode LIKE '50%' THEN 'std:040'
+        ELSE NULL
+      END
+      WHERE std_city_code IS NULL AND pincode IS NOT NULL AND pincode != ''
+    `);
+    logger.info('DB migrations complete');
+  } catch (e) {
+    logger.warn('Migration warning:', e.message);
+  }
+};
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 const start = async () => {
   await connectDB();
+  await runMigrations();
 
   // Start background scheduler jobs
   try {
