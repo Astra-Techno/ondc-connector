@@ -11,6 +11,7 @@ const {
   updateOrderStatus,
 } = require('../services/ondc/order.service');
 const cottKartOrder = require('../services/cloudkart/order.service');
+const { ack } = require('../utils/response');
 
 // In-memory cache: order_id → { order, context } (for on_status/on_update/on_cancel callbacks)
 const confirmedOrderCache = new Map();
@@ -389,7 +390,7 @@ const handleSearch = async (req, res) => {
     const { context } = req.body;
     logger.info('ONDC /search received', { bap_id: context?.bap_id, domain: context?.domain, city: context?.city });
 
-    res.json({ context: { ...context, timestamp: new Date().toISOString() }, message: { ack: { status: 'ACK' } } });
+    ack(res);
 
     // Only respond to grocery domain — our catalog is ONDC:RET10
     if (context?.domain && context.domain !== 'ONDC:RET10') {
@@ -423,7 +424,7 @@ const handleSelect = async (req, res) => {
     const context = body.context;
     logger.info('ONDC /select received', { transaction_id: context?.transaction_id });
 
-    res.json({ context: { ...context, action: 'on_select', timestamp: new Date().toISOString() }, message: { ack: { status: 'ACK' } } });
+    ack(res);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) { logger.warn('/select: no tenant found'); return; }
@@ -491,7 +492,7 @@ const handleInit = async (req, res) => {
     const context = body.context;
     logger.info('ONDC /init received', { transaction_id: context?.transaction_id });
 
-    res.json({ context: { ...context, action: 'on_init', timestamp: new Date().toISOString() }, message: { ack: { status: 'ACK' } } });
+    ack(res);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -532,7 +533,7 @@ const handleConfirm = async (req, res) => {
     const context = body.context;
     logger.info('ONDC /confirm received', { transaction_id: context?.transaction_id });
 
-    res.json({ context: { ...context, action: 'on_confirm', timestamp: new Date().toISOString() }, message: { ack: { status: 'ACK' } } });
+    ack(res);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -614,7 +615,7 @@ const handleStatus = async (req, res) => {
     const ondcOrderId = body.message?.order_id;
     logger.info('ONDC /status received', { order_id: ondcOrderId });
 
-    res.json({ context: { ...context, timestamp: new Date().toISOString() }, message: { ack: { status: 'ACK' } } });
+    ack(res);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -695,7 +696,7 @@ const handleCancel = async (req, res) => {
     const { order_id, cancellation_reason_id } = body.message || {};
     logger.info('ONDC /cancel received', { order_id });
 
-    res.json({ context: { ...context, timestamp: new Date().toISOString() }, message: { ack: { status: 'ACK' } } });
+    ack(res);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -779,7 +780,7 @@ const handleUpdate = async (req, res) => {
     logger.info('ONDC /update received', { transaction_id: context?.transaction_id, order_id: order.id, update_target });
 
     // Always ACK first
-    res.json({ context: { ...context, timestamp: new Date().toISOString() }, message: { ack: { status: 'ACK' } } });
+    ack(res);
 
     // For return updates (fulfillment target), send on_update with Return_Initiated
     if (update_target === 'fulfillment') {
@@ -1134,7 +1135,7 @@ const handleTrack = async (req, res) => {
     const order_id = body.message?.order_id;
     logger.info('ONDC /track received', { order_id });
 
-    res.json({ context: { ...context, timestamp: new Date().toISOString() }, message: { ack: { status: 'ACK' } } });
+    ack(res);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -1191,7 +1192,7 @@ const handleSupport = async (req, res) => {
     const context = body.context;
     logger.info('ONDC /support received');
 
-    res.json({ context: { ...context, timestamp: new Date().toISOString() }, message: { ack: { status: 'ACK' } } });
+    ack(res);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -1216,7 +1217,7 @@ const handleRating = async (req, res) => {
     const { id, rating_category, value } = body.message || {};
     logger.info('ONDC /rating received', { id, rating_category, value });
 
-    res.json({ context: { ...context, timestamp: new Date().toISOString() }, message: { ack: { status: 'ACK' } } });
+    ack(res);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -1246,7 +1247,7 @@ const handleIssue = async (req, res) => {
     const issue   = body.message?.issue || {};
     logger.info('ONDC /issue received', { transaction_id: context?.transaction_id });
 
-    res.json({ context: { ...context, timestamp: new Date().toISOString() }, message: { ack: { status: 'ACK' } } });
+    ack(res);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -1444,7 +1445,7 @@ const handleIssueStatus = async (req, res) => {
     const issue_id = body.message?.issue_id;
     logger.info('ONDC /issue_status received', { issue_id });
 
-    res.json({ context: { ...context, timestamp: new Date().toISOString() }, message: { ack: { status: 'ACK' } } });
+    ack(res);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
