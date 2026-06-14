@@ -424,7 +424,7 @@ const handleSelect = async (req, res) => {
     const context = body.context;
     logger.info('ONDC /select received', { transaction_id: context?.transaction_id });
 
-    ack(res);
+    ack(res, context);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) { logger.warn('/select: no tenant found'); return; }
@@ -492,7 +492,7 @@ const handleInit = async (req, res) => {
     const context = body.context;
     logger.info('ONDC /init received', { transaction_id: context?.transaction_id });
 
-    ack(res);
+    ack(res, context);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -512,6 +512,10 @@ const handleInit = async (req, res) => {
             ...order.payment,
             '@ondc/org/buyer_app_finder_fee_type':   'percent',
             '@ondc/org/buyer_app_finder_fee_amount': '3',
+            '@ondc/org/settlement_basis':             'return_window_expiry',
+            '@ondc/org/settlement_window':            'P1D',
+            '@ondc/org/withholding_amount':           '10.00',
+            '@ondc/org/settlement_details':           SETTLEMENT_DETAILS,
             type:   'ON-ORDER',
             status: 'NOT-PAID',
           },
@@ -533,7 +537,7 @@ const handleConfirm = async (req, res) => {
     const context = body.context;
     logger.info('ONDC /confirm received', { transaction_id: context?.transaction_id });
 
-    ack(res);
+    ack(res, context);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -589,10 +593,13 @@ const handleConfirm = async (req, res) => {
           quote,
           payment: {
             ...order.payment,
-            status: 'PAID',
             '@ondc/org/buyer_app_finder_fee_type':   'percent',
             '@ondc/org/buyer_app_finder_fee_amount': '3',
-            '@ondc/org/settlement_details': SETTLEMENT_DETAILS,
+            '@ondc/org/settlement_basis':             'return_window_expiry',
+            '@ondc/org/settlement_window':            'P1D',
+            '@ondc/org/withholding_amount':           '10.00',
+            '@ondc/org/settlement_details':           SETTLEMENT_DETAILS,
+            status: 'PAID',
           },
           cancellation_terms: CANCELLATION_TERMS,
           tags:       ORDER_TAGS,

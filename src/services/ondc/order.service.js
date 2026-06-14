@@ -138,7 +138,7 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
       ]
     );
   } catch (e) {
-    logger.warn('Transaction log insert failed:', e.message);
+    logger.warn(`Transaction log insert failed: ${e.message}`);
   }
 
   for (let attempt = 1; attempt <= retries; attempt++) {

@@ -19,7 +19,7 @@ const connectDB = async () => {
     connection.release();
     return pool;
   } catch (error) {
-    logger.error('MySQL connection failed:', error.message);
+    logger.error(`MySQL connection failed: ${error.message}`);
     setTimeout(connectDB, 5000);
   }
 };
