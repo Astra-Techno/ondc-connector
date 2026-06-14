@@ -87,6 +87,23 @@ app.get('/on_subscribe', (req, res) => {
   }
 });
 
+// ─── ONDC request/response logger (for Pramaan debugging) ───────────────────
+const ondcLogger = (req, res, next) => {
+  const start = Date.now();
+  const originalJson = res.json.bind(res);
+
+  res.json = (body) => {
+    const ms = Date.now() - start;
+    logger.info(`[ONDC] ${req.method} ${req.path} | bap=${req.body?.context?.bap_id || '-'} txn=${req.body?.context?.transaction_id || '-'} | REQ: ${JSON.stringify(req.body).slice(0, 500)} | RES(${ms}ms): ${JSON.stringify(body).slice(0, 300)}`);
+    return originalJson(body);
+  };
+
+  next();
+};
+
+const ONDC_PATHS = ['/search','/select','/init','/confirm','/status','/cancel','/track','/support','/rating','/issue','/issue_status','/update'];
+app.use(ONDC_PATHS, ondcLogger);
+
 // ─── ONDC Gateway endpoints (root-level, no auth) ────────────────────────────
 app.post('/search',       handleSearch);
 app.post('/select',       handleSelect);
