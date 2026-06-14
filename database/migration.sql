@@ -116,10 +116,37 @@ CREATE TABLE IF NOT EXISTS `vendors` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Add missing vendor columns (safe — skipped if already exist)
-CALL AddColIfNotExists('vendors', 'bank_account',   "VARCHAR(50) DEFAULT NULL");
-CALL AddColIfNotExists('vendors', 'bank_ifsc',      "VARCHAR(20) DEFAULT NULL");
--- std_city_code: ONDC city code like 'std:044' for Chennai, NULL = nationwide
-CALL AddColIfNotExists('vendors', 'std_city_code',  "VARCHAR(20) DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'bank_account',        "VARCHAR(50) DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'bank_ifsc',           "VARCHAR(20) DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'pan',                 "VARCHAR(20) DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'country',             "VARCHAR(100) DEFAULT 'India'");
+CALL AddColIfNotExists('vendors', 'cloudkart_vendor_id', "VARCHAR(100) DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'ondc_provider_id',    "VARCHAR(100) DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'ondc_location_id',    "VARCHAR(100) DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'ondc_fulfillment_id', "VARCHAR(100) DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'ondc_registered_at',  "DATETIME DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'ondc_eligible',       "TINYINT(1) DEFAULT 0");
+CALL AddColIfNotExists('vendors', 'ondc_approved_at',    "DATETIME DEFAULT NULL");
+CALL AddColIfNotExists('vendors', 'rejection_reason',    "TEXT DEFAULT NULL");
+-- std_city_code: ONDC city code like 'std:044' for Chennai, NULL = respond to all
+CALL AddColIfNotExists('vendors', 'std_city_code',       "VARCHAR(20) DEFAULT NULL");
+
+-- Populate std_city_code from pincode for vendors that don't have it set yet
+UPDATE vendors SET std_city_code = CASE
+  WHEN pincode LIKE '6%'                             THEN 'std:044'  -- Chennai / TN
+  WHEN pincode LIKE '56%' OR pincode LIKE '57%'
+    OR pincode LIKE '58%'                            THEN 'std:080'  -- Bengaluru / KA
+  WHEN pincode LIKE '4%'                             THEN 'std:022'  -- Mumbai / MH
+  WHEN pincode LIKE '11%'                            THEN 'std:011'  -- Delhi
+  WHEN pincode LIKE '70%'                            THEN 'std:033'  -- Kolkata / WB
+  WHEN pincode LIKE '50%'                            THEN 'std:040'  -- Hyderabad / TS
+  WHEN pincode LIKE '38%'                            THEN 'std:079'  -- Ahmedabad / GJ
+  WHEN pincode LIKE '30%'                            THEN 'std:0141' -- Jaipur / RJ
+  WHEN pincode LIKE '226%'                           THEN 'std:0522' -- Lucknow / UP
+  WHEN pincode LIKE '44%'                            THEN 'std:0712' -- Nagpur / MH
+  ELSE NULL
+END
+WHERE std_city_code IS NULL AND pincode IS NOT NULL AND pincode != '';
 
 -- ============================================================
 -- TABLE: products
