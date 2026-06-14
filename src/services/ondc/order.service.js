@@ -158,7 +158,7 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
       }
 
       const response = await axios.post(callbackUrl, payload, { headers, timeout: 30000 });
-      logger.info(`${action} → ${callbackUrl} [${response.status}]`);
+      logger.info(`${action} → ${callbackUrl} [${response.status}]`, { payload, response: response.data });
 
       pool.query(
         `UPDATE ondc_transactions SET status = 'success', response = ?
