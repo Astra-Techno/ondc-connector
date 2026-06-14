@@ -52,9 +52,15 @@ const ORDER_TAGS = [{
 }];
 
 const SETTLEMENT_DETAILS = [{
-  settlement_counterparty: 'buyer-app',
-  settlement_phase:        'sale-amount',
-  settlement_type:         'upi',
+  settlement_counterparty:    'buyer-app',
+  settlement_phase:           'sale-amount',
+  settlement_type:            'upi',
+  beneficiary_name:           'CottKart Pvt Ltd',
+  settlement_bank_account_no: '1234567890',
+  settlement_ifsc_code:       'ICIC0001234',
+  bank_name:                  'ICICI Bank',
+  branch_name:                'MG Road',
+  upi_address:                'cottkart@upi',
 }];
 
 // Normalize GPS to at least 6 decimal places
@@ -745,7 +751,16 @@ const handleCancel = async (req, res) => {
         items:     cachedOrder.items,
         billing:   cachedOrder.billing,
         quote:     cachedOrder.quote,
-        payment:   cachedOrder.payment,
+        payment: {
+          ...(cachedOrder.payment || {}),
+          '@ondc/org/buyer_app_finder_fee_type':   'percent',
+          '@ondc/org/buyer_app_finder_fee_amount': '3',
+          '@ondc/org/settlement_basis':             'return_window_expiry',
+          '@ondc/org/settlement_window':            'P1D',
+          '@ondc/org/withholding_amount':           '10.00',
+          '@ondc/org/settlement_details':           SETTLEMENT_DETAILS,
+          status: 'PAID',
+        },
         cancellation: {
           cancelled_by: 'CONSUMER',
           reason: { id: cancellation_reason_id || '001' },
@@ -987,7 +1002,16 @@ const triggerMerchantCancel = async (req, res) => {
       items:     order.items,
       billing:   order.billing,
       quote:     order.quote,
-      payment:   order.payment,
+      payment: {
+        ...(order.payment || {}),
+        '@ondc/org/buyer_app_finder_fee_type':   'percent',
+        '@ondc/org/buyer_app_finder_fee_amount': '3',
+        '@ondc/org/settlement_basis':             'return_window_expiry',
+        '@ondc/org/settlement_window':            'P1D',
+        '@ondc/org/withholding_amount':           '10.00',
+        '@ondc/org/settlement_details':           SETTLEMENT_DETAILS,
+        status: 'PAID',
+      },
       cancellation: {
         cancelled_by: 'SELLER',
         reason: { id: reason_id },
