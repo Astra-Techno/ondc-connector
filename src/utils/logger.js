@@ -29,4 +29,19 @@ const logger = winston.createLogger({
   ]
 });
 
+// Separate trace logger for full ONDC request/response payloads
+const traceTransport = new winston.transports.DailyRotateFile({
+  filename: path.join('logs', 'ondc-trace-%DATE%.log'),
+  datePattern: 'YYYY-MM-DD',
+  maxFiles: '7d',
+  maxSize: '50m'
+});
+
+const ondcTraceLogger = winston.createLogger({
+  level: 'info',
+  format: logFormat,
+  transports: [traceTransport]
+});
+
 module.exports = logger;
+module.exports.ondcTrace = ondcTraceLogger;

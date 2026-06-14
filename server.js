@@ -4,7 +4,8 @@ const cors       = require('cors');
 const helmet     = require('helmet');
 const morgan     = require('morgan');
 const rateLimit  = require('express-rate-limit');
-const logger     = require('./src/utils/logger');
+const logger          = require('./src/utils/logger');
+const { ondcTrace }   = require('./src/utils/logger');
 const { connectDB } = require('./src/config/database');
 const {
   handleSearch,
@@ -94,7 +95,15 @@ const ondcLogger = (req, res, next) => {
 
   res.json = (body) => {
     const ms = Date.now() - start;
-    logger.info(`[ONDC] ${req.method} ${req.path} | bap=${req.body?.context?.bap_id || '-'} txn=${req.body?.context?.transaction_id || '-'} | REQ: ${JSON.stringify(req.body).slice(0, 500)} | RES(${ms}ms): ${JSON.stringify(body).slice(0, 300)}`);
+    ondcTrace.info({
+      path:    req.path,
+      bap_id:  req.body?.context?.bap_id,
+      txn_id:  req.body?.context?.transaction_id,
+      msg_id:  req.body?.context?.message_id,
+      request: req.body,
+      response: body,
+      ms,
+    });
     return originalJson(body);
   };
 
