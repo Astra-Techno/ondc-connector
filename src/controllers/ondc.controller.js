@@ -424,7 +424,7 @@ const handleSelect = async (req, res) => {
     const context = body.context;
     logger.info('ONDC /select received', { transaction_id: context?.transaction_id });
 
-    ack(res, context);
+    ack(res, { ...context, action: 'on_select' });
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) { logger.warn('/select: no tenant found'); return; }
@@ -492,7 +492,7 @@ const handleInit = async (req, res) => {
     const context = body.context;
     logger.info('ONDC /init received', { transaction_id: context?.transaction_id });
 
-    ack(res, context);
+    ack(res, { ...context, action: 'on_init' });
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -537,7 +537,7 @@ const handleConfirm = async (req, res) => {
     const context = body.context;
     logger.info('ONDC /confirm received', { transaction_id: context?.transaction_id });
 
-    ack(res, context);
+    ack(res, { ...context, action: 'on_confirm' });
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
