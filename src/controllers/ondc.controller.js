@@ -733,7 +733,10 @@ const handleCancel = async (req, res) => {
 
       const cachedEntry = confirmedOrderCache.get(order_id) || null;
       const cachedOrder = cachedEntry?.order || null;
+      const cachedVendor = cachedEntry?.vendor || null;
       const now = new Date().toISOString();
+
+      const cancelFulfillmentTags = [{ code: 'cancellation_terms', list: [{ code: 'reason_required', value: 'false' }] }];
 
       const cancelPayload = cachedOrder ? {
         id:    order_id,
@@ -748,8 +751,8 @@ const handleCancel = async (req, res) => {
           reason: { id: cancellation_reason_id || '001' },
         },
         fulfillments: (cachedOrder.fulfillments || []).map(f => ({
-          ...f,
-          state: { descriptor: { code: 'Cancelled' } },
+          ...buildFulfillmentWithLocation(f, cachedVendor, 'Cancelled', now),
+          tags: cancelFulfillmentTags,
         })),
         created_at:  cachedOrder.created_at || now,
         updated_at:  now,
@@ -760,7 +763,7 @@ const handleCancel = async (req, res) => {
           cancelled_by: 'CONSUMER',
           reason: { id: cancellation_reason_id || '001' },
         },
-        fulfillments: [{ id: 'f1', state: { descriptor: { code: 'Cancelled' } } }],
+        fulfillments: [{ id: 'f1', state: { descriptor: { code: 'Cancelled' } }, tags: cancelFulfillmentTags }],
         updated_at: now,
       };
 
@@ -971,11 +974,12 @@ const triggerMerchantCancel = async (req, res) => {
     if (!cachedEntry) {
       return res.status(404).json({ error: 'Order not found in cache' });
     }
-    const { order, context } = cachedEntry;
+    const { order, context, vendor: cachedVendor } = cachedEntry;
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
 
     const now = new Date().toISOString();
+    const cancelFulfillmentTags = [{ code: 'cancellation_terms', list: [{ code: 'reason_required', value: 'false' }] }];
     const cancelPayload = {
       id:    order_id,
       state: 'Cancelled',
@@ -990,8 +994,8 @@ const triggerMerchantCancel = async (req, res) => {
         ...(rto ? { return_reason: { id: reason_id } } : {}),
       },
       fulfillments: (order.fulfillments || []).map(f => ({
-        ...f,
-        state: { descriptor: { code: rto ? 'RTO-Initiated' : 'Cancelled' } },
+        ...buildFulfillmentWithLocation(f, cachedVendor, rto ? 'RTO-Initiated' : 'Cancelled', now),
+        tags: cancelFulfillmentTags,
       })),
       created_at:  order.created_at || now,
       updated_at:  now,
