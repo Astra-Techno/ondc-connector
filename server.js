@@ -88,21 +88,25 @@ app.get('/on_subscribe', (req, res) => {
   }
 });
 
-// ─── ONDC request/response logger (for Pramaan debugging) ───────────────────
+// ─── ONDC request/response logger (Pramaan calls only) ──────────────────────
+const PRAMAAN_BAP_ID = 'pramaan.ondc.org';
 const ondcLogger = (req, res, next) => {
+  const bap_id = req.body?.context?.bap_id || '';
+  if (!bap_id.includes(PRAMAAN_BAP_ID)) return next();
+
   const start = Date.now();
   const originalJson = res.json.bind(res);
 
   res.json = (body) => {
-    const ms = Date.now() - start;
     ondcTrace.info({
-      path:    req.path,
-      bap_id:  req.body?.context?.bap_id,
-      txn_id:  req.body?.context?.transaction_id,
-      msg_id:  req.body?.context?.message_id,
-      request: req.body,
+      path:     req.path,
+      bap_id,
+      txn_id:   req.body?.context?.transaction_id,
+      msg_id:   req.body?.context?.message_id,
+      action:   req.body?.context?.action,
+      request:  req.body,
       response: body,
-      ms,
+      ms:       Date.now() - start,
     });
     return originalJson(body);
   };
