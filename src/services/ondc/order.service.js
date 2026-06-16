@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../../config/database');
 const logger = require('../../utils/logger');
 const { createAuthHeader } = require('../../utils/crypto');
+const { pushTxnLog } = require('./logPublisher.service');
 
 const DELIVERY_CHARGE = 30;
 
@@ -159,6 +160,8 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
 
       const response = await axios.post(callbackUrl, payload, { headers, timeout: 30000 });
       logger.info(`${action} → ${callbackUrl} [${response.status}]`, { payload, response: response.data });
+
+      pushTxnLog(action, payload).catch(() => {});
 
       pool.query(
         `UPDATE ondc_transactions SET status = 'success', response = ?

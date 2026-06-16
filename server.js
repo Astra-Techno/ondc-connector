@@ -7,6 +7,7 @@ const rateLimit  = require('express-rate-limit');
 const logger          = require('./src/utils/logger');
 const { ondcTrace }   = require('./src/utils/logger');
 const { connectDB } = require('./src/config/database');
+const { pushTxnLog, isLogPublisherConfigured } = require('./src/services/ondc/logPublisher.service');
 const {
   handleSearch,
   handleSelect,
@@ -115,7 +116,18 @@ const ondcLogger = (req, res, next) => {
 };
 
 const ONDC_PATHS = ['/search','/select','/init','/confirm','/status','/cancel','/track','/support','/rating','/issue','/issue_status','/update'];
+
+// Publish inbound action logs (select, init, confirm, etc.) to ONDC observability
+const pushInboundTxnLog = (req, res, next) => {
+  const action = req.body?.context?.action;
+  if (action && req.body?.context && req.body?.message !== undefined) {
+    pushTxnLog(action, req.body).catch(() => {});
+  }
+  next();
+};
+
 app.use(ONDC_PATHS, ondcLogger);
+app.use(ONDC_PATHS, pushInboundTxnLog);
 
 // ─── ONDC Gateway endpoints (root-level, no auth) ────────────────────────────
 app.post('/search',       handleSearch);
@@ -227,6 +239,15 @@ const start = async () => {
     logger.info(`ONDC Connector v1.0 running on port ${PORT}`);
     logger.info(`Subscriber ID: ${process.env.ONDC_SUBSCRIBER_ID}`);
     logger.info(`Environment:   ${process.env.ONDC_ENV}`);
+    if (!isLogPublisherConfigured()) {
+      logger.warn(
+        'ONDC_ANALYTICS_TOKEN not set — sync response logs will NOT be pushed. ' +
+        'Pramaan Flow 1A will fail select/init/confirm sync verification. ' +
+        'Request token from tech@ondc.org'
+      );
+    } else {
+      logger.info('ONDC Network Observability log publisher: enabled');
+    }
   });
 };
 

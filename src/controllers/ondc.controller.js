@@ -11,7 +11,8 @@ const {
   updateOrderStatus,
 } = require('../services/ondc/order.service');
 const cottKartOrder = require('../services/cloudkart/order.service');
-const { ack } = require('../utils/response');
+const { ack, buildAckBody } = require('../utils/response');
+const { pushTxnLog } = require('../services/ondc/logPublisher.service');
 
 // In-memory cache: order_id → { order, context } (for on_status/on_update/on_cancel callbacks)
 const confirmedOrderCache = new Map();
@@ -382,6 +383,7 @@ const sendOnSearch = async (context, catalog, ondcConfig) => {
     logger.info(`Sending on_search → ${callbackUrl}`);
     const response = await axios.post(callbackUrl, payload, { headers, timeout: 10000 });
     logger.info(`on_search sent to ${callbackUrl}: ${response.status}`);
+    pushTxnLog('on_search', payload).catch(() => {});
   } catch (err) {
     const status = err.response?.status;
     const detail = err.response?.data ? JSON.stringify(err.response.data).slice(0, 300) : err.message;
@@ -396,7 +398,7 @@ const handleSearch = async (req, res) => {
     const { context } = req.body;
     logger.info('ONDC /search received', { bap_id: context?.bap_id, domain: context?.domain, city: context?.city });
 
-    ack(res);
+    ack(res, context);
 
     // Only respond to grocery domain — our catalog is ONDC:RET10
     if (context?.domain && context.domain !== 'ONDC:RET10') {
@@ -642,7 +644,7 @@ const handleStatus = async (req, res) => {
     const ondcOrderId = body.message?.order_id;
     logger.info('ONDC /status received', { order_id: ondcOrderId });
 
-    ack(res);
+    ack(res, context);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -723,7 +725,7 @@ const handleCancel = async (req, res) => {
     const { order_id, cancellation_reason_id } = body.message || {};
     logger.info('ONDC /cancel received', { order_id });
 
-    ack(res);
+    ack(res, context);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -819,7 +821,7 @@ const handleUpdate = async (req, res) => {
     logger.info('ONDC /update received', { transaction_id: context?.transaction_id, order_id: order.id, update_target });
 
     // Always ACK first
-    ack(res);
+    ack(res, context);
 
     // For return updates (fulfillment target), send on_update with Return_Initiated
     if (update_target === 'fulfillment') {
@@ -1184,7 +1186,7 @@ const handleTrack = async (req, res) => {
     const order_id = body.message?.order_id;
     logger.info('ONDC /track received', { order_id });
 
-    ack(res);
+    ack(res, context);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -1241,7 +1243,7 @@ const handleSupport = async (req, res) => {
     const context = body.context;
     logger.info('ONDC /support received');
 
-    ack(res);
+    ack(res, context);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -1266,7 +1268,7 @@ const handleRating = async (req, res) => {
     const { id, rating_category, value } = body.message || {};
     logger.info('ONDC /rating received', { id, rating_category, value });
 
-    ack(res);
+    ack(res, context);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -1296,7 +1298,7 @@ const handleIssue = async (req, res) => {
     const issue   = body.message?.issue || {};
     logger.info('ONDC /issue received', { transaction_id: context?.transaction_id });
 
-    ack(res);
+    ack(res, context);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -1494,7 +1496,7 @@ const handleIssueStatus = async (req, res) => {
     const issue_id = body.message?.issue_id;
     logger.info('ONDC /issue_status received', { issue_id });
 
-    ack(res);
+    ack(res, context);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -1605,7 +1607,10 @@ const triggerIssueResolve = async (req, res) => {
 // Generic ACK for ONDC callbacks we receive (on_*)
 const handleACK = (action) => async (req, res) => {
   logger.info(`ONDC /${action} received`);
-  res.json({ message: { ack: { status: 'ACK' } } });
+  const context = req.body?.context;
+  const body = buildAckBody(context);
+  pushTxnLog(`${action}_response`, body).catch(() => {});
+  res.json(body);
 };
 
 module.exports = {
