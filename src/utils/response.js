@@ -8,7 +8,7 @@ const error = (res, message = 'Error', code = 500, errors = null) => {
 
 const ack = (res, context = null, status = 'ACK') => {
   const body = context
-    ? { context: { ...context, action: 'ack', timestamp: new Date().toISOString() }, message: { ack: { status } } }
+    ? { context: { ...context, timestamp: new Date().toISOString() }, message: { ack: { status } } }
     : { message: { ack: { status } } };
   return res.status(200).json(body);
 };
