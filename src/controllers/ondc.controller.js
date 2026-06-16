@@ -424,25 +424,24 @@ const handleSearch = async (req, res) => {
   }
 };
 
-const handleSelect = async (req, res) => {
-  try {
-    const body    = req.body;
-    const context = body.context;
-    logger.info('ONDC /select received', { transaction_id: context?.transaction_id });
+const handleSelect = (req, res) => {
+  const body    = req.body;
+  const context = body.context;
+  logger.info('ONDC /select received', { transaction_id: context?.transaction_id });
 
-    ack(res, context);
+  ack(res, context);
 
-    const tenant = await getTenantByBppId(context?.bpp_id);
-    if (!tenant) { logger.warn('/select: no tenant found'); return; }
-
-    const order       = body.message?.order || {};
-    const items       = order.items         || [];
-    const fulfillments = order.fulfillments || [];
-
+  setImmediate(async () => {
     try {
+      const tenant = await getTenantByBppId(context?.bpp_id);
+      if (!tenant) { logger.warn('/select: no tenant found'); return; }
+
+      const order        = body.message?.order || {};
+      const items        = order.items          || [];
+      const fulfillments = order.fulfillments   || [];
+
       const { quote, outOfStockItems } = await buildQuote(items, tenant.id);
 
-      // Fetch provider name for fulfillment @ondc/org/provider_name
       let providerName = '';
       try {
         const providerId = order.provider?.id;
@@ -473,7 +472,6 @@ const handleSelect = async (req, res) => {
         },
       };
 
-      // Add error for out-of-stock items (ONDC error code 40002)
       if (outOfStockItems.length > 0) {
         payload.error = {
           type: 'DOMAIN-ERROR',
@@ -487,26 +485,24 @@ const handleSelect = async (req, res) => {
     } catch (err) {
       logger.error('handleSelect processing failed:', err.message);
     }
-  } catch (err) {
-    logger.error('handleSelect failed:', err.message);
-  }
+  });
 };
 
-const handleInit = async (req, res) => {
-  try {
-    const body    = req.body;
-    const context = body.context;
-    logger.info('ONDC /init received', { transaction_id: context?.transaction_id });
+const handleInit = (req, res) => {
+  const body    = req.body;
+  const context = body.context;
+  logger.info('ONDC /init received', { transaction_id: context?.transaction_id });
 
-    ack(res, context);
+  ack(res, context);
 
-    const tenant = await getTenantByBppId(context?.bpp_id);
-    if (!tenant) return;
-
-    const order = body.message?.order || {};
-    const items = order.items         || [];
-
+  setImmediate(async () => {
     try {
+      const tenant = await getTenantByBppId(context?.bpp_id);
+      if (!tenant) return;
+
+      const order = body.message?.order || {};
+      const items = order.items         || [];
+
       const { quote } = await buildQuote(items, tenant.id);
       const orderObj = buildOrderObject(context, body.message, 'Created', quote, tenant);
 
@@ -532,46 +528,38 @@ const handleInit = async (req, res) => {
     } catch (err) {
       logger.error('handleInit processing failed:', err.message);
     }
-  } catch (err) {
-    logger.error('handleInit failed:', err.message);
-  }
+  });
 };
 
-const handleConfirm = async (req, res) => {
-  try {
-    const body    = req.body;
-    const context = body.context;
-    logger.info('ONDC /confirm received', { transaction_id: context?.transaction_id });
+const handleConfirm = (req, res) => {
+  const body    = req.body;
+  const context = body.context;
+  logger.info('ONDC /confirm received', { transaction_id: context?.transaction_id });
 
-    ack(res, context);
+  ack(res, context);
 
-    const tenant = await getTenantByBppId(context?.bpp_id);
-    if (!tenant) return;
-
-    const order = body.message?.order || {};
-
-    // Fetch vendor for fulfillment location data
-    const vendor = await fetchVendorForOrder(
-      (await getTenantByBppId(context?.bpp_id))?.id,
-      order.provider?.id
-    ).catch(() => null);
-
-    // Cache order + context + vendor (for on_status, on_update, on_cancel callbacks)
-    if (order.id) {
-      confirmedOrderCache.set(order.id, { order, context, vendor });
-      lastConfirmedOrderId = order.id;
-      logger.info('Cached confirmed order', { order_id: order.id });
-    }
-
+  setImmediate(async () => {
     try {
+      const tenant = await getTenantByBppId(context?.bpp_id);
+      if (!tenant) return;
+
+      const order = body.message?.order || {};
+
+      const vendor = await fetchVendorForOrder(tenant.id, order.provider?.id).catch(() => null);
+
+      if (order.id) {
+        confirmedOrderCache.set(order.id, { order, context, vendor });
+        lastConfirmedOrderId = order.id;
+        logger.info('Cached confirmed order', { order_id: order.id });
+      }
+
       // 1. Save to DB
       await saveONDCOrder(tenant.id, body, body);
 
       // 2. Push to CottKart
-      let cottKartOrderId = null;
       try {
         const ckResult = await cottKartOrder.pushOrder(body);
-        cottKartOrderId = ckResult?.id || ckResult?.order_id;
+        const cottKartOrderId = ckResult?.id || ckResult?.order_id;
         if (cottKartOrderId) {
           await pool.query(
             `UPDATE ondc_orders SET cottkart_order_id = ? WHERE ondc_order_id = ?`,
@@ -616,9 +604,7 @@ const handleConfirm = async (req, res) => {
     } catch (err) {
       logger.error('handleConfirm processing failed:', err.message);
     }
-  } catch (err) {
-    logger.error('handleConfirm failed:', err.message);
-  }
+  });
 };
 
 const handleStatus = async (req, res) => {
