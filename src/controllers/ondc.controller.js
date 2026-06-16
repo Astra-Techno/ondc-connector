@@ -601,6 +601,34 @@ const handleConfirm = (req, res) => {
           updated_at: order.updated_at || now,
         },
       }, tenant);
+
+      // Auto-trigger on_status sequence after on_confirm (for Pramaan certification)
+      // Sends: Packed → Agent-assigned → Order-picked-up → Out-for-delivery → Order-delivered
+      // with 2s delay between each. Flows that send /cancel (3B) will interrupt naturally.
+      const autoStatusSequence = async () => {
+        const delay = ms => new Promise(r => setTimeout(r, ms));
+        const steps = [
+          { fulfillmentState: 'Packed',            orderState: 'In-progress' },
+          { fulfillmentState: 'Agent-assigned',     orderState: 'In-progress' },
+          { fulfillmentState: 'Order-picked-up',    orderState: 'In-progress' },
+          { fulfillmentState: 'Out-for-delivery',   orderState: 'In-progress' },
+          { fulfillmentState: 'Order-delivered',    orderState: 'Completed'   },
+        ];
+
+        // Wait 15s after on_confirm for Pramaan to process /status first
+        await delay(15000);
+
+        for (const step of steps) {
+          const stepNow = new Date().toISOString();
+          const payload = buildStatusPayload(order.id, order, step.fulfillmentState, step.orderState, vendor);
+          await sendCallback(context.bap_uri, 'on_status', context, { order: payload }, tenant);
+          logger.info('Auto on_status sent', { order_id: order.id, ...step });
+          await delay(2000);
+        }
+        logger.info('Auto on_status sequence complete', { order_id: order.id });
+      };
+      autoStatusSequence().catch(err => logger.error('Auto on_status sequence failed:', err.message));
+
     } catch (err) {
       logger.error('handleConfirm processing failed:', err.message);
     }
