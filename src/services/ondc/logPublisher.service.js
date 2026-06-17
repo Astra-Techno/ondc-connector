@@ -47,6 +47,37 @@ const enrichLogData = (data) => {
   };
 };
 
+const pushTxnLogWithAuth = async (payload, authHeader, retries = 1) => {
+  let lastError = null;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await axios.post(ANALYTICS_URL, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: authHeader,
+        },
+        timeout: 15000,
+        validateStatus: (s) => s < 500,
+      });
+
+      if (response.status >= 200 && response.status < 300) {
+        return { ok: true, status: response.status, data: response.data };
+      }
+
+      const detail = typeof response.data === 'object'
+        ? JSON.stringify(response.data).slice(0, 500)
+        : String(response.data || response.statusText);
+      lastError = { status: response.status, error: detail };
+    } catch (err) {
+      const detail = err.response?.data
+        ? JSON.stringify(err.response.data).slice(0, 500)
+        : err.message;
+      lastError = { status: err.response?.status, error: detail };
+    }
+  }
+  return { ok: false, ...lastError };
+};
+
 // Push one transaction log entry to ONDC Network Observability.
 // type examples: "select", "select_response", "on_select", "init_response", etc.
 const pushTxnLog = async (type, data, retries = 3) => {
@@ -59,45 +90,25 @@ const pushTxnLog = async (type, data, retries = 3) => {
   }
 
   const payload = { type, data: scrubPII(enrichLogData(data)) };
+  const authHeaders = [
+    `Bearer ${token}`,
+    token,
+  ];
+
   let lastError = null;
-
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const response = await axios.post(ANALYTICS_URL, payload, {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        timeout: 15000,
-        validateStatus: (s) => s < 500,
+  for (const authHeader of authHeaders) {
+    const result = await pushTxnLogWithAuth(payload, authHeader, retries);
+    if (result.ok) {
+      logger.info(`ONDC txn log pushed: ${type}`, {
+        txn: data?.context?.transaction_id,
+        msg: data?.context?.message_id,
+        status: result.status,
+        body: typeof result.data === 'object' ? JSON.stringify(result.data).slice(0, 200) : result.data,
       });
-
-      if (response.status >= 200 && response.status < 300) {
-        logger.info(`ONDC txn log pushed: ${type}`, {
-          txn: data?.context?.transaction_id,
-          msg: data?.context?.message_id,
-          status: response.status,
-          body: typeof response.data === 'object' ? JSON.stringify(response.data).slice(0, 200) : response.data,
-        });
-        return { ok: true, status: response.status, data: response.data };
-      }
-
-      const detail = typeof response.data === 'object'
-        ? JSON.stringify(response.data).slice(0, 500)
-        : String(response.data || response.statusText);
-      lastError = { status: response.status, error: detail };
-      logger.warn(`ONDC txn log push attempt ${attempt}/${retries} rejected (${type}) [${response.status}]: ${detail}`);
-    } catch (err) {
-      const detail = err.response?.data
-        ? JSON.stringify(err.response.data).slice(0, 500)
-        : err.message;
-      lastError = { status: err.response?.status, error: detail };
-      logger.warn(`ONDC txn log push attempt ${attempt}/${retries} error (${type}): ${detail}`);
+      return result;
     }
-
-    if (attempt < retries) {
-      await new Promise(r => setTimeout(r, 500 * attempt));
-    }
+    lastError = result;
+    if (result.status !== 401) break;
   }
 
   logger.error(
@@ -108,6 +119,21 @@ const pushTxnLog = async (type, data, retries = 3) => {
 };
 
 const isLogPublisherConfigured = () => Boolean(getAnalyticsToken());
+
+const getTokenDiagnostics = () => {
+  const raw = process.env.ONDC_ANALYTICS_TOKEN;
+  if (!raw) return { configured: false };
+  const trimmed = raw.trim();
+  const token = trimmed.replace(/^Bearer\s+/i, '');
+  return {
+    configured: true,
+    length: token.length,
+    looks_like_jwt: token.startsWith('eyJ'),
+    has_wrapping_quotes: /^["']/.test(trimmed) || /["']$/.test(trimmed),
+    has_whitespace: /\s/.test(token),
+    subscriber_id: process.env.ONDC_SUBSCRIBER_ID || null,
+  };
+};
 
 // Live probe — call from /health/analytics or startup
 const testAnalyticsPush = async () => {
@@ -132,4 +158,11 @@ const testAnalyticsPush = async () => {
   return pushTxnLog('select_response', sample, 1);
 };
 
-module.exports = { pushTxnLog, scrubPII, isLogPublisherConfigured, testAnalyticsPush, getAnalyticsToken };
+module.exports = {
+  pushTxnLog,
+  scrubPII,
+  isLogPublisherConfigured,
+  testAnalyticsPush,
+  getAnalyticsToken,
+  getTokenDiagnostics,
+};

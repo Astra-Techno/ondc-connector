@@ -7,7 +7,7 @@ const rateLimit  = require('express-rate-limit');
 const logger          = require('./src/utils/logger');
 const { ondcTrace }   = require('./src/utils/logger');
 const { connectDB } = require('./src/config/database');
-const { pushTxnLog, isLogPublisherConfigured, testAnalyticsPush } = require('./src/services/ondc/logPublisher.service');
+const { pushTxnLog, isLogPublisherConfigured, testAnalyticsPush, getTokenDiagnostics } = require('./src/services/ondc/logPublisher.service');
 const {
   handleSearch,
   handleSelect,
@@ -60,13 +60,17 @@ app.get('/health/analytics', async (req, res) => {
     return res.status(503).json({ ok: false, error: 'ONDC_ANALYTICS_TOKEN not set' });
   }
   const result = await testAnalyticsPush();
+  const tokenInfo = getTokenDiagnostics();
   return res.status(result.ok ? 200 : 502).json({
     ok:       result.ok,
     status:   result.status,
     error:    result.error || null,
+    token:    tokenInfo,
     hint:     result.ok
       ? 'Analytics API accepted select_response — Pramaan sync checks should pass'
-      : 'Token rejected or analytics API unreachable — regenerate N.O. token in ONDC portal',
+      : result.status === 401
+        ? 'N.O. token rejected (401). Regenerate via ONDC portal → step 2.b Get N.O. Token for ondc.cottkart.com. Paste JWT only (no Bearer prefix, no quotes).'
+        : 'Analytics API unreachable — check ONDC_ANALYTICS_URL and VPS outbound HTTPS',
     endpoint: process.env.ONDC_ANALYTICS_URL || 'https://analytics-api.aws.ondc.org/v1/api/push-txn-logs',
   });
 });
