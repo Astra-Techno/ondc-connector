@@ -26,16 +26,17 @@ const buildAckBody = (context = null, status = 'ACK') => {
   return { context: enrichedContext, message: { ack: { status } } };
 };
 
-// Await analytics push for select/init/confirm so Pramaan finds the log before scoring
+// Await analytics push for select/init/confirm — Pramaan scores from Network Observability
 const ack = async (res, context = null, status = 'ACK') => {
   const body = buildAckBody(context, status);
 
-  if (body.context?.action) {
+  if (body.context?.action && PRAMAAN_SYNC_ACTIONS.has(body.context.action)) {
     const logType = `${body.context.action}_response`;
-    if (PRAMAAN_SYNC_ACTIONS.has(body.context.action)) {
-      await pushTxnLog(logType, body);
-    } else {
-      pushTxnLog(logType, body).catch(() => {});
+    const result = await pushTxnLog(logType, body);
+    res.locals = res.locals || {};
+    res.locals.analyticsPush = { type: logType, ...result };
+    if (!result.ok) {
+      logger.error(`Pramaan blocker: ${logType} not accepted by analytics API`, result);
     }
   }
 

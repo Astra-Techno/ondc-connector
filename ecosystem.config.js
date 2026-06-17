@@ -2,6 +2,7 @@ module.exports = {
   apps: [{
     name: 'ondc-connector',
     script: 'server.js',
+    node_args: '-r dotenv/config',
     instances: 1,
     autorestart: true,
     watch: false,

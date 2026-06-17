@@ -7,7 +7,7 @@ const rateLimit  = require('express-rate-limit');
 const logger          = require('./src/utils/logger');
 const { ondcTrace }   = require('./src/utils/logger');
 const { connectDB } = require('./src/config/database');
-const { pushTxnLog, isLogPublisherConfigured } = require('./src/services/ondc/logPublisher.service');
+const { pushTxnLog, isLogPublisherConfigured, testAnalyticsPush } = require('./src/services/ondc/logPublisher.service');
 const {
   handleSearch,
   handleSelect,
@@ -53,6 +53,23 @@ app.get('/health', (req, res) => res.json({
   observability: isLogPublisherConfigured() ? 'enabled' : 'disabled — set ONDC_ANALYTICS_TOKEN',
   timestamp:     new Date().toISOString(),
 }));
+
+// Verify analytics token actually works (Pramaan sync-response tests depend on this)
+app.get('/health/analytics', async (req, res) => {
+  if (!isLogPublisherConfigured()) {
+    return res.status(503).json({ ok: false, error: 'ONDC_ANALYTICS_TOKEN not set' });
+  }
+  const result = await testAnalyticsPush();
+  return res.status(result.ok ? 200 : 502).json({
+    ok:       result.ok,
+    status:   result.status,
+    error:    result.error || null,
+    hint:     result.ok
+      ? 'Analytics API accepted select_response — Pramaan sync checks should pass'
+      : 'Token rejected or analytics API unreachable — regenerate N.O. token in ONDC portal',
+    endpoint: process.env.ONDC_ANALYTICS_URL || 'https://analytics-api.aws.ondc.org/v1/api/push-txn-logs',
+  });
+});
 
 // ONDC subscription challenge-response
 // Registry calls this with an encrypted challenge; we decrypt and return the answer
@@ -100,16 +117,29 @@ const ondcLogger = (req, res, next) => {
   const originalJson = res.json.bind(res);
 
   res.json = (body) => {
+    const action = req.body?.context?.action;
+    const analytics = res.locals?.analyticsPush;
+
     ondcTrace.info({
       path:     req.path,
       bap_id,
       txn_id:   req.body?.context?.transaction_id,
       msg_id:   req.body?.context?.message_id,
-      action:   req.body?.context?.action,
+      action,
       request:  req.body,
       response: body,
+      analytics: analytics || null,
       ms:       Date.now() - start,
     });
+
+    if (analytics && !analytics.ok) {
+      logger.error('Pramaan sync-response log NOT in analytics', {
+        type: analytics.type,
+        txn:  req.body?.context?.transaction_id,
+        error: analytics.error,
+      });
+    }
+
     return originalJson(body);
   };
 
@@ -118,12 +148,18 @@ const ondcLogger = (req, res, next) => {
 
 const ONDC_PATHS = ['/search','/select','/init','/confirm','/status','/cancel','/track','/support','/rating','/issue','/issue_status','/update'];
 
-// Publish inbound action logs (select, init, confirm, etc.) to ONDC observability
-const pushInboundTxnLog = (req, res, next) => {
+// Publish inbound action logs to ONDC observability (await for Pramaan-critical APIs)
+const pushInboundTxnLog = async (req, res, next) => {
   const action = req.body?.context?.action;
-  if (action && req.body?.context && req.body?.message !== undefined) {
-    pushTxnLog(action, req.body).catch(() => {});
-  }
+  if (!action || !req.body?.context || req.body?.message === undefined) return next();
+
+  try {
+    if (['select', 'init', 'confirm'].includes(action)) {
+      await pushTxnLog(action, req.body);
+    } else {
+      pushTxnLog(action, req.body).catch(() => {});
+    }
+  } catch (_) { /* never block the request */ }
   next();
 };
 
@@ -248,6 +284,12 @@ const start = async () => {
       );
     } else {
       logger.info('ONDC Network Observability log publisher: enabled');
+      testAnalyticsPush()
+        .then(r => {
+          if (r.ok) logger.info('Analytics API probe: OK — select_response accepted');
+          else logger.error('Analytics API probe FAILED — Pramaan sync tests will fail until fixed', r);
+        })
+        .catch(e => logger.error('Analytics API probe error:', e.message));
     }
   });
 };
