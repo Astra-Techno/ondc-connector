@@ -418,7 +418,7 @@ const handleSearch = async (req, res) => {
     const { context } = req.body;
     logger.info('ONDC /search received', { bap_id: context?.bap_id, domain: context?.domain, city: context?.city });
 
-    ack(res, context);
+    await ack(res, context);
 
     // Only respond to grocery domain — our catalog is ONDC:RET10
     if (context?.domain && context.domain !== 'ONDC:RET10') {
@@ -441,12 +441,12 @@ const handleSearch = async (req, res) => {
   }
 };
 
-const handleSelect = (req, res) => {
+const handleSelect = async (req, res) => {
   const body    = req.body;
   const context = body.context;
   logger.info('ONDC /select received', { transaction_id: context?.transaction_id });
 
-  ack(res, context);
+  await ack(res, context);
 
   setImmediate(async () => {
     let tenant = null;
@@ -517,12 +517,12 @@ const handleSelect = (req, res) => {
   });
 };
 
-const handleInit = (req, res) => {
+const handleInit = async (req, res) => {
   const body    = req.body;
   const context = body.context;
   logger.info('ONDC /init received', { transaction_id: context?.transaction_id });
 
-  ack(res, context);
+  await ack(res, context);
 
   setImmediate(async () => {
     let tenant = null;
@@ -569,12 +569,12 @@ const handleInit = (req, res) => {
   });
 };
 
-const handleConfirm = (req, res) => {
+const handleConfirm = async (req, res) => {
   const body    = req.body;
   const context = body.context;
   logger.info('ONDC /confirm received', { transaction_id: context?.transaction_id });
 
-  ack(res, context);
+  await ack(res, context);
 
   setImmediate(async () => {
     let tenant = null;
@@ -690,16 +690,21 @@ const handleStatus = async (req, res) => {
     const ondcOrderId = body.message?.order_id;
     logger.info('ONDC /status received', { order_id: ondcOrderId });
 
-    ack(res, context);
+    await ack(res, context);
 
-    const tenant = await getTenantByBppId(context?.bpp_id);
-    if (!tenant) return;
+    const tenant = await resolveTenant(context?.bpp_id);
+    if (!tenant?.id && !process.env.ONDC_SIGNING_PRIVATE_KEY) return;
 
     try {
-      const [rows] = await pool.query(
-        `SELECT * FROM ondc_orders WHERE ondc_order_id = ? AND tenant_id = ?`,
-        [ondcOrderId, tenant.id]
-      );
+      const [rows] = tenant.id
+        ? await pool.query(
+            `SELECT * FROM ondc_orders WHERE ondc_order_id = ? AND tenant_id = ?`,
+            [ondcOrderId, tenant.id]
+          )
+        : await pool.query(
+            `SELECT * FROM ondc_orders WHERE ondc_order_id = ? LIMIT 1`,
+            [ondcOrderId]
+          );
       const dbOrder = rows[0] || null;
       let currentStatus = dbOrder?.status || 'Accepted';
       logger.info('handleStatus order lookup', { ondcOrderId, found: !!dbOrder, status: currentStatus });
@@ -730,7 +735,9 @@ const handleStatus = async (req, res) => {
       const cachedEntry = confirmedOrderCache.get(ondcOrderId) || null;
       const cachedOrder = cachedEntry?.order || null;
       const cachedVendor = cachedEntry?.vendor || null;
-      const vendor = cachedVendor || await fetchVendorForOrder(tenant.id, cachedOrder?.provider?.id);
+      const vendor = cachedVendor || (tenant.id
+        ? await fetchVendorForOrder(tenant.id, cachedOrder?.provider?.id)
+        : null);
       const now = new Date().toISOString();
 
       const baseFulfillments = cachedOrder?.fulfillments || [{ id: 'f1', type: 'Delivery' }];
@@ -1232,16 +1239,21 @@ const handleTrack = async (req, res) => {
     const order_id = body.message?.order_id;
     logger.info('ONDC /track received', { order_id });
 
-    ack(res, context);
+    await ack(res, context);
 
-    const tenant = await getTenantByBppId(context?.bpp_id);
-    if (!tenant) return;
+    const tenant = await resolveTenant(context?.bpp_id);
+    if (!tenant?.id && !process.env.ONDC_SIGNING_PRIVATE_KEY) return;
 
     try {
-      const [rows] = await pool.query(
-        `SELECT * FROM ondc_orders WHERE ondc_order_id = ? AND tenant_id = ?`,
-        [order_id, tenant.id]
-      );
+      const [rows] = tenant.id
+        ? await pool.query(
+            `SELECT * FROM ondc_orders WHERE ondc_order_id = ? AND tenant_id = ?`,
+            [order_id, tenant.id]
+          )
+        : await pool.query(
+            `SELECT * FROM ondc_orders WHERE ondc_order_id = ? LIMIT 1`,
+            [order_id]
+          );
       const dbOrder = rows[0];
 
       let trackingUrl    = null;
@@ -1258,14 +1270,17 @@ const handleTrack = async (req, res) => {
       }
 
       const cachedTrack = confirmedOrderCache.get(order_id);
-      const trackVendor = cachedTrack?.vendor || await fetchVendorForOrder(tenant.id, cachedTrack?.order?.provider?.id);
+      const trackVendor = tenant.id
+        ? (cachedTrack?.vendor || await fetchVendorForOrder(tenant.id, cachedTrack?.order?.provider?.id))
+        : cachedTrack?.vendor || null;
       const trackNow = new Date().toISOString();
       const trackGps = trackVendor?.gps || '12.914082,77.638980';
+      const subscriberUrl = tenant.subscriber_url || process.env.ONDC_SUBSCRIBER_URL;
 
       await sendCallback(context.bap_uri, 'on_track', context, {
         tracking: {
           id:     order_id,
-          url:    trackingUrl || `${tenant.subscriber_url}/track/${order_id}`,
+          url:    trackingUrl || `${subscriberUrl}/track/${order_id}`,
           status: trackingStatus,
           location: {
             gps:        trackGps,

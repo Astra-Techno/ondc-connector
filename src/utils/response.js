@@ -8,6 +8,9 @@ const error = (res, message = 'Error', code = 500, errors = null) => {
   return res.status(code).json({ success: false, message, errors });
 };
 
+// Actions Pramaan verifies via Network Observability before scoring the flow
+const PRAMAAN_SYNC_ACTIONS = new Set(['select', 'init', 'confirm']);
+
 // Build ONDC-compliant sync ACK body and publish to Network Observability.
 // Pramaan requires select_response / init_response / confirm_response log entries.
 const buildAckBody = (context = null, status = 'ACK') => {
@@ -23,13 +26,17 @@ const buildAckBody = (context = null, status = 'ACK') => {
   return { context: enrichedContext, message: { ack: { status } } };
 };
 
-const ack = (res, context = null, status = 'ACK') => {
+// Await analytics push for select/init/confirm so Pramaan finds the log before scoring
+const ack = async (res, context = null, status = 'ACK') => {
   const body = buildAckBody(context, status);
 
-  // Fire-and-forget: publish sync response (e.g. select_response) for Pramaan
   if (body.context?.action) {
     const logType = `${body.context.action}_response`;
-    pushTxnLog(logType, body).catch(() => {});
+    if (PRAMAAN_SYNC_ACTIONS.has(body.context.action)) {
+      await pushTxnLog(logType, body);
+    } else {
+      pushTxnLog(logType, body).catch(() => {});
+    }
   }
 
   return res.status(200).json(body);
