@@ -33,11 +33,15 @@ const scrubPII = (payload) => {
 // Push one transaction log entry to ONDC Network Observability.
 // type examples: "select", "select_response", "on_select", "init_response", etc.
 const pushTxnLog = async (type, data) => {
-  if (!ANALYTICS_TOKEN) return;
-  if (!type || !data) return;
+  if (!ANALYTICS_TOKEN) {
+    return { ok: false, error: 'ONDC_ANALYTICS_TOKEN not set' };
+  }
+  if (!type || !data) {
+    return { ok: false, error: 'missing type or data' };
+  }
 
   try {
-    await axios.post(
+    const response = await axios.post(
       ANALYTICS_URL,
       { type, data: scrubPII(data) },
       {
@@ -51,12 +55,16 @@ const pushTxnLog = async (type, data) => {
     logger.info(`ONDC txn log pushed: ${type}`, {
       txn: data?.context?.transaction_id,
       msg: data?.context?.message_id,
+      status: response.status,
     });
+    return { ok: true, status: response.status, data: response.data };
   } catch (err) {
     const detail = err.response?.data
-      ? JSON.stringify(err.response.data).slice(0, 200)
+      ? JSON.stringify(err.response.data).slice(0, 500)
       : err.message;
-    logger.warn(`ONDC txn log push failed (${type}): ${detail}`);
+    const status = err.response?.status;
+    logger.error(`ONDC txn log push FAILED (${type}) [${status || 'no-response'}]: ${detail}`);
+    return { ok: false, error: detail, status };
   }
 };
 

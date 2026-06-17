@@ -7,10 +7,40 @@ const { pushTxnLog } = require('./logPublisher.service');
 
 const DELIVERY_CHARGE = 30;
 
+// Merge tenant DB config with .env fallbacks (signing keys often live in env only)
+const resolveOndcConfig = (tenant) => ({
+  tenant_id:          tenant?.tenant_id || tenant?.id,
+  subscriber_id:      tenant?.subscriber_id      || process.env.ONDC_SUBSCRIBER_ID,
+  subscriber_url:     tenant?.subscriber_url     || process.env.ONDC_SUBSCRIBER_URL,
+  signing_private_key: tenant?.signing_private_key || process.env.ONDC_SIGNING_PRIVATE_KEY,
+  unique_key_id:      tenant?.unique_key_id      || process.env.ONDC_UNIQUE_KEY_ID,
+});
+
+const buildCallbackUrl = (bapUri, action) => {
+  if (!bapUri) return null;
+  return `${bapUri.replace(/\/+$/, '')}/${action}`;
+};
+
 // Build ONDC quote from selected items
 // Returns { quote, outOfStockItems } — outOfStockItems is an array of item IDs with insufficient stock
 const buildQuote = async (items, tenantId) => {
   const productIds = items.map(item => item.id);
+
+  if (!productIds.length) {
+    return {
+      quote: {
+        price: { currency: 'INR', value: String(DELIVERY_CHARGE) },
+        breakup: [{
+          title: 'Delivery charges',
+          '@ondc/org/item_id': 'f1',
+          '@ondc/org/title_type': 'delivery',
+          price: { currency: 'INR', value: String(DELIVERY_CHARGE) },
+        }],
+        ttl: 'P1D',
+      },
+      outOfStockItems: [],
+    };
+  }
 
   const [products] = await pool.query(
     `SELECT external_product_id, name, price, stock FROM products
@@ -107,15 +137,24 @@ const getTenantByBppId = async (bppId) => {
 
 // Send async callback to BAP with retry (3 attempts, exponential backoff)
 const sendCallback = async (bapUri, action, context, message, ondcConfig, retries = 3) => {
-  if (!bapUri) { logger.warn(`sendCallback: no bap_uri for ${action}`); return; }
+  const config = resolveOndcConfig(ondcConfig);
+  const callbackUrl = buildCallbackUrl(bapUri, action);
 
-  const callbackUrl = `${bapUri}/${action}`;
+  if (!callbackUrl) {
+    logger.error(`sendCallback: no bap_uri for ${action}`, { txn: context?.transaction_id });
+    return;
+  }
+
+  if (!config.signing_private_key) {
+    logger.error(`sendCallback: no signing key for ${action} — callback will likely be rejected`);
+  }
+
   const payload = {
     context: {
       ...context,
       action,
-      bpp_id:     ondcConfig?.subscriber_id,
-      bpp_uri:    ondcConfig?.subscriber_url,
+      bpp_id:     config.subscriber_id,
+      bpp_uri:    config.subscriber_url,
       timestamp:  new Date().toISOString(),
       message_id: uuidv4(),
       ttl:        'PT30S',
@@ -130,7 +169,7 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
          (tenant_id, action, direction, transaction_id, message_id, bap_id, payload, status)
        VALUES (?, ?, 'out', ?, ?, ?, ?, 'pending')`,
       [
-        ondcConfig?.tenant_id || ondcConfig?.id,
+        config.tenant_id,
         action,
         context?.transaction_id,
         payload.context.message_id,
@@ -146,16 +185,16 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
     try {
       const headers = { 'Content-Type': 'application/json' };
       try {
-        if (ondcConfig?.signing_private_key) {
+        if (config.signing_private_key) {
           headers['Authorization'] = createAuthHeader(
-            ondcConfig.signing_private_key,
-            ondcConfig.subscriber_id,
-            ondcConfig.unique_key_id,
+            config.signing_private_key,
+            config.subscriber_id,
+            config.unique_key_id,
             payload
           );
         }
       } catch (e) {
-        logger.warn('Auth header skipped:', e.message);
+        logger.error(`Auth header failed for ${action}:`, e.message);
       }
 
       const response = await axios.post(callbackUrl, payload, { headers, timeout: 30000 });
@@ -201,4 +240,12 @@ const updateOrderStatus = async (ondcOrderId, status) => {
   );
 };
 
-module.exports = { buildQuote, buildOrderObject, getTenantByBppId, sendCallback, updateOrderStatus };
+module.exports = {
+  buildQuote,
+  buildOrderObject,
+  getTenantByBppId,
+  sendCallback,
+  updateOrderStatus,
+  resolveOndcConfig,
+  buildCallbackUrl,
+};

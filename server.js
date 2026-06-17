@@ -50,6 +50,7 @@ app.get('/health', (req, res) => res.json({
   version:       '1.0.0',
   subscriber_id: process.env.ONDC_SUBSCRIBER_ID,
   env:           process.env.ONDC_ENV,
+  observability: isLogPublisherConfigured() ? 'enabled' : 'disabled — set ONDC_ANALYTICS_TOKEN',
   timestamp:     new Date().toISOString(),
 }));
 

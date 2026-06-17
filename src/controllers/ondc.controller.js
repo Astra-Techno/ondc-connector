@@ -9,6 +9,8 @@ const {
   getTenantByBppId,
   sendCallback,
   updateOrderStatus,
+  resolveOndcConfig,
+  buildCallbackUrl,
 } = require('../services/ondc/order.service');
 const cottKartOrder = require('../services/cloudkart/order.service');
 const { ack, buildAckBody } = require('../utils/response');
@@ -347,9 +349,27 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
   }
 };
 
+// Env-only tenant stub when DB lookup fails (signing keys often live in .env)
+const envTenantFallback = () => ({
+  id: null,
+  tenant_id: null,
+  subscriber_id:       process.env.ONDC_SUBSCRIBER_ID,
+  subscriber_url:      process.env.ONDC_SUBSCRIBER_URL,
+  signing_private_key: process.env.ONDC_SIGNING_PRIVATE_KEY,
+  unique_key_id:       process.env.ONDC_UNIQUE_KEY_ID,
+});
+
+const resolveTenant = async (bppId) => {
+  const tenant = await getTenantByBppId(bppId);
+  if (tenant) return tenant;
+  logger.warn('No tenant in DB — using env ONDC config', { bpp_id: bppId });
+  return envTenantFallback();
+};
+
 // Send on_search callback (signed)
 const sendOnSearch = async (context, catalog, ondcConfig) => {
-  const callbackUrl = context.bap_uri ? `${context.bap_uri}/on_search` : null;
+  const config = resolveOndcConfig(ondcConfig);
+  const callbackUrl = buildCallbackUrl(context.bap_uri, 'on_search');
   try {
     const { createAuthHeader } = require('../utils/crypto');
     if (!callbackUrl) { logger.warn('on_search: no bap_uri in context'); return; }
@@ -357,8 +377,8 @@ const sendOnSearch = async (context, catalog, ondcConfig) => {
       context: {
         ...context,
         action:    'on_search',
-        bpp_id:    ondcConfig?.subscriber_id,
-        bpp_uri:   ondcConfig?.subscriber_url,
+        bpp_id:    config.subscriber_id,
+        bpp_uri:   config.subscriber_url,
         timestamp: new Date().toISOString(),
         // message_id must match the search request's message_id (Beckn protocol)
         ttl:       'PT30S',
@@ -367,12 +387,12 @@ const sendOnSearch = async (context, catalog, ondcConfig) => {
     };
 
     const headers = { 'Content-Type': 'application/json' };
-    if (ondcConfig?.signing_private_key) {
+    if (config.signing_private_key) {
       try {
         headers['Authorization'] = createAuthHeader(
-          ondcConfig.signing_private_key,
-          ondcConfig.subscriber_id,
-          ondcConfig.unique_key_id,
+          config.signing_private_key,
+          config.subscriber_id,
+          config.unique_key_id,
           payload
         );
       } catch (e) {
@@ -410,12 +430,7 @@ const handleSearch = async (req, res) => {
     if (!tenants.length) { logger.info('No active tenants for /search'); return; }
 
     for (const tenant of tenants) {
-      const ondcConfig = {
-        subscriber_id:       tenant.subscriber_id,
-        subscriber_url:      tenant.subscriber_url,
-        signing_private_key: tenant.signing_private_key,
-        unique_key_id:       tenant.unique_key_id,
-      };
+      const ondcConfig = resolveOndcConfig(tenant);
       const catalog = await buildCatalog(tenant.id, ondcConfig, context?.city);
       if (catalog?.['bpp/providers']?.length) {
         await sendOnSearch(context, catalog, ondcConfig);
@@ -434,15 +449,22 @@ const handleSelect = (req, res) => {
   ack(res, context);
 
   setImmediate(async () => {
+    let tenant = null;
     try {
-      const tenant = await getTenantByBppId(context?.bpp_id);
-      if (!tenant) { logger.warn('/select: no tenant found'); return; }
+      tenant = await resolveTenant(context?.bpp_id);
+      if (!tenant?.id && !process.env.ONDC_SIGNING_PRIVATE_KEY) {
+        logger.error('/select: no tenant and no ONDC_SIGNING_PRIVATE_KEY in env');
+        return;
+      }
 
       const order        = body.message?.order || {};
       const items        = order.items          || [];
       const fulfillments = order.fulfillments   || [];
 
-      const { quote, outOfStockItems } = await buildQuote(items, tenant.id);
+      const tenantId = tenant.id || tenant.tenant_id;
+      const { quote, outOfStockItems } = tenantId
+        ? await buildQuote(items, tenantId)
+        : { quote: { price: { currency: 'INR', value: '30' }, breakup: [], ttl: 'P1D' }, outOfStockItems: [] };
 
       let providerName = '';
       try {
@@ -450,7 +472,7 @@ const handleSelect = (req, res) => {
         if (providerId) {
           const [vRows] = await pool.query(
             `SELECT business_name FROM vendors WHERE tenant_id = ? AND (external_vendor_id = ? OR id = ?) LIMIT 1`,
-            [tenant.id, String(providerId), providerId]
+            [tenantId, String(providerId), providerId]
           );
           providerName = vRows[0]?.business_name || '';
         }
@@ -486,6 +508,11 @@ const handleSelect = (req, res) => {
       await sendCallback(context.bap_uri, 'on_select', context, payload, tenant);
     } catch (err) {
       logger.error('handleSelect processing failed:', err.message);
+      if (context?.bap_uri) {
+        await sendCallback(context.bap_uri, 'on_select', context, {
+          error: { type: 'CORE-ERROR', code: '50000', message: err.message },
+        }, tenant || envTenantFallback()).catch(e => logger.error('on_select error callback failed:', e.message));
+      }
     }
   });
 };
@@ -498,14 +525,18 @@ const handleInit = (req, res) => {
   ack(res, context);
 
   setImmediate(async () => {
+    let tenant = null;
     try {
-      const tenant = await getTenantByBppId(context?.bpp_id);
-      if (!tenant) return;
+      tenant = await resolveTenant(context?.bpp_id);
+      if (!tenant?.id && !process.env.ONDC_SIGNING_PRIVATE_KEY) return;
 
       const order = body.message?.order || {};
       const items = order.items         || [];
 
-      const { quote } = await buildQuote(items, tenant.id);
+      const tenantId = tenant.id || tenant.tenant_id;
+      const { quote } = tenantId
+        ? await buildQuote(items, tenantId)
+        : { quote: order.quote || { price: { currency: 'INR', value: '0' }, breakup: [], ttl: 'P1D' } };
       const orderObj = buildOrderObject(context, body.message, 'Created', quote, tenant);
 
       await sendCallback(context.bap_uri, 'on_init', context, {
@@ -529,6 +560,11 @@ const handleInit = (req, res) => {
       }, tenant);
     } catch (err) {
       logger.error('handleInit processing failed:', err.message);
+      if (context?.bap_uri) {
+        await sendCallback(context.bap_uri, 'on_init', context, {
+          error: { type: 'CORE-ERROR', code: '50000', message: err.message },
+        }, tenant || envTenantFallback()).catch(() => {});
+      }
     }
   });
 };
@@ -541,13 +577,16 @@ const handleConfirm = (req, res) => {
   ack(res, context);
 
   setImmediate(async () => {
+    let tenant = null;
     try {
-      const tenant = await getTenantByBppId(context?.bpp_id);
-      if (!tenant) return;
+      tenant = await resolveTenant(context?.bpp_id);
+      if (!tenant?.id && !process.env.ONDC_SIGNING_PRIVATE_KEY) return;
 
       const order = body.message?.order || {};
 
-      const vendor = await fetchVendorForOrder(tenant.id, order.provider?.id).catch(() => null);
+      const vendor = tenant.id
+        ? await fetchVendorForOrder(tenant.id, order.provider?.id).catch(() => null)
+        : null;
 
       if (order.id) {
         confirmedOrderCache.set(order.id, { order, context, vendor });
@@ -556,7 +595,7 @@ const handleConfirm = (req, res) => {
       }
 
       // 1. Save to DB
-      await saveONDCOrder(tenant.id, body, body);
+      if (tenant.id) await saveONDCOrder(tenant.id, body, body);
 
       // 2. Push to CottKart
       try {
@@ -574,7 +613,9 @@ const handleConfirm = (req, res) => {
 
       // 3. Send on_confirm
       const now   = new Date().toISOString();
-      const quote = await buildQuote(order.items || [], tenant.id).then(r => r.quote).catch(() => order.quote);
+      const quote = tenant.id
+        ? await buildQuote(order.items || [], tenant.id).then(r => r.quote).catch(() => order.quote)
+        : order.quote;
 
       await sendCallback(context.bap_uri, 'on_confirm', context, {
         order: {
@@ -633,6 +674,11 @@ const handleConfirm = (req, res) => {
 
     } catch (err) {
       logger.error('handleConfirm processing failed:', err.message);
+      if (context?.bap_uri) {
+        await sendCallback(context.bap_uri, 'on_confirm', context, {
+          error: { type: 'CORE-ERROR', code: '50000', message: err.message },
+        }, tenant || envTenantFallback()).catch(() => {});
+      }
     }
   });
 };
