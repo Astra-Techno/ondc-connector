@@ -1,4 +1,5 @@
 const { pushTxnLog } = require('../services/ondc/logPublisher.service');
+const logger = require('./logger');
 
 const success = (res, data, message = 'Success', code = 200) => {
   return res.status(code).json({ success: true, message, data });
