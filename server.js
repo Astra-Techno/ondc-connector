@@ -61,17 +61,25 @@ app.get('/health/analytics', async (req, res) => {
   }
   const result = await testAnalyticsPush();
   const tokenInfo = getTokenDiagnostics();
+  let hint = 'Analytics API unreachable — check ONDC_ANALYTICS_URL and VPS outbound HTTPS';
+  if (result.ok) {
+    hint = 'Analytics API accepted select_response — Pramaan sync checks should pass';
+  } else if (result.status === 401) {
+    if (tokenInfo.jwt?.expired) {
+      hint = 'JWT is expired — regenerate N.O. token in ONDC portal (step 2.b)';
+    } else if (tokenInfo.jwt?.subscriber_mismatch) {
+      hint = `JWT subscriber (${tokenInfo.jwt.subscriber_in_token}) does not match ONDC_SUBSCRIBER_ID (${tokenInfo.subscriber_id})`;
+    } else {
+      hint = 'JWT format is valid but ONDC rejected it. Regenerate N.O. token; if still 401, email support.pramaan@ondc.org to activate analytics access for your subscriber.';
+    }
+  }
   return res.status(result.ok ? 200 : 502).json({
     ok:       result.ok,
     status:   result.status,
     error:    result.error || null,
     token:    tokenInfo,
-    hint:     result.ok
-      ? 'Analytics API accepted select_response — Pramaan sync checks should pass'
-      : result.status === 401
-        ? 'N.O. token rejected (401). Regenerate via ONDC portal → step 2.b Get N.O. Token for ondc.cottkart.com. Paste JWT only (no Bearer prefix, no quotes).'
-        : 'Analytics API unreachable — check ONDC_ANALYTICS_URL and VPS outbound HTTPS',
-    endpoint: process.env.ONDC_ANALYTICS_URL || 'https://analytics-api.aws.ondc.org/v1/api/push-txn-logs',
+    hint,
+    endpoint: process.env.ONDC_ANALYTICS_URL || 'https://analytics-api-pre-prod.aws.ondc.org/v1/api/push-txn-logs',
   });
 });
 

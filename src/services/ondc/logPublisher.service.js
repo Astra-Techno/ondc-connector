@@ -3,7 +3,7 @@ const logger = require('../../utils/logger');
 
 const ANALYTICS_URL =
   process.env.ONDC_ANALYTICS_URL ||
-  'https://analytics-api.aws.ondc.org/v1/api/push-txn-logs';
+  'https://analytics-api-pre-prod.aws.ondc.org/v1/api/push-txn-logs';
 
 const getAnalyticsToken = () => {
   const raw = process.env.ONDC_ANALYTICS_TOKEN;
@@ -120,12 +120,26 @@ const pushTxnLog = async (type, data, retries = 3) => {
 
 const isLogPublisherConfigured = () => Boolean(getAnalyticsToken());
 
+const decodeJwtPayload = (token) => {
+  try {
+    const parts = token.split('.');
+    if (parts.length < 2) return null;
+    const json = Buffer.from(parts[1], 'base64url').toString('utf8');
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+};
+
 const getTokenDiagnostics = () => {
   const raw = process.env.ONDC_ANALYTICS_TOKEN;
   if (!raw) return { configured: false };
   const trimmed = raw.trim();
   const token = trimmed.replace(/^Bearer\s+/i, '');
-  return {
+  const claims = decodeJwtPayload(token);
+  const now = Math.floor(Date.now() / 1000);
+
+  const diag = {
     configured: true,
     length: token.length,
     looks_like_jwt: token.startsWith('eyJ'),
@@ -133,6 +147,24 @@ const getTokenDiagnostics = () => {
     has_whitespace: /\s/.test(token),
     subscriber_id: process.env.ONDC_SUBSCRIBER_ID || null,
   };
+
+  if (claims) {
+    const exp = claims.exp;
+    const tokenSubscriber =
+      claims.subscriber_id || claims.subscriberId || claims.sub || claims.np_id || claims.npId || null;
+    diag.jwt = {
+      subscriber_in_token: tokenSubscriber,
+      issuer: claims.iss || null,
+      expires_at: exp ? new Date(exp * 1000).toISOString() : null,
+      expired: exp ? exp < now : null,
+      env: claims.env || claims.environment || null,
+    };
+    if (tokenSubscriber && diag.subscriber_id && tokenSubscriber !== diag.subscriber_id) {
+      diag.jwt.subscriber_mismatch = true;
+    }
+  }
+
+  return diag;
 };
 
 // Live probe — call from /health/analytics or startup
