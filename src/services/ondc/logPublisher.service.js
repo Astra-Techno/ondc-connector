@@ -89,7 +89,13 @@ const pushTxnLog = async (type, data, retries = 3) => {
     return { ok: false, error: 'missing type or data' };
   }
 
-  const payload = { type, data: scrubPII(enrichLogData(data)) };
+  const subscriberId = data?.context?.bpp_id || process.env.ONDC_SUBSCRIBER_ID;
+  const payload = {
+    type,
+    subscriber_id: subscriberId,
+    np_id: subscriberId,
+    data: scrubPII(enrichLogData(data)),
+  };
   const authHeaders = [
     `Bearer ${token}`,
     token,
