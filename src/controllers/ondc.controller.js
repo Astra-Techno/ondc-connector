@@ -890,37 +890,72 @@ const handleUpdate = async (req, res) => {
           return;
         }
 
+        // Pramaan's /update only sends minimal order (id + return fulfillment).
+        // Use the confirmed order from cache for full fields (billing, items, quote, etc.)
+        const cachedEntry = confirmedOrderCache.get(order.id);
+        const confirmedOrder = cachedEntry?.order || {};
+        const confirmedContext = cachedEntry?.context || context;
+
+        const fullOrder = {
+          ...confirmedOrder,
+          ...order,                                       // overlay /update fields
+          provider:  order.provider  || confirmedOrder.provider,
+          items:     order.items     || confirmedOrder.items,
+          billing:   order.billing   || confirmedOrder.billing,
+          quote:     order.quote     || confirmedOrder.quote,
+          payment:   order.payment   || confirmedOrder.payment,
+        };
+
+        // Merge context: use /update context but fill gaps from confirmed context
+        const fullContext = { ...confirmedContext, ...context };
+
         const now = new Date().toISOString();
+
+        // Build fulfillments: keep original delivery + set Return_Initiated on return fulfillments
+        const origFulfillments = confirmedOrder.fulfillments || [];
+        const updateFulfillments = order.fulfillments || [];
         const returnPayload = {
-          id:    order.id,
+          id:    fullOrder.id,
           state: 'Completed',
-          provider:  order.provider,
-          items:     order.items,
-          billing:   order.billing,
-          quote:     order.quote,
-          payment:   order.payment,
-          fulfillments: (order.fulfillments || []).map(f => ({
-            ...f,
-            state: { descriptor: { code: 'Return_Initiated' } },
-          })),
-          created_at: order.created_at || now,
+          provider:     fullOrder.provider,
+          items:        fullOrder.items,
+          billing:      fullOrder.billing,
+          quote:        fullOrder.quote,
+          payment:      fullOrder.payment,
+          fulfillments: [
+            // Original delivery fulfillment(s) from confirmed order
+            ...origFulfillments.map(f => ({
+              ...f,
+              state: f.state || { descriptor: { code: 'Order-delivered' } },
+            })),
+            // Return fulfillment(s) from /update request
+            ...updateFulfillments
+              .filter(f => f.type === 'Return' || !origFulfillments.some(o => o.id === f.id))
+              .map(f => ({
+                ...f,
+                state: { descriptor: { code: 'Return_Initiated' } },
+              })),
+          ],
+          created_at: fullOrder.created_at || now,
           updated_at: now,
         };
 
         logger.info('Sending on_update (Return_Initiated)', {
-          order_id: order.id,
-          bap_uri: context?.bap_uri,
-          context_action: context?.action,
-          fulfillments_count: (order.fulfillments || []).length,
+          order_id: fullOrder.id,
+          bap_uri: fullContext?.bap_uri,
+          has_cached_order: !!cachedEntry,
+          fulfillments_count: returnPayload.fulfillments.length,
+          has_billing: !!returnPayload.billing,
+          has_items: !!returnPayload.items?.length,
         });
 
-        await sendCallback(context.bap_uri, 'on_update', context, { order: returnPayload }, tenant);
-        logger.info('on_update (Return_Initiated) sent OK', { order_id: order.id });
+        await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: returnPayload }, tenant);
+        logger.info('on_update (Return_Initiated) sent OK', { order_id: fullOrder.id });
 
-        // Cache the order for subsequent return trigger calls
-        if (order.id) {
-          confirmedOrderCache.set(order.id, { order, context });
-          lastConfirmedOrderId = order.id;
+        // Update cache with full order + /update context (for subsequent trigger calls)
+        if (fullOrder.id) {
+          confirmedOrderCache.set(fullOrder.id, { order: fullOrder, context: fullContext });
+          lastConfirmedOrderId = fullOrder.id;
         }
       } catch (err) {
         logger.error('handleUpdate return callback failed:', err.message, err.stack);
