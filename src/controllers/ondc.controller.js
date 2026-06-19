@@ -105,6 +105,12 @@ const buildFulfillmentWithLocation = (f, vendor, stateCode, now) => {
         },
       },
       time:    { range: { start: t1h, end: t2h }, timestamp: t1h },
+      instructions: {
+        code: 'ready_for_pickup',
+        name: 'Ready for pickup',
+        short_desc: 'Order is ready for pickup',
+        long_desc: 'Order has been packed and is ready for pickup by logistics',
+      },
       contact: { phone, email: vendor?.email || 'support@store.in' },
     },
     end: {
@@ -589,7 +595,7 @@ const handleConfirm = async (req, res) => {
         : null;
 
       if (order.id) {
-        confirmedOrderCache.set(order.id, { order, context, vendor });
+        confirmedOrderCache.set(order.id, { order, context, vendor, confirmTimestamp: null });
         lastConfirmedOrderId = order.id;
         logger.info('Cached confirmed order', { order_id: order.id });
       }
@@ -645,6 +651,11 @@ const handleConfirm = async (req, res) => {
         },
       }, tenant);
 
+      // Save the confirm updated_at so on_update can reuse it (Pramaan expects match)
+      const confirmUpdatedAt = order.updated_at || now;
+      const cached = confirmedOrderCache.get(order.id);
+      if (cached) cached.confirmTimestamp = confirmUpdatedAt;
+
       // Auto-trigger on_status sequence after on_confirm (for Pramaan certification)
       // Sends: Packed → Agent-assigned → Order-picked-up → Out-for-delivery → Order-delivered
       // with 2s delay between each. Flows that send /cancel (3B) will interrupt naturally.
@@ -684,7 +695,22 @@ const handleConfirm = async (req, res) => {
             type: 'Return',
             state: { descriptor: { code: returnState } },
             '@ondc/org/provider_name': vendor?.business_name || order.provider?.descriptor?.name || '',
+            tags: [{
+              code: 'return_request',
+              list: [
+                { code: 'id', value: 'r1' },
+                { code: 'item_id', value: (order.items?.[0]?.id || '') },
+                { code: 'parent_item_id', value: '' },
+                { code: 'item_quantity', value: String(order.items?.[0]?.quantity?.count || 1) },
+                { code: 'reason_id', value: '001' },
+                { code: 'reason_desc', value: 'detailed description for return' },
+                { code: 'images', value: '' },
+                { code: 'ttl_approval', value: 'PT24H' },
+                { code: 'ttl_reverseqc', value: 'P3D' },
+              ],
+            }],
           };
+          // Pramaan expects updated_at to match the on_confirm updated_at (from outer scope)
           const returnPayload = {
             id:       order.id,
             state:    'Completed',
@@ -696,7 +722,7 @@ const handleConfirm = async (req, res) => {
             payment:  order.payment,
             tags:     ORDER_TAGS,
             created_at: order.created_at || retNow,
-            updated_at: retNow,
+            updated_at: confirmUpdatedAt,
           };
           await sendCallback(context.bap_uri, 'on_update', context, { order: returnPayload }, tenant);
           logger.info(`Auto on_update (${returnState}) sent`, { order_id: order.id });
@@ -1080,7 +1106,7 @@ const handleUpdate = async (req, res) => {
           logger.warn('handleUpdate payment: order not in cache', { order_id: order.id });
           return;
         }
-        const { order: confirmedOrder, context: confirmedContext, vendor } = cachedEntry;
+        const { order: confirmedOrder, context: confirmedContext, vendor, confirmTimestamp } = cachedEntry;
         const fullContext = { ...confirmedContext, ...context };
         const now = new Date().toISOString();
 
@@ -1092,6 +1118,20 @@ const handleUpdate = async (req, res) => {
           type: 'Return',
           state: { descriptor: { code: 'Return_Delivered' } },
           '@ondc/org/provider_name': vendor?.business_name || confirmedOrder.provider?.descriptor?.name || '',
+          tags: [{
+            code: 'return_request',
+            list: [
+              { code: 'id', value: 'r1' },
+              { code: 'item_id', value: (confirmedOrder.items?.[0]?.id || '') },
+              { code: 'parent_item_id', value: '' },
+              { code: 'item_quantity', value: String(confirmedOrder.items?.[0]?.quantity?.count || 1) },
+              { code: 'reason_id', value: '001' },
+              { code: 'reason_desc', value: 'detailed description for return' },
+              { code: 'images', value: '' },
+              { code: 'ttl_approval', value: 'PT24H' },
+              { code: 'ttl_reverseqc', value: 'P3D' },
+            ],
+          }],
         };
         const returnPayload = {
           id:       confirmedOrder.id || order.id,
@@ -1104,7 +1144,7 @@ const handleUpdate = async (req, res) => {
           payment:  order.payment || confirmedOrder.payment,
           tags:     ORDER_TAGS,
           created_at: confirmedOrder.created_at || now,
-          updated_at: now,
+          updated_at: confirmTimestamp || confirmedOrder.updated_at || now,
         };
         await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: returnPayload }, tenant);
         logger.info('handleUpdate payment: on_update (Return_Delivered) sent', { order_id: order.id });
