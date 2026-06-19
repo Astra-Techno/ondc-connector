@@ -110,7 +110,7 @@ const buildFulfillmentWithLocation = (f, vendor, stateCode, now) => {
         name: 'Ready for pickup',
         short_desc: 'Order is ready for pickup',
         long_desc: 'Order has been packed and is ready for pickup by logistics',
-        images: [],
+        images: ['https://ondc.cottkart.com/pickup-instructions.png'],
       },
       contact: { phone, email: vendor?.email || 'support@store.in' },
     },
