@@ -669,6 +669,40 @@ const handleConfirm = async (req, res) => {
           await delay(2000);
         }
         logger.info('Auto on_status sequence complete', { order_id: order.id });
+
+        // Flow 4A: After Order-delivered, proactively send on_update Return_Initiated → Return_Delivered
+        // Pramaan expects these as part of the auto sequence (not triggered by /update)
+        await delay(3000);
+        const returnSteps = ['Return_Initiated', 'Return_Delivered'];
+        for (const returnState of returnSteps) {
+          const retNow = new Date().toISOString();
+          const deliveryFulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
+            buildFulfillmentWithLocation(f, vendor, 'Order-delivered', retNow)
+          );
+          const returnFulfillment = {
+            id: 'r1',
+            type: 'Return',
+            state: { descriptor: { code: returnState } },
+            '@ondc/org/provider_name': vendor?.business_name || order.provider?.descriptor?.name || '',
+          };
+          const returnPayload = {
+            id:       order.id,
+            state:    'Completed',
+            provider: order.provider,
+            items:    order.items,
+            billing:  order.billing,
+            fulfillments: [...deliveryFulfillments, returnFulfillment],
+            quote:    order.quote,
+            payment:  order.payment,
+            tags:     ORDER_TAGS,
+            created_at: order.created_at || retNow,
+            updated_at: retNow,
+          };
+          await sendCallback(context.bap_uri, 'on_update', context, { order: returnPayload }, tenant);
+          logger.info(`Auto on_update (${returnState}) sent`, { order_id: order.id });
+          if (returnState !== 'Return_Delivered') await delay(2000);
+        }
+        logger.info('Auto on_update return sequence complete', { order_id: order.id });
       };
       autoStatusSequence().catch(err => logger.error('Auto on_status sequence failed:', err.message));
 
@@ -1035,7 +1069,50 @@ const handleUpdate = async (req, res) => {
       }
     })();
   }
-  // For settlement updates (payment target) — ACK only, no callback
+  // For settlement updates (payment target) — send on_update with Return_Delivered
+  // Pramaan Flow 4A sends update_target=payment after Order-delivered
+  if (update_target === 'payment') {
+    (async () => {
+      try {
+        const tenant = await resolveTenant(context?.bpp_id);
+        const cachedEntry = confirmedOrderCache.get(order.id);
+        if (!cachedEntry) {
+          logger.warn('handleUpdate payment: order not in cache', { order_id: order.id });
+          return;
+        }
+        const { order: confirmedOrder, context: confirmedContext, vendor } = cachedEntry;
+        const fullContext = { ...confirmedContext, ...context };
+        const now = new Date().toISOString();
+
+        const deliveryFulfillments = (confirmedOrder.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
+          buildFulfillmentWithLocation(f, vendor, 'Order-delivered', now)
+        );
+        const returnFulfillment = {
+          id: 'r1',
+          type: 'Return',
+          state: { descriptor: { code: 'Return_Delivered' } },
+          '@ondc/org/provider_name': vendor?.business_name || confirmedOrder.provider?.descriptor?.name || '',
+        };
+        const returnPayload = {
+          id:       confirmedOrder.id || order.id,
+          state:    'Completed',
+          provider: confirmedOrder.provider,
+          items:    confirmedOrder.items,
+          billing:  confirmedOrder.billing,
+          fulfillments: [...deliveryFulfillments, returnFulfillment],
+          quote:    confirmedOrder.quote,
+          payment:  order.payment || confirmedOrder.payment,
+          tags:     ORDER_TAGS,
+          created_at: confirmedOrder.created_at || now,
+          updated_at: now,
+        };
+        await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: returnPayload }, tenant);
+        logger.info('handleUpdate payment: on_update (Return_Delivered) sent', { order_id: order.id });
+      } catch (err) {
+        logger.error('handleUpdate payment callback failed:', err.message);
+      }
+    })();
+  }
 };
 
 // triggerMerchantUpdate — internal endpoint to initiate merchant-side on_update
