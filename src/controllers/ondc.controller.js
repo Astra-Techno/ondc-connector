@@ -890,6 +890,12 @@ const handleUpdate = async (req, res) => {
         const cachedEntry = confirmedOrderCache.get(order.id);
         const confirmedOrder = cachedEntry?.order || {};
         const confirmedContext = cachedEntry?.context || {};
+        const cachedVendor = cachedEntry?.vendor || null;
+
+        // Fetch vendor for fulfillment start location
+        const vendor = cachedVendor || (tenant?.id
+          ? await fetchVendorForOrder(tenant.id, (order.provider?.id || confirmedOrder.provider?.id)).catch(() => null)
+          : null);
 
         const fullOrder = {
           ...confirmedOrder,
@@ -907,6 +913,7 @@ const handleUpdate = async (req, res) => {
         const now = new Date().toISOString();
         const origFulfillments = confirmedOrder.fulfillments || [];
         const updateFulfillments = order.fulfillments || [];
+        const providerName = vendor?.business_name || fullOrder.provider?.descriptor?.name || '';
 
         // Helper: build on_update payload for a given return state
         const buildReturnPayload = (returnState) => ({
@@ -918,15 +925,20 @@ const handleUpdate = async (req, res) => {
           quote:        fullOrder.quote,
           payment:      fullOrder.payment,
           fulfillments: [
-            ...origFulfillments.map(f => ({
-              ...f,
-              state: f.state || { descriptor: { code: 'Order-delivered' } },
-            })),
+            // Delivery fulfillment(s) — use buildFulfillmentWithLocation for full start/end
+            ...(origFulfillments.length > 0
+              ? origFulfillments
+              : [{ id: 'f1', type: 'Delivery' }]
+            ).map(f => buildFulfillmentWithLocation(f, vendor, 'Order-delivered', now)),
+            // Return fulfillment(s) from /update request — ensure id + provider_name
             ...updateFulfillments
               .filter(f => f.type === 'Return' || !origFulfillments.some(o => o.id === f.id))
-              .map(f => ({
+              .map((f, idx) => ({
                 ...f,
+                id:   f.id || `r${idx + 1}`,
+                type: f.type || 'Return',
                 state: { descriptor: { code: returnState } },
+                '@ondc/org/provider_name': f['@ondc/org/provider_name'] || providerName,
               })),
           ],
           created_at: fullOrder.created_at || now,
@@ -1067,8 +1079,11 @@ const triggerMerchantReturnUpdate = async (req, res) => {
     const cachedEntry = confirmedOrderCache.get(order_id);
     if (!cachedEntry) return res.status(404).json({ error: 'Order not found in cache' });
 
-    const { order, context } = cachedEntry;
+    const { order, context, vendor: cachedVendor } = cachedEntry;
     const tenant = await resolveTenant(context?.bpp_id);
+    const vendor = cachedVendor || (tenant?.id
+      ? await fetchVendorForOrder(tenant.id, order.provider?.id).catch(() => null)
+      : null);
 
     const type  = req.body?.type;
     const state = req.body?.state;
@@ -1088,6 +1103,11 @@ const triggerMerchantReturnUpdate = async (req, res) => {
     // Respond immediately, send callbacks in background
     res.json({ success: true, message: `on_update return sequence started`, steps, order_id });
 
+    const providerName = vendor?.business_name || order.provider?.descriptor?.name || '';
+    // Separate delivery and return fulfillments from cached order
+    const deliveryFulfillments = (order.fulfillments || []).filter(f => f.type !== 'Return');
+    const returnFulfillments = (order.fulfillments || []).filter(f => f.type === 'Return');
+
     const delay = ms => new Promise(r => setTimeout(r, ms));
     for (const returnState of steps) {
       const now = new Date().toISOString();
@@ -1099,10 +1119,21 @@ const triggerMerchantReturnUpdate = async (req, res) => {
         billing:   order.billing,
         quote:     order.quote,
         payment:   order.payment,
-        fulfillments: (order.fulfillments || []).map(f => ({
-          ...f,
-          state: { descriptor: { code: returnState } },
-        })),
+        fulfillments: [
+          // Delivery fulfillment(s) with full start/end location
+          ...(deliveryFulfillments.length > 0
+            ? deliveryFulfillments
+            : [{ id: 'f1', type: 'Delivery' }]
+          ).map(f => buildFulfillmentWithLocation(f, vendor, 'Order-delivered', now)),
+          // Return fulfillment(s) with id + provider_name
+          ...returnFulfillments.map((f, idx) => ({
+            ...f,
+            id:   f.id || `r${idx + 1}`,
+            type: f.type || 'Return',
+            state: { descriptor: { code: returnState } },
+            '@ondc/org/provider_name': f['@ondc/org/provider_name'] || providerName,
+          })),
+        ],
         created_at: order.created_at || now,
         updated_at: now,
       };
