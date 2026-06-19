@@ -11,6 +11,30 @@ const getAnalyticsToken = () => {
   return raw.trim().replace(/^Bearer\s+/i, '');
 };
 
+const decodeJwtPayload = (token) => {
+  if (!token) return null;
+  try {
+    const parts = token.split('.');
+    if (parts.length < 2) return null;
+    const json = Buffer.from(parts[1], 'base64url').toString('utf8');
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+};
+
+// JWT subscriber (e.g. ondc.cottkart.com@seller) — used for N.O. log indexing
+const getAnalyticsSubscriberId = () => {
+  const claims = decodeJwtPayload(getAnalyticsToken());
+  return (
+    claims?.subscriber_id ||
+    claims?.subscriberId ||
+    claims?.sub ||
+    claims?.np_id ||
+    process.env.ONDC_SUBSCRIBER_ID
+  );
+};
+
 // Scrub PII before pushing to ONDC observability (required by spec)
 const scrubPII = (payload) => {
   if (!payload || typeof payload !== 'object') return payload;
@@ -79,7 +103,6 @@ const pushTxnLogWithAuth = async (payload, authHeader, retries = 1) => {
 };
 
 // Push one transaction log entry to ONDC Network Observability.
-// type examples: "select", "select_response", "on_select", "init_response", etc.
 const pushTxnLog = async (type, data, retries = 3) => {
   const token = getAnalyticsToken();
   if (!token) {
@@ -89,17 +112,14 @@ const pushTxnLog = async (type, data, retries = 3) => {
     return { ok: false, error: 'missing type or data' };
   }
 
-  const subscriberId = data?.context?.bpp_id || process.env.ONDC_SUBSCRIBER_ID;
+  const subscriberId = getAnalyticsSubscriberId();
   const payload = {
     type,
     subscriber_id: subscriberId,
     np_id: subscriberId,
     data: scrubPII(enrichLogData(data)),
   };
-  const authHeaders = [
-    `Bearer ${token}`,
-    token,
-  ];
+  const authHeaders = [`Bearer ${token}`, token];
 
   let lastError = null;
   for (const authHeader of authHeaders) {
@@ -109,7 +129,6 @@ const pushTxnLog = async (type, data, retries = 3) => {
         txn: data?.context?.transaction_id,
         msg: data?.context?.message_id,
         status: result.status,
-        body: typeof result.data === 'object' ? JSON.stringify(result.data).slice(0, 200) : result.data,
       });
       return result;
     }
@@ -118,24 +137,56 @@ const pushTxnLog = async (type, data, retries = 3) => {
   }
 
   logger.error(
-    `ONDC txn log push FAILED (${type}) after ${retries} attempts [${lastError?.status || 'no-response'}]: ${lastError?.error}`,
-    { txn: data?.context?.transaction_id, subscriber: process.env.ONDC_SUBSCRIBER_ID }
+    `ONDC txn log push FAILED (${type}) [${lastError?.status || 'no-response'}]: ${lastError?.error}`,
+    { txn: data?.context?.transaction_id }
   );
   return { ok: false, ...lastError };
 };
 
-const isLogPublisherConfigured = () => Boolean(getAnalyticsToken());
+// Max ms to wait for N.O. push before returning sync ACK (Pramaan TTL is PT30S; keep this low)
+const SYNC_LOG_PUSH_DEADLINE_MS = Number(process.env.ONDC_SYNC_LOG_DEADLINE_MS) || 2500;
 
-const decodeJwtPayload = (token) => {
-  try {
-    const parts = token.split('.');
-    if (parts.length < 2) return null;
-    const json = Buffer.from(parts[1], 'base64url').toString('utf8');
-    return JSON.parse(json);
-  } catch {
-    return null;
+// Push request + sync-response logs for select/init/confirm (parallel, capped wait)
+const pushSyncTxnLogs = async (action, reqBody, responseBody, { blockMs = SYNC_LOG_PUSH_DEADLINE_MS, retries = 2 } = {}) => {
+  const logType = `${action}_response`;
+  const pushes = [];
+
+  if (reqBody?.context?.transaction_id === responseBody?.context?.transaction_id) {
+    pushes.push(pushTxnLog(action, reqBody, retries));
   }
+  pushes.push(pushTxnLog(logType, responseBody, retries));
+
+  const allPushes = Promise.all(pushes).then(results => {
+    const responseResult = results[results.length - 1];
+    return { type: logType, results, ...responseResult };
+  });
+
+  if (blockMs <= 0) {
+    allPushes.then(r => {
+      if (!r.ok) logger.error(`N.O. ${logType} background push failed`, r);
+    }).catch(() => {});
+    return { type: logType, ok: true, deferred: true };
+  }
+
+  const raced = await Promise.race([
+    allPushes,
+    new Promise(resolve => setTimeout(
+      () => resolve({ type: logType, ok: false, deferred: true, error: 'push deadline exceeded' }),
+      blockMs
+    )),
+  ]);
+
+  if (raced.deferred && !raced.results) {
+    allPushes.then(r => {
+      if (r.ok) logger.info(`N.O. ${logType} pushed OK (background)`, { txn: responseBody?.context?.transaction_id });
+      else logger.error(`N.O. ${logType} background push failed`, r);
+    }).catch(() => {});
+  }
+
+  return raced;
 };
+
+const isLogPublisherConfigured = () => Boolean(getAnalyticsToken());
 
 const getTokenDiagnostics = () => {
   const raw = process.env.ONDC_ANALYTICS_TOKEN;
@@ -152,6 +203,7 @@ const getTokenDiagnostics = () => {
     has_wrapping_quotes: /^["']/.test(trimmed) || /["']$/.test(trimmed),
     has_whitespace: /\s/.test(token),
     subscriber_id: process.env.ONDC_SUBSCRIBER_ID || null,
+    analytics_subscriber_id: getAnalyticsSubscriberId(),
   };
 
   if (claims) {
@@ -165,8 +217,11 @@ const getTokenDiagnostics = () => {
       expired: exp ? exp < now : null,
       env: claims.env || claims.environment || null,
     };
-    if (tokenSubscriber && diag.subscriber_id && tokenSubscriber !== diag.subscriber_id) {
-      diag.jwt.subscriber_mismatch = true;
+    if (tokenSubscriber && diag.subscriber_id) {
+      const normalizeSub = (s) => String(s).replace(/@(seller|buyer|gateway)$/i, '');
+      if (normalizeSub(tokenSubscriber) !== normalizeSub(diag.subscriber_id)) {
+        diag.jwt.subscriber_mismatch = true;
+      }
     }
   }
 
@@ -198,9 +253,12 @@ const testAnalyticsPush = async () => {
 
 module.exports = {
   pushTxnLog,
+  pushSyncTxnLogs,
   scrubPII,
   isLogPublisherConfigured,
   testAnalyticsPush,
   getAnalyticsToken,
+  getAnalyticsSubscriberId,
   getTokenDiagnostics,
+  SYNC_LOG_PUSH_DEADLINE_MS,
 };

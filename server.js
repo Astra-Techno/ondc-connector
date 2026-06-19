@@ -7,7 +7,7 @@ const rateLimit  = require('express-rate-limit');
 const logger          = require('./src/utils/logger');
 const { ondcTrace }   = require('./src/utils/logger');
 const { connectDB } = require('./src/config/database');
-const { pushTxnLog, isLogPublisherConfigured, testAnalyticsPush, getTokenDiagnostics } = require('./src/services/ondc/logPublisher.service');
+const { pushTxnLog, isLogPublisherConfigured, testAnalyticsPush, getTokenDiagnostics, getAnalyticsSubscriberId } = require('./src/services/ondc/logPublisher.service');
 const {
   handleSearch,
   handleSelect,
@@ -80,6 +80,7 @@ app.get('/health/analytics', async (req, res) => {
     token:    tokenInfo,
     hint,
     endpoint: process.env.ONDC_ANALYTICS_URL || 'https://analytics-api-pre-prod.aws.ondc.org/v1/api/push-txn-logs',
+    analytics_subscriber_id: getAnalyticsSubscriberId(),
   });
 });
 
@@ -160,18 +161,13 @@ const ondcLogger = (req, res, next) => {
 
 const ONDC_PATHS = ['/search','/select','/init','/confirm','/status','/cancel','/track','/support','/rating','/issue','/issue_status','/update'];
 
-// Publish inbound action logs to ONDC observability (await for Pramaan-critical APIs)
-const pushInboundTxnLog = async (req, res, next) => {
+// Publish inbound logs for non-sync APIs only (select/init/confirm handled in ack())
+const pushInboundTxnLog = (req, res, next) => {
   const action = req.body?.context?.action;
   if (!action || !req.body?.context || req.body?.message === undefined) return next();
+  if (['select', 'init', 'confirm'].includes(action)) return next();
 
-  try {
-    if (['select', 'init', 'confirm'].includes(action)) {
-      await pushTxnLog(action, req.body);
-    } else {
-      pushTxnLog(action, req.body).catch(() => {});
-    }
-  } catch (_) { /* never block the request */ }
+  pushTxnLog(action, req.body).catch(() => {});
   next();
 };
 

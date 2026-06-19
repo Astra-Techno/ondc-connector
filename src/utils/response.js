@@ -1,4 +1,4 @@
-const { pushTxnLog } = require('../services/ondc/logPublisher.service');
+const { pushSyncTxnLogs } = require('../services/ondc/logPublisher.service');
 const logger = require('./logger');
 
 const success = (res, data, message = 'Success', code = 200) => {
@@ -9,11 +9,10 @@ const error = (res, message = 'Error', code = 500, errors = null) => {
   return res.status(code).json({ success: false, message, errors });
 };
 
-// Actions Pramaan verifies via Network Observability before scoring the flow
+// Actions Pramaan verifies via Network Observability
 const PRAMAAN_SYNC_ACTIONS = new Set(['select', 'init', 'confirm']);
 
-// Build ONDC-compliant sync ACK body and publish to Network Observability.
-// Pramaan requires select_response / init_response / confirm_response log entries.
+// Build ONDC-compliant sync ACK body
 const buildAckBody = (context = null, status = 'ACK') => {
   if (!context) return { message: { ack: { status } } };
 
@@ -27,17 +26,21 @@ const buildAckBody = (context = null, status = 'ACK') => {
   return { context: enrichedContext, message: { ack: { status } } };
 };
 
-// Await analytics push for select/init/confirm — Pramaan scores from Network Observability
+// Wait up to ~2.5s for N.O. logs (parallel), then return sync ACK; push continues in background if needed
 const ack = async (res, context = null, status = 'ACK') => {
   const body = buildAckBody(context, status);
+  const action = body.context?.action;
 
-  if (body.context?.action && PRAMAAN_SYNC_ACTIONS.has(body.context.action)) {
-    const logType = `${body.context.action}_response`;
-    const result = await pushTxnLog(logType, body);
+  if (action && PRAMAAN_SYNC_ACTIONS.has(action)) {
+    const result = await pushSyncTxnLogs(action, res.req?.body, body);
+
     res.locals = res.locals || {};
-    res.locals.analyticsPush = { type: logType, ...result };
-    if (!result.ok) {
-      logger.error(`Pramaan blocker: ${logType} not accepted by analytics API`, result);
+    res.locals.analyticsPush = result;
+
+    if (result.ok) {
+      logger.info(`N.O. ${result.type} pushed OK`, { txn: context?.transaction_id });
+    } else if (!result.deferred) {
+      logger.error(`N.O. ${result.type} push failed`, result);
     }
   }
 
