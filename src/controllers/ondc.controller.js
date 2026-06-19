@@ -864,7 +864,7 @@ const handleCancel = async (req, res) => {
 
 // handleUpdate — receives /update from BAP (settlement update, return requests, etc.)
 // Flow 3A (settlement): update_target = 'payment' → ACK only
-// Flow 4A/4B (return):  update_target = 'fulfillment' → ACK + on_update (Return_Initiated)
+// Flow 4A/4B (return):  update_target = 'fulfillment' → ACK + on_update (Return_Initiated → Approved → Picked → Delivered)
 const handleUpdate = async (req, res) => {
   const body          = req.body;
   const context       = body.context;
@@ -874,31 +874,26 @@ const handleUpdate = async (req, res) => {
     transaction_id: context?.transaction_id,
     order_id: order.id,
     update_target,
-    has_context: !!context,
-    context_keys: context ? Object.keys(context).join(',') : 'none',
+    bap_uri: context?.bap_uri,
   });
 
   await ack(res, context);
 
-  // For return updates (fulfillment target), send on_update with Return_Initiated
-  if (update_target === 'fulfillment') {
-    setImmediate(async () => {
+  // For return updates, send full on_update sequence: Return_Initiated → Approved → Picked → Delivered
+  if (update_target === 'fulfillment' || update_target === 'item') {
+    // Run async but don't use setImmediate — fire immediately after ACK
+    (async () => {
       try {
         const tenant = await resolveTenant(context?.bpp_id);
-        if (!tenant?.id && !process.env.ONDC_SIGNING_PRIVATE_KEY) {
-          logger.error('handleUpdate: no tenant and no signing key');
-          return;
-        }
 
-        // Pramaan's /update only sends minimal order (id + return fulfillment).
-        // Use the confirmed order from cache for full fields (billing, items, quote, etc.)
+        // Merge with confirmed order from cache for full fields
         const cachedEntry = confirmedOrderCache.get(order.id);
         const confirmedOrder = cachedEntry?.order || {};
-        const confirmedContext = cachedEntry?.context || context;
+        const confirmedContext = cachedEntry?.context || {};
 
         const fullOrder = {
           ...confirmedOrder,
-          ...order,                                       // overlay /update fields
+          ...order,
           provider:  order.provider  || confirmedOrder.provider,
           items:     order.items     || confirmedOrder.items,
           billing:   order.billing   || confirmedOrder.billing,
@@ -906,15 +901,15 @@ const handleUpdate = async (req, res) => {
           payment:   order.payment   || confirmedOrder.payment,
         };
 
-        // Merge context: use /update context but fill gaps from confirmed context
+        // Use /update context, fill gaps from confirmed context
         const fullContext = { ...confirmedContext, ...context };
 
         const now = new Date().toISOString();
-
-        // Build fulfillments: keep original delivery + set Return_Initiated on return fulfillments
         const origFulfillments = confirmedOrder.fulfillments || [];
         const updateFulfillments = order.fulfillments || [];
-        const returnPayload = {
+
+        // Helper: build on_update payload for a given return state
+        const buildReturnPayload = (returnState) => ({
           id:    fullOrder.id,
           state: 'Completed',
           provider:     fullOrder.provider,
@@ -923,44 +918,72 @@ const handleUpdate = async (req, res) => {
           quote:        fullOrder.quote,
           payment:      fullOrder.payment,
           fulfillments: [
-            // Original delivery fulfillment(s) from confirmed order
             ...origFulfillments.map(f => ({
               ...f,
               state: f.state || { descriptor: { code: 'Order-delivered' } },
             })),
-            // Return fulfillment(s) from /update request
             ...updateFulfillments
               .filter(f => f.type === 'Return' || !origFulfillments.some(o => o.id === f.id))
               .map(f => ({
                 ...f,
-                state: { descriptor: { code: 'Return_Initiated' } },
+                state: { descriptor: { code: returnState } },
               })),
           ],
           created_at: fullOrder.created_at || now,
-          updated_at: now,
-        };
-
-        logger.info('Sending on_update (Return_Initiated)', {
-          order_id: fullOrder.id,
-          bap_uri: fullContext?.bap_uri,
-          has_cached_order: !!cachedEntry,
-          fulfillments_count: returnPayload.fulfillments.length,
-          has_billing: !!returnPayload.billing,
-          has_items: !!returnPayload.items?.length,
+          updated_at: new Date().toISOString(),
         });
 
-        await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: returnPayload }, tenant);
-        logger.info('on_update (Return_Initiated) sent OK', { order_id: fullOrder.id });
+        // Send full return sequence: Return_Initiated → Approved → Picked → Delivered
+        const returnSteps = ['Return_Initiated', 'Return_Approved', 'Return_Picked', 'Return_Delivered'];
+        const delay = ms => new Promise(r => setTimeout(r, ms));
 
-        // Update cache with full order + /update context (for subsequent trigger calls)
+        for (const returnState of returnSteps) {
+          const returnPayload = buildReturnPayload(returnState);
+
+          logger.info(`Sending on_update (${returnState})`, {
+            order_id: fullOrder.id,
+            bap_uri: fullContext?.bap_uri,
+            has_cached_order: !!cachedEntry,
+          });
+
+          // Push N.O. log BEFORE HTTP callback (so Pramaan sees it even if HTTP fails)
+          const onUpdatePayload = {
+            context: {
+              ...fullContext,
+              action: 'on_update',
+              bpp_id:  process.env.ONDC_SUBSCRIBER_ID || fullContext.bpp_id,
+              bpp_uri: process.env.ONDC_SUBSCRIBER_URL || fullContext.bpp_uri,
+              timestamp: new Date().toISOString(),
+              message_id: uuidv4(),
+              ttl: 'PT30S',
+            },
+            message: { order: returnPayload },
+          };
+          pushTxnLog('on_update', onUpdatePayload).catch(e =>
+            logger.warn(`N.O. on_update push failed for ${returnState}:`, e.message)
+          );
+
+          try {
+            await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: returnPayload }, tenant);
+            logger.info(`on_update (${returnState}) sent OK`, { order_id: fullOrder.id });
+          } catch (cbErr) {
+            logger.error(`on_update (${returnState}) HTTP callback failed:`, cbErr.message);
+          }
+
+          if (returnState !== 'Return_Delivered') await delay(2000);
+        }
+
+        // Update cache
         if (fullOrder.id) {
           confirmedOrderCache.set(fullOrder.id, { order: fullOrder, context: fullContext });
           lastConfirmedOrderId = fullOrder.id;
         }
+
+        logger.info('handleUpdate return sequence complete', { order_id: fullOrder.id });
       } catch (err) {
         logger.error('handleUpdate return callback failed:', err.message, err.stack);
       }
-    });
+    })();
   }
   // For settlement updates (payment target) — ACK only, no callback
 };
@@ -1045,8 +1068,7 @@ const triggerMerchantReturnUpdate = async (req, res) => {
     if (!cachedEntry) return res.status(404).json({ error: 'Order not found in cache' });
 
     const { order, context } = cachedEntry;
-    const tenant = await getTenantByBppId(context?.bpp_id);
-    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const tenant = await resolveTenant(context?.bpp_id);
 
     const type  = req.body?.type;
     const state = req.body?.state;
@@ -1084,8 +1106,30 @@ const triggerMerchantReturnUpdate = async (req, res) => {
         created_at: order.created_at || now,
         updated_at: now,
       };
-      await sendCallback(context.bap_uri, 'on_update', context, { order: returnPayload }, tenant);
-      logger.info('on_update (return state) sent', { order_id, returnState });
+
+      // Push N.O. log before HTTP callback
+      const onUpdatePayload = {
+        context: {
+          ...context,
+          action: 'on_update',
+          bpp_id:  process.env.ONDC_SUBSCRIBER_ID || context.bpp_id,
+          bpp_uri: process.env.ONDC_SUBSCRIBER_URL || context.bpp_uri,
+          timestamp: new Date().toISOString(),
+          message_id: uuidv4(),
+          ttl: 'PT30S',
+        },
+        message: { order: returnPayload },
+      };
+      pushTxnLog('on_update', onUpdatePayload).catch(e =>
+        logger.warn(`N.O. on_update push failed for ${returnState}:`, e.message)
+      );
+
+      try {
+        await sendCallback(context.bap_uri, 'on_update', context, { order: returnPayload }, tenant);
+        logger.info('on_update (return state) sent', { order_id, returnState });
+      } catch (cbErr) {
+        logger.error(`on_update (${returnState}) HTTP callback failed:`, cbErr.message);
+      }
       await delay(2000);
     }
     logger.info('on_update return sequence complete', { order_id, steps });
