@@ -866,21 +866,29 @@ const handleCancel = async (req, res) => {
 // Flow 3A (settlement): update_target = 'payment' → ACK only
 // Flow 4A/4B (return):  update_target = 'fulfillment' → ACK + on_update (Return_Initiated)
 const handleUpdate = async (req, res) => {
-  try {
-    const body          = req.body;
-    const context       = body.context;
-    const order         = body.message?.order || {};
-    const update_target = body.message?.update_target || '';
-    logger.info('ONDC /update received', { transaction_id: context?.transaction_id, order_id: order.id, update_target });
+  const body          = req.body;
+  const context       = body.context;
+  const order         = body.message?.order || {};
+  const update_target = body.message?.update_target || '';
+  logger.info('ONDC /update received', {
+    transaction_id: context?.transaction_id,
+    order_id: order.id,
+    update_target,
+    has_context: !!context,
+    context_keys: context ? Object.keys(context).join(',') : 'none',
+  });
 
-    // Always ACK first
-    ack(res, context);
+  await ack(res, context);
 
-    // For return updates (fulfillment target), send on_update with Return_Initiated
-    if (update_target === 'fulfillment') {
+  // For return updates (fulfillment target), send on_update with Return_Initiated
+  if (update_target === 'fulfillment') {
+    setImmediate(async () => {
       try {
-        const tenant = await getTenantByBppId(context?.bpp_id);
-        if (!tenant) return;
+        const tenant = await resolveTenant(context?.bpp_id);
+        if (!tenant?.id && !process.env.ONDC_SIGNING_PRIVATE_KEY) {
+          logger.error('handleUpdate: no tenant and no signing key');
+          return;
+        }
 
         const now = new Date().toISOString();
         const returnPayload = {
@@ -899,8 +907,15 @@ const handleUpdate = async (req, res) => {
           updated_at: now,
         };
 
+        logger.info('Sending on_update (Return_Initiated)', {
+          order_id: order.id,
+          bap_uri: context?.bap_uri,
+          context_action: context?.action,
+          fulfillments_count: (order.fulfillments || []).length,
+        });
+
         await sendCallback(context.bap_uri, 'on_update', context, { order: returnPayload }, tenant);
-        logger.info('on_update (Return_Initiated) sent', { order_id: order.id });
+        logger.info('on_update (Return_Initiated) sent OK', { order_id: order.id });
 
         // Cache the order for subsequent return trigger calls
         if (order.id) {
@@ -908,13 +923,11 @@ const handleUpdate = async (req, res) => {
           lastConfirmedOrderId = order.id;
         }
       } catch (err) {
-        logger.error('handleUpdate return callback failed:', err.message);
+        logger.error('handleUpdate return callback failed:', err.message, err.stack);
       }
-    }
-    // For settlement updates (payment target) — ACK only, no callback
-  } catch (err) {
-    logger.error('handleUpdate failed:', err.message);
+    });
   }
+  // For settlement updates (payment target) — ACK only, no callback
 };
 
 // triggerMerchantUpdate — internal endpoint to initiate merchant-side on_update
