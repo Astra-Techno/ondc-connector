@@ -123,6 +123,79 @@ const buildFulfillmentWithLocation = (f, vendor, stateCode, now) => {
   };
 };
 
+// Flow 3A — merchant partial cancel on_update (Pramaan N.O. key: fulfillment state Cancelled)
+const buildPartialCancelUpdatePayload = (order, vendor, confirmTimestamp) => {
+  const now = new Date().toISOString();
+  const allItems = order.items || [];
+  const cancelledItem = allItems[0];
+  const remainingItems = allItems.length > 1 ? allItems.slice(1) : [];
+  const originalBreakup = order.quote?.breakup || [];
+  const updatedBreakup = cancelledItem
+    ? originalBreakup.filter(b =>
+        !(b['@ondc/org/title_type'] === 'item' && b['@ondc/org/item_id'] === cancelledItem.id)
+      )
+    : originalBreakup;
+  const updatedTotal = updatedBreakup.length > 0
+    ? updatedBreakup.reduce((sum, b) => sum + parseFloat(b.price?.value || 0), 0).toFixed(2)
+    : order.quote?.price?.value || '0.00';
+
+  return {
+    id:       order.id,
+    state:    'Accepted',
+    provider: order.provider,
+    items: [
+      ...remainingItems.map(i => ({ ...i })),
+      ...(cancelledItem ? [{
+        ...cancelledItem,
+        tags: [{ code: 'cancellation', list: [{ code: 'reason_id', value: '001' }] }],
+      }] : []),
+    ],
+    billing: order.billing,
+    quote: {
+      price:   { currency: 'INR', value: updatedTotal },
+      breakup: updatedBreakup.length > 0 ? updatedBreakup : originalBreakup,
+      ttl:     order.quote?.ttl || 'P1D',
+    },
+    payment: {
+      ...(order.payment || {}),
+      '@ondc/org/buyer_app_finder_fee_type':   'percent',
+      '@ondc/org/buyer_app_finder_fee_amount': '3',
+      '@ondc/org/settlement_basis':             'return_window_expiry',
+      '@ondc/org/settlement_window':            'P1D',
+      '@ondc/org/withholding_amount':           '10.00',
+      '@ondc/org/settlement_details':           SETTLEMENT_DETAILS,
+      status: 'PAID',
+    },
+    fulfillments: (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
+      buildFulfillmentWithLocation(f, vendor, 'Cancelled', now)
+    ),
+    tags: [{ code: 'cancellation_initiated_by', list: [{ code: 'reason_id', value: '001' }] }],
+    created_at: order.created_at || now,
+    updated_at: confirmTimestamp || order.updated_at || now,
+  };
+};
+
+const sendPartialCancelOnUpdate = async (context, order, vendor, tenant, confirmTimestamp) => {
+  const cancelPayload = buildPartialCancelUpdatePayload(order, vendor, confirmTimestamp);
+  const onUpdatePayload = {
+    context: {
+      ...context,
+      action:     'on_update',
+      bpp_id:     process.env.ONDC_SUBSCRIBER_ID || context.bpp_id,
+      bpp_uri:    process.env.ONDC_SUBSCRIBER_URL || context.bpp_uri,
+      timestamp:  new Date().toISOString(),
+      message_id: uuidv4(),
+      ttl:        'PT30S',
+    },
+    message: { order: cancelPayload },
+  };
+  pushTxnLog('on_update', onUpdatePayload).catch(e =>
+    logger.warn('N.O. on_update (Cancelled) push failed:', e.message)
+  );
+  await sendCallback(context.bap_uri, 'on_update', context, { order: cancelPayload }, tenant);
+  logger.info('on_update (Cancelled/partial) sent', { order_id: order.id, txn: context?.transaction_id });
+};
+
 // Fetch vendor row from DB by provider id
 const fetchVendorForOrder = async (tenantId, providerId) => {
   if (!providerId) return null;
@@ -682,61 +755,24 @@ const handleConfirm = async (req, res) => {
         // Wait 15s after on_confirm for Pramaan to process /status first
         await delay(15000);
 
+        const autoPartialCancel = process.env.ONDC_AUTO_PARTIAL_CANCEL !== 'false';
+
         for (const step of steps) {
           if (isCancelled()) { logger.info('Auto on_status aborted (order cancelled)', { order_id: order.id }); return; }
           const payload = buildStatusPayload(order.id, order, step.fulfillmentState, step.orderState, vendor);
           await sendCallback(context.bap_uri, 'on_status', context, { order: payload }, tenant);
           logger.info('Auto on_status sent', { order_id: order.id, ...step });
+
+          // Flow 3A: send on_update (Cancelled) right after Packed — Pramaan N.O. filters by Cancelled state
+          if (autoPartialCancel && step.fulfillmentState === 'Packed') {
+            await sendPartialCancelOnUpdate(context, order, vendor, tenant, confirmUpdatedAt);
+          }
+
           await delay(2000);
         }
         logger.info('Auto on_status sequence complete', { order_id: order.id });
 
-        if (isCancelled()) return;
-        await delay(2000);
-
-        // Flow 3A: Merchant-side partial cancellation — on_update (Cancelled)
-        const allItems = order.items || [];
-        const cancelledItem = allItems[0];
-        const remainingItems = allItems.length > 1 ? allItems.slice(1) : allItems;
-        const originalBreakup = order.quote?.breakup || [];
-        const updatedBreakup = originalBreakup.filter(b =>
-          !(b['@ondc/org/title_type'] === 'item' && b['@ondc/org/item_id'] === cancelledItem?.id)
-        );
-        const updatedTotal = updatedBreakup.length > 0
-          ? updatedBreakup.reduce((sum, b) => sum + parseFloat(b.price?.value || 0), 0).toFixed(2)
-          : order.quote?.price?.value || '0.00';
-        const cancelNow = new Date().toISOString();
-
-        const cancelUpdatePayload = {
-          id:       order.id,
-          state:    'Accepted',
-          provider: order.provider,
-          items: [
-            ...remainingItems.map(i => ({ ...i })),
-            ...(cancelledItem ? [{
-              ...cancelledItem,
-              tags: [{ code: 'cancellation', list: [{ code: 'reason_id', value: '001' }] }],
-            }] : []),
-          ],
-          billing:  order.billing,
-          quote: {
-            price: { currency: 'INR', value: updatedTotal },
-            breakup: updatedBreakup.length > 0 ? updatedBreakup : originalBreakup,
-            ttl: order.quote?.ttl || 'P1D',
-          },
-          payment: { ...(order.payment || {}), status: 'PAID' },
-          fulfillments: (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f => ({
-            ...f,
-            state: { descriptor: { code: 'Pending' } },
-          })),
-          created_at: order.created_at || cancelNow,
-          updated_at: cancelNow,
-        };
-        await sendCallback(context.bap_uri, 'on_update', context, { order: cancelUpdatePayload }, tenant);
-        logger.info('Auto on_update (Cancelled/partial) sent', { order_id: order.id });
-
-        // Return sequence (Flow 4A) is NOT sent here — it's triggered by handleUpdate
-        // when Pramaan sends /update with update_target=fulfillment/item/payment
+        // Return sequence (Flow 4A) is triggered by handleUpdate when Pramaan sends /update
       };
       autoStatusSequence().catch(err => logger.error('Auto on_status sequence failed:', err.message));
 
@@ -1021,16 +1057,11 @@ const handleUpdate = async (req, res) => {
           };
         };
 
-        // Determine which on_update to send based on update_target
-        // payment = settlement update (just send Return_Delivered)
-        // fulfillment/item = return request (send full sequence)
+        // payment = Flow 3A settlement ACK only; fulfillment/item = Flow 4A/4B return sequence
         const delay = ms => new Promise(r => setTimeout(r, ms));
 
         if (update_target === 'payment') {
-          // Settlement update — send on_update with Return_Delivered
-          const payload = buildReturnPayload('Return_Delivered');
-          await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: payload }, tenant);
-          logger.info('handleUpdate payment: on_update (Return_Delivered) sent', { order_id: order.id });
+          logger.info('handleUpdate payment: ACK only (Flow 3A settlement)', { order_id: order.id });
 
         } else if (update_target === 'fulfillment' || update_target === 'item') {
           // Return request — send full return sequence
@@ -1062,52 +1093,14 @@ const triggerMerchantUpdate = async (req, res) => {
     if (!cachedEntry) {
       return res.status(404).json({ error: 'Order not found in cache' });
     }
-    const { order, context } = cachedEntry;
-    const tenant = await getTenantByBppId(context?.bpp_id);
-    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const { order, context, confirmTimestamp } = cachedEntry;
+    const tenant = await resolveTenant(context?.bpp_id);
+    const vendor = cachedEntry.vendor || (tenant?.id
+      ? await fetchVendorForOrder(tenant.id, order.provider?.id).catch(() => null)
+      : null);
 
-    // Partial cancel: mark first item as cancelled, keep rest
-    const allItems = order.items || [];
-    const cancelledItem = allItems[0];
-    const remainingItems = allItems.slice(1);
-
-    // Recalculate quote — remove cancelled item price from total
-    const originalBreakup = order.quote?.breakup || [];
-    const updatedBreakup = originalBreakup.filter(b =>
-      !(b['@ondc/org/title_type'] === 'item' && b['@ondc/org/item_id'] === cancelledItem?.id)
-    );
-    const updatedTotal = updatedBreakup
-      .reduce((sum, b) => sum + parseFloat(b.price?.value || 0), 0)
-      .toFixed(2);
-
-    const now = new Date().toISOString();
-
-    const updatePayload = {
-      id:    order_id,
-      state: 'Accepted',
-      provider: order.provider,
-      items: [
-        ...(remainingItems.length ? remainingItems : allItems).map(i => ({ ...i })),
-        ...(cancelledItem ? [{ ...cancelledItem, tags: [{ code: 'cancellation', list: [{ code: 'reason_id', value: '001' }] }] }] : []),
-      ],
-      billing:  order.billing,
-      quote: {
-        price: { currency: 'INR', value: updatedTotal },
-        breakup: updatedBreakup,
-        ttl: order.quote?.ttl || 'P1D',
-      },
-      payment:  order.payment,
-      fulfillments: (order.fulfillments || []).map(f => ({
-        ...f,
-        state: { descriptor: { code: 'Pending' } },
-      })),
-      created_at:  order.created_at || now,
-      updated_at:  now,
-      tags: [{ code: 'cancellation_initiated_by', list: [{ code: 'reason_id', value: '001' }] }],
-    };
-
-    await sendCallback(context.bap_uri, 'on_update', context, { order: updatePayload }, tenant);
-    logger.info('Merchant on_update sent', { order_id });
+    await sendPartialCancelOnUpdate(context, order, vendor, tenant, confirmTimestamp);
+    logger.info('Merchant on_update (Cancelled) sent via trigger', { order_id });
     res.json({ success: true, message: 'on_update sent', order_id });
   } catch (err) {
     logger.error('triggerMerchantUpdate failed:', err.message);
