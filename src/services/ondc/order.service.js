@@ -149,11 +149,27 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
     logger.error(`sendCallback: no signing key for ${action} — callback will likely be rejected`);
   }
 
+  // Warn if context is missing required fields (helps debug Pramaan empty-context issues)
+  if (!context?.domain) {
+    logger.warn(`sendCallback: context missing domain for ${action}`, {
+      contextKeys: Object.keys(context || {}),
+      txn: context?.transaction_id,
+      bapUri,
+    });
+  }
+
   // Extract error from message to top-level (ONDC spec: error is a sibling of context/message)
   const { error: topLevelError, ...messageBody } = message || {};
   const payload = {
     context: {
+      // Defaults for required ONDC context fields (safety net if context is incomplete)
+      domain:       'ONDC:RET10',
+      country:      'IND',
+      city:         'std:080',
+      core_version: '1.2.0',
+      // Spread incoming context (overrides defaults with actual values)
       ...context,
+      // Always override these with current values
       action,
       bpp_id:     config.subscriber_id,
       bpp_uri:    config.subscriber_url,
@@ -201,7 +217,12 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
       }
 
       const response = await axios.post(callbackUrl, payload, { headers, timeout: 30000 });
-      logger.info(`${action} → ${callbackUrl} [${response.status}]`, { payload, response: response.data });
+      logger.info(`${action} → ${callbackUrl} [${response.status}]`, {
+        txn: payload.context?.transaction_id,
+        contextKeys: Object.keys(payload.context || {}),
+        hasOrder: !!payload.message?.order,
+        response: response.data,
+      });
 
       pushTxnLog(action, payload).catch(() => {});
 
@@ -220,6 +241,8 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
         await new Promise(r => setTimeout(r, 1000 * attempt));
       } else {
         logger.error(`${action} callback failed after ${retries} attempts → ${callbackUrl} [${status || 'no-response'}]: ${detail}`);
+        // Push to N.O. even on HTTP failure — Pramaan may verify via N.O. logs
+        pushTxnLog(action, payload).catch(() => {});
         pool.query(
           `UPDATE ondc_transactions SET status = 'failed'
            WHERE transaction_id = ? AND action = ? AND direction = 'out'`,
