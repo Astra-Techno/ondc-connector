@@ -734,56 +734,8 @@ const handleConfirm = async (req, res) => {
         await sendCallback(context.bap_uri, 'on_update', context, { order: cancelUpdatePayload }, tenant);
         logger.info('Auto on_update (Cancelled/partial) sent', { order_id: order.id });
 
-        if (isCancelled()) return;
-        await delay(2000);
-
-        // Flow 4A: on_update Return_Initiated → Return_Delivered
-        const returnSteps = ['Return_Initiated', 'Return_Approved', 'Return_Picked', 'Return_Delivered'];
-        for (const returnState of returnSteps) {
-          if (isCancelled()) { logger.info('Auto on_update aborted (order cancelled)', { order_id: order.id }); return; }
-          const retNow = new Date().toISOString();
-          const deliveryFulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
-            buildFulfillmentWithLocation(f, vendor, 'Order-delivered', retNow)
-          );
-          const returnFulfillment = {
-            id: 'r1',
-            type: 'Return',
-            state: { descriptor: { code: returnState } },
-            '@ondc/org/provider_name': vendor?.business_name || order.provider?.descriptor?.name || '',
-            tags: [{
-              code: 'return_request',
-              list: [
-                { code: 'id', value: 'r1' },
-                { code: 'item_id', value: (order.items?.[0]?.id || '') },
-                { code: 'parent_item_id', value: (order.items?.[0]?.parent_item_id || order.items?.[0]?.id || 'N/A') },
-                { code: 'item_quantity', value: String(order.items?.[0]?.quantity?.count || 1) },
-                { code: 'reason_id', value: '001' },
-                { code: 'reason_desc', value: 'detailed description for return' },
-                { code: 'images', value: 'https://ondc.cottkart.com/placeholder.png' },
-                { code: 'ttl_approval', value: 'PT24H' },
-                { code: 'ttl_reverseqc', value: 'P3D' },
-              ],
-            }],
-          };
-          // Pramaan expects updated_at to match the on_confirm updated_at (from outer scope)
-          const returnPayload = {
-            id:       order.id,
-            state:    'Completed',
-            provider: order.provider,
-            items:    order.items,
-            billing:  order.billing,
-            fulfillments: [...deliveryFulfillments, returnFulfillment],
-            quote:    order.quote,
-            payment:  { ...(order.payment || {}), status: 'PAID' },
-            tags:     ORDER_TAGS,
-            created_at: order.created_at || retNow,
-            updated_at: confirmUpdatedAt,
-          };
-          await sendCallback(context.bap_uri, 'on_update', context, { order: returnPayload }, tenant);
-          logger.info(`Auto on_update (${returnState}) sent`, { order_id: order.id });
-          if (returnState !== 'Return_Delivered') await delay(2000);
-        }
-        logger.info('Auto on_update return sequence complete', { order_id: order.id });
+        // Return sequence (Flow 4A) is NOT sent here — it's triggered by handleUpdate
+        // when Pramaan sends /update with update_target=fulfillment/item/payment
       };
       autoStatusSequence().catch(err => logger.error('Auto on_status sequence failed:', err.message));
 
