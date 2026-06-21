@@ -44,10 +44,14 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/api/', limiter);
 
 // ─── Health / verification ────────────────────────────────────────────────────
+const GIT_COMMIT = (() => {
+  try { return require('child_process').execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch { return 'unknown'; }
+})();
 app.get('/health', (req, res) => res.json({
   status:        'ok',
   service:       'ONDC Connector',
   version:       '1.0.0',
+  commit:        GIT_COMMIT,
   subscriber_id: process.env.ONDC_SUBSCRIBER_ID,
   env:           process.env.ONDC_ENV,
   observability: isLogPublisherConfigured() ? 'enabled' : 'disabled — set ONDC_ANALYTICS_TOKEN',
@@ -89,13 +93,18 @@ app.get('/debug/logs', async (req, res) => {
     const fs = require('fs');
     const path = require('path');
     const today = new Date().toISOString().split('T')[0];
-    const logFile = path.join(__dirname, 'logs', `ondc-${today}.log`);
-    if (!fs.existsSync(logFile)) {
-      return res.json({ error: 'Log file not found', path: logFile });
+    // Try both __dirname/logs and CWD/logs
+    const candidates = [
+      path.join(__dirname, 'logs', `ondc-${today}.log`),
+      path.join(process.cwd(), 'logs', `ondc-${today}.log`),
+    ];
+    const logFile = candidates.find(f => fs.existsSync(f));
+    if (!logFile) {
+      return res.json({ error: 'Log file not found', tried: candidates, cwd: process.cwd(), dirname: __dirname });
     }
     const content = fs.readFileSync(logFile, 'utf8');
-    const lines = content.trim().split('\n').slice(-150); // last 150 lines
-    return res.json({ lines });
+    const lines = content.trim().split('\n').slice(-150);
+    return res.json({ file: logFile, count: lines.length, lines });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
