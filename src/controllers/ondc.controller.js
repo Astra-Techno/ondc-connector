@@ -690,10 +690,54 @@ const handleConfirm = async (req, res) => {
         }
         logger.info('Auto on_status sequence complete', { order_id: order.id });
 
-        // Flow 4A: After Order-delivered, proactively send on_update Return_Initiated → Return_Delivered
-        // Pramaan expects these as part of the auto sequence (not triggered by /update)
         if (isCancelled()) return;
-        await delay(3000);
+        await delay(2000);
+
+        // Flow 3A: Merchant-side partial cancellation — on_update (Cancelled)
+        const allItems = order.items || [];
+        const cancelledItem = allItems[0];
+        const remainingItems = allItems.length > 1 ? allItems.slice(1) : allItems;
+        const originalBreakup = order.quote?.breakup || [];
+        const updatedBreakup = originalBreakup.filter(b =>
+          !(b['@ondc/org/title_type'] === 'item' && b['@ondc/org/item_id'] === cancelledItem?.id)
+        );
+        const updatedTotal = updatedBreakup.length > 0
+          ? updatedBreakup.reduce((sum, b) => sum + parseFloat(b.price?.value || 0), 0).toFixed(2)
+          : order.quote?.price?.value || '0.00';
+        const cancelNow = new Date().toISOString();
+
+        const cancelUpdatePayload = {
+          id:       order.id,
+          state:    'Accepted',
+          provider: order.provider,
+          items: [
+            ...remainingItems.map(i => ({ ...i })),
+            ...(cancelledItem ? [{
+              ...cancelledItem,
+              tags: [{ code: 'cancellation', list: [{ code: 'reason_id', value: '001' }] }],
+            }] : []),
+          ],
+          billing:  order.billing,
+          quote: {
+            price: { currency: 'INR', value: updatedTotal },
+            breakup: updatedBreakup.length > 0 ? updatedBreakup : originalBreakup,
+            ttl: order.quote?.ttl || 'P1D',
+          },
+          payment: { ...(order.payment || {}), status: 'PAID' },
+          fulfillments: (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f => ({
+            ...f,
+            state: { descriptor: { code: 'Pending' } },
+          })),
+          created_at: order.created_at || cancelNow,
+          updated_at: cancelNow,
+        };
+        await sendCallback(context.bap_uri, 'on_update', context, { order: cancelUpdatePayload }, tenant);
+        logger.info('Auto on_update (Cancelled/partial) sent', { order_id: order.id });
+
+        if (isCancelled()) return;
+        await delay(2000);
+
+        // Flow 4A: on_update Return_Initiated → Return_Delivered
         const returnSteps = ['Return_Initiated', 'Return_Approved', 'Return_Picked', 'Return_Delivered'];
         for (const returnState of returnSteps) {
           if (isCancelled()) { logger.info('Auto on_update aborted (order cancelled)', { order_id: order.id }); return; }
