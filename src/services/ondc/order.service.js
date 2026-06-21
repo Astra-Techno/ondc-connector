@@ -149,6 +149,8 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
     logger.error(`sendCallback: no signing key for ${action} — callback will likely be rejected`);
   }
 
+  // Extract error from message to top-level (ONDC spec: error is a sibling of context/message)
+  const { error: topLevelError, ...messageBody } = message || {};
   const payload = {
     context: {
       ...context,
@@ -159,7 +161,8 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
       message_id: uuidv4(),
       ttl:        'PT30S',
     },
-    message,
+    message: messageBody,
+    ...(topLevelError ? { error: topLevelError } : {}),
   };
 
   // Log outbound transaction
