@@ -112,7 +112,8 @@ const pushTxnLog = async (type, data, retries = 3) => {
     return { ok: false, error: 'missing type or data' };
   }
 
-  const subscriberId = getAnalyticsSubscriberId();
+  const rawSubscriberId = getAnalyticsSubscriberId();
+  const subscriberId = rawSubscriberId ? rawSubscriberId.replace(/@(seller|buyer)$/i, '') : process.env.ONDC_SUBSCRIBER_ID;
   const payload = {
     type,
     subscriber_id: subscriberId,
