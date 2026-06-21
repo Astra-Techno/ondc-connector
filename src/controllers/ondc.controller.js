@@ -685,7 +685,7 @@ const handleConfirm = async (req, res) => {
         // Flow 4A: After Order-delivered, proactively send on_update Return_Initiated → Return_Delivered
         // Pramaan expects these as part of the auto sequence (not triggered by /update)
         await delay(3000);
-        const returnSteps = ['Return_Initiated', 'Return_Delivered'];
+        const returnSteps = ['Return_Initiated', 'Return_Approved', 'Return_Picked', 'Return_Delivered'];
         for (const returnState of returnSteps) {
           const retNow = new Date().toISOString();
           const deliveryFulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
