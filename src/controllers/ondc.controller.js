@@ -595,7 +595,8 @@ const handleConfirm = async (req, res) => {
       tenant = await resolveTenant(context?.bpp_id);
       if (!tenant?.id && !process.env.ONDC_SIGNING_PRIVATE_KEY) return;
 
-      const order = body.message?.order || {};
+      // Deep-clone order so async callbacks + cache always have full data even if req body is GC'd
+      const order = body.message?.order ? JSON.parse(JSON.stringify(body.message.order)) : {};
 
       const vendor = tenant.id
         ? await fetchVendorForOrder(tenant.id, order.provider?.id).catch(() => null)
@@ -604,7 +605,7 @@ const handleConfirm = async (req, res) => {
       if (order.id) {
         confirmedOrderCache.set(order.id, { order, context, vendor, confirmTimestamp: null });
         lastConfirmedOrderId = order.id;
-        logger.info('Cached confirmed order', { order_id: order.id });
+        logger.info('Cached confirmed order', { order_id: order.id, hasContext: !!context?.domain, hasBilling: !!order.billing });
       }
 
       // 1. Save to DB
