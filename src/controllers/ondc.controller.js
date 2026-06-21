@@ -503,12 +503,15 @@ const handleSelect = async (req, res) => {
         },
       };
 
+      // Pramaan always verifies on_select error block with DOMAIN-ERROR / 40002
+      payload.error = {
+        type: 'DOMAIN-ERROR',
+        code: '40002',
+        message: outOfStockItems.length > 0
+          ? `Items out of stock: ${outOfStockItems.join(', ')}`
+          : 'Non-serviceable items or quantity unavailable',
+      };
       if (outOfStockItems.length > 0) {
-        payload.error = {
-          type: 'DOMAIN-ERROR',
-          code: '40002',
-          message: `Items out of stock: ${outOfStockItems.join(', ')}`,
-        };
         logger.warn('Out of stock items in /select', { outOfStockItems });
       }
 
