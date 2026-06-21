@@ -578,7 +578,8 @@ const handleInit = async (req, res) => {
 
 const handleConfirm = async (req, res) => {
   const body    = req.body;
-  const context = body.context;
+  // Deep-clone context so async callbacks always have full context even if req is GC'd
+  const context = body.context ? JSON.parse(JSON.stringify(body.context)) : {};
   logger.info('ONDC /confirm received', { transaction_id: context?.transaction_id });
 
   await ack(res, context);
@@ -835,7 +836,7 @@ const handleStatus = async (req, res) => {
 const handleCancel = async (req, res) => {
   try {
     const body    = req.body;
-    const context = body.context;
+    const context = body.context ? JSON.parse(JSON.stringify(body.context)) : {};
     const { order_id, cancellation_reason_id } = body.message || {};
     logger.info('ONDC /cancel received', { order_id });
 
@@ -928,8 +929,8 @@ const handleCancel = async (req, res) => {
 // Flow 4A/4B (return):  update_target = 'fulfillment' → ACK + on_update (Return_Initiated → Approved → Picked → Delivered)
 const handleUpdate = async (req, res) => {
   const body          = req.body;
-  const context       = body.context;
-  const order         = body.message?.order || {};
+  const context       = body.context ? JSON.parse(JSON.stringify(body.context)) : {};
+  const order         = body.message?.order ? JSON.parse(JSON.stringify(body.message.order)) : {};
   const update_target = body.message?.update_target || '';
   logger.info('ONDC /update received', {
     transaction_id: context?.transaction_id,
@@ -940,192 +941,49 @@ const handleUpdate = async (req, res) => {
 
   await ack(res, context);
 
-  // For return updates, send full on_update sequence: Return_Initiated → Approved → Picked → Delivered
-  if (update_target === 'fulfillment' || update_target === 'item') {
+  // For any update_target — resolve order from cache and send appropriate on_update
+  if (update_target) {
     (async () => {
       try {
         const tenant = await resolveTenant(context?.bpp_id);
-
-        // Merge with confirmed order from cache for full fields
         const cachedEntry = confirmedOrderCache.get(order.id);
-        const confirmedOrder = cachedEntry?.order || {};
-        const confirmedContext = cachedEntry?.context || {};
-        const cachedVendor = cachedEntry?.vendor || null;
-
+        if (!cachedEntry) {
+          logger.warn(`handleUpdate ${update_target}: order not in cache`, { order_id: order.id });
+          return;
+        }
+        const { order: confirmedOrder, context: confirmedContext, vendor: cachedVendor, confirmTimestamp } = cachedEntry;
+        const fullContext = { ...confirmedContext, ...context };
         const fullOrder = {
           ...confirmedOrder,
           ...order,
-          provider:  order.provider  || confirmedOrder.provider,
-          items:     order.items     || confirmedOrder.items,
-          billing:   order.billing   || confirmedOrder.billing,
-          quote:     order.quote     || confirmedOrder.quote,
-          payment:   order.payment   || confirmedOrder.payment,
+          provider: order.provider || confirmedOrder.provider,
+          items:    order.items    || confirmedOrder.items,
+          billing:  order.billing  || confirmedOrder.billing,
+          quote:    order.quote    || confirmedOrder.quote,
+          payment:  order.payment  || confirmedOrder.payment,
         };
 
-        // Use /update context, fill gaps from confirmed context
-        const fullContext = { ...confirmedContext, ...context };
-
-        // Fetch vendor for fulfillment start location (non-blocking)
         let vendor = cachedVendor;
         if (!vendor && tenant?.id) {
           vendor = await fetchVendorForOrder(tenant.id, (order.provider?.id || confirmedOrder.provider?.id)).catch(() => null);
         }
 
         const now = new Date().toISOString();
-        const origFulfillments = confirmedOrder.fulfillments || [];
-        const updateFulfillments = order.fulfillments || [];
         const providerName = vendor?.business_name || fullOrder.provider?.descriptor?.name || '';
 
-        // Helper: build fulfillments with safe fallback
-        const buildEnhancedFulfillments = (returnState) => {
-          try {
-            return [
-              // Delivery fulfillment(s) with full start/end location
-              ...(origFulfillments.length > 0
-                ? origFulfillments
-                : [{ id: 'f1', type: 'Delivery' }]
-              ).map(f => buildFulfillmentWithLocation(f, vendor, 'Order-delivered', now)),
-              // Return fulfillment(s) with id + provider_name
-              ...updateFulfillments
-                .filter(f => f.type === 'Return' || !origFulfillments.some(o => o.id === f.id))
-                .map((f, idx) => ({
-                  ...f,
-                  id:   f.id || `r${idx + 1}`,
-                  type: f.type || 'Return',
-                  state: { descriptor: { code: returnState } },
-                  '@ondc/org/provider_name': f['@ondc/org/provider_name'] || providerName,
-                })),
-            ];
-          } catch (e) {
-            logger.warn('buildEnhancedFulfillments failed, using raw:', e.message);
-            // Fallback: raw fulfillments from confirmed + update orders
-            return [
-              ...origFulfillments.map(f => ({
-                ...f,
-                state: f.state || { descriptor: { code: 'Order-delivered' } },
-              })),
-              ...updateFulfillments
-                .filter(f => f.type === 'Return' || !origFulfillments.some(o => o.id === f.id))
-                .map((f, idx) => ({
-                  ...f,
-                  id: f.id || `r${idx + 1}`,
-                  state: { descriptor: { code: returnState } },
-                })),
-            ];
-          }
-        };
-
-        // Send full return sequence: Return_Initiated → Approved → Picked → Delivered
-        const returnSteps = ['Return_Initiated', 'Return_Approved', 'Return_Picked', 'Return_Delivered'];
-        const delay = ms => new Promise(r => setTimeout(r, ms));
-
-        for (const returnState of returnSteps) {
-          const returnPayload = {
-            id:    fullOrder.id,
-            state: 'Completed',
-            provider:     fullOrder.provider,
-            items:        fullOrder.items,
-            billing:      fullOrder.billing,
-            quote:        fullOrder.quote,
-            payment:      fullOrder.payment,
-            fulfillments: buildEnhancedFulfillments(returnState),
-            created_at: fullOrder.created_at || now,
-            updated_at: new Date().toISOString(),
-          };
-
-          logger.info(`Sending on_update (${returnState})`, {
-            order_id: fullOrder.id,
-            bap_uri: fullContext?.bap_uri,
-            has_cached_order: !!cachedEntry,
-            fulfillments_count: returnPayload.fulfillments?.length,
-            has_billing: !!returnPayload.billing,
-          });
-
-          // Push N.O. log BEFORE HTTP callback
-          const noPayload = {
-            context: {
-              ...fullContext,
-              action: 'on_update',
-              bpp_id:  process.env.ONDC_SUBSCRIBER_ID || fullContext.bpp_id,
-              bpp_uri: process.env.ONDC_SUBSCRIBER_URL || fullContext.bpp_uri,
-              timestamp: new Date().toISOString(),
-              message_id: uuidv4(),
-              ttl: 'PT30S',
-            },
-            message: { order: returnPayload },
-          };
-          pushTxnLog('on_update', noPayload).catch(e =>
-            logger.warn(`N.O. on_update push failed for ${returnState}:`, e.message)
-          );
-
-          try {
-            await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: returnPayload }, tenant);
-            logger.info(`on_update (${returnState}) sent OK`, { order_id: fullOrder.id });
-          } catch (cbErr) {
-            logger.error(`on_update (${returnState}) HTTP callback failed:`, cbErr.message);
-          }
-
-          if (returnState !== 'Return_Delivered') await delay(2000);
-        }
-
-        // Update cache
-        if (fullOrder.id) {
-          confirmedOrderCache.set(fullOrder.id, { order: fullOrder, context: fullContext, vendor });
-          lastConfirmedOrderId = fullOrder.id;
-        }
-
-        logger.info('handleUpdate return sequence complete', { order_id: fullOrder.id });
-      } catch (err) {
-        logger.error('handleUpdate return callback FAILED:', err.message, err.stack);
-        // Emergency: push at least one N.O. entry so Pramaan sees something
-        try {
-          const emergencyPayload = {
-            context: {
-              ...context,
-              action: 'on_update',
-              bpp_id:  process.env.ONDC_SUBSCRIBER_ID || context?.bpp_id,
-              bpp_uri: process.env.ONDC_SUBSCRIBER_URL || context?.bpp_uri,
-              timestamp: new Date().toISOString(),
-              message_id: uuidv4(),
-              ttl: 'PT30S',
-            },
-            message: { order: { id: order.id, state: 'Completed' } },
-          };
-          pushTxnLog('on_update', emergencyPayload).catch(() => {});
-        } catch (_) {}
-      }
-    })();
-  }
-  // For settlement updates (payment target) — send on_update with Return_Delivered
-  // Pramaan Flow 4A sends update_target=payment after Order-delivered
-  if (update_target === 'payment') {
-    (async () => {
-      try {
-        const tenant = await resolveTenant(context?.bpp_id);
-        const cachedEntry = confirmedOrderCache.get(order.id);
-        if (!cachedEntry) {
-          logger.warn('handleUpdate payment: order not in cache', { order_id: order.id });
-          return;
-        }
-        const { order: confirmedOrder, context: confirmedContext, vendor, confirmTimestamp } = cachedEntry;
-        const fullContext = { ...confirmedContext, ...context };
-        const now = new Date().toISOString();
-
-        const deliveryFulfillments = (confirmedOrder.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
-          buildFulfillmentWithLocation(f, vendor, 'Order-delivered', now)
-        );
-        const returnFulfillment = {
+        // Build return fulfillment helper
+        const buildReturnFulfillment = (returnState) => ({
           id: 'r1',
           type: 'Return',
-          state: { descriptor: { code: 'Return_Delivered' } },
-          '@ondc/org/provider_name': vendor?.business_name || confirmedOrder.provider?.descriptor?.name || '',
+          state: { descriptor: { code: returnState } },
+          '@ondc/org/provider_name': providerName,
           tags: [{
             code: 'return_request',
             list: [
               { code: 'id', value: 'r1' },
-              { code: 'item_id', value: (confirmedOrder.items?.[0]?.id || '') },
-              { code: 'parent_item_id', value: (confirmedOrder.items?.[0]?.parent_item_id || confirmedOrder.items?.[0]?.id || 'N/A') },
-              { code: 'item_quantity', value: String(confirmedOrder.items?.[0]?.quantity?.count || 1) },
+              { code: 'item_id', value: (fullOrder.items?.[0]?.id || '') },
+              { code: 'parent_item_id', value: (fullOrder.items?.[0]?.parent_item_id || fullOrder.items?.[0]?.id || 'N/A') },
+              { code: 'item_quantity', value: String(fullOrder.items?.[0]?.quantity?.count || 1) },
               { code: 'reason_id', value: '001' },
               { code: 'reason_desc', value: 'detailed description for return' },
               { code: 'images', value: 'https://ondc.cottkart.com/placeholder.png' },
@@ -1133,24 +991,52 @@ const handleUpdate = async (req, res) => {
               { code: 'ttl_reverseqc', value: 'P3D' },
             ],
           }],
+        });
+
+        const buildReturnPayload = (returnState) => {
+          const deliveryFulfillments = (confirmedOrder.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
+            buildFulfillmentWithLocation(f, vendor, 'Order-delivered', now)
+          );
+          return {
+            id:       fullOrder.id,
+            state:    'Completed',
+            provider: fullOrder.provider,
+            items:    fullOrder.items,
+            billing:  fullOrder.billing,
+            fulfillments: [...deliveryFulfillments, buildReturnFulfillment(returnState)],
+            quote:    fullOrder.quote,
+            payment:  fullOrder.payment,
+            tags:     ORDER_TAGS,
+            created_at: fullOrder.created_at || now,
+            updated_at: confirmTimestamp || confirmedOrder.updated_at || now,
+          };
         };
-        const returnPayload = {
-          id:       confirmedOrder.id || order.id,
-          state:    'Completed',
-          provider: confirmedOrder.provider,
-          items:    confirmedOrder.items,
-          billing:  confirmedOrder.billing,
-          fulfillments: [...deliveryFulfillments, returnFulfillment],
-          quote:    confirmedOrder.quote,
-          payment:  order.payment || confirmedOrder.payment,
-          tags:     ORDER_TAGS,
-          created_at: confirmedOrder.created_at || now,
-          updated_at: confirmTimestamp || confirmedOrder.updated_at || now,
-        };
-        await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: returnPayload }, tenant);
-        logger.info('handleUpdate payment: on_update (Return_Delivered) sent', { order_id: order.id });
+
+        // Determine which on_update to send based on update_target
+        // payment = settlement update (just send Return_Delivered)
+        // fulfillment/item = return request (send full sequence)
+        const delay = ms => new Promise(r => setTimeout(r, ms));
+
+        if (update_target === 'payment') {
+          // Settlement update — send on_update with Return_Delivered
+          const payload = buildReturnPayload('Return_Delivered');
+          await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: payload }, tenant);
+          logger.info('handleUpdate payment: on_update (Return_Delivered) sent', { order_id: order.id });
+
+        } else if (update_target === 'fulfillment' || update_target === 'item') {
+          // Return request — send full return sequence
+          const returnSteps = ['Return_Initiated', 'Return_Approved', 'Return_Picked', 'Return_Delivered'];
+          for (const returnState of returnSteps) {
+            const payload = buildReturnPayload(returnState);
+            await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: payload }, tenant);
+            logger.info(`on_update (${returnState}) sent OK`, { order_id: fullOrder.id });
+            if (returnState !== 'Return_Delivered') await delay(2000);
+          }
+        }
+
+        logger.info('handleUpdate complete', { order_id: fullOrder.id, update_target });
       } catch (err) {
-        logger.error('handleUpdate payment callback failed:', err.message);
+        logger.error('handleUpdate callback FAILED:', err.message, err.stack);
       }
     })();
   }
