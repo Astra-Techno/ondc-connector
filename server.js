@@ -84,6 +84,23 @@ app.get('/health/analytics', async (req, res) => {
   });
 });
 
+app.get('/debug/logs', async (req, res) => {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const today = new Date().toISOString().split('T')[0];
+    const logFile = path.join(__dirname, 'logs', `ondc-${today}.log`);
+    if (!fs.existsSync(logFile)) {
+      return res.json({ error: 'Log file not found', path: logFile });
+    }
+    const content = fs.readFileSync(logFile, 'utf8');
+    const lines = content.trim().split('\n').slice(-150); // last 150 lines
+    return res.json({ lines });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ONDC subscription challenge-response
 // Registry calls this with an encrypted challenge; we decrypt and return the answer
 app.get('/on_subscribe', (req, res) => {
