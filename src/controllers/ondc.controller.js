@@ -19,6 +19,8 @@ const { pushTxnLog } = require('../services/ondc/logPublisher.service');
 // In-memory cache: order_id → { order, context } (for on_status/on_update/on_cancel callbacks)
 const confirmedOrderCache = new Map();
 let lastConfirmedOrderId = null; // track most recent for /latest shortcut
+// Track cancelled orders so auto-sequence can abort
+const cancelledOrders = new Set();
 
 // In-memory cache: issue_id → { issue, context } (for proactive on_issue_status)
 const issueCache = new Map();
@@ -666,6 +668,8 @@ const handleConfirm = async (req, res) => {
       // with 2s delay between each. Flows that send /cancel (3B) will interrupt naturally.
       const autoStatusSequence = async () => {
         const delay = ms => new Promise(r => setTimeout(r, ms));
+        const isCancelled = () => cancelledOrders.has(order.id);
+
         const steps = [
           { fulfillmentState: 'Packed',            orderState: 'In-progress' },
           { fulfillmentState: 'Agent-assigned',     orderState: 'In-progress' },
@@ -678,7 +682,7 @@ const handleConfirm = async (req, res) => {
         await delay(15000);
 
         for (const step of steps) {
-          const stepNow = new Date().toISOString();
+          if (isCancelled()) { logger.info('Auto on_status aborted (order cancelled)', { order_id: order.id }); return; }
           const payload = buildStatusPayload(order.id, order, step.fulfillmentState, step.orderState, vendor);
           await sendCallback(context.bap_uri, 'on_status', context, { order: payload }, tenant);
           logger.info('Auto on_status sent', { order_id: order.id, ...step });
@@ -688,9 +692,11 @@ const handleConfirm = async (req, res) => {
 
         // Flow 4A: After Order-delivered, proactively send on_update Return_Initiated → Return_Delivered
         // Pramaan expects these as part of the auto sequence (not triggered by /update)
+        if (isCancelled()) return;
         await delay(3000);
         const returnSteps = ['Return_Initiated', 'Return_Approved', 'Return_Picked', 'Return_Delivered'];
         for (const returnState of returnSteps) {
+          if (isCancelled()) { logger.info('Auto on_update aborted (order cancelled)', { order_id: order.id }); return; }
           const retNow = new Date().toISOString();
           const deliveryFulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
             buildFulfillmentWithLocation(f, vendor, 'Order-delivered', retNow)
@@ -842,6 +848,9 @@ const handleCancel = async (req, res) => {
     const context = body.context ? JSON.parse(JSON.stringify(body.context)) : {};
     const { order_id, cancellation_reason_id } = body.message || {};
     logger.info('ONDC /cancel received', { order_id });
+
+    // Signal auto-sequence to stop for this order
+    if (order_id) cancelledOrders.add(order_id);
 
     ack(res, context);
 
