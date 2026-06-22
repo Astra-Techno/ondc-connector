@@ -893,18 +893,25 @@ const handleStatus = async (req, res) => {
       const now = new Date().toISOString();
 
       const baseFulfillments = cachedOrder?.fulfillments || [{ id: 'f1', type: 'Delivery' }];
+      // Include return fulfillment if a return has been initiated (Flow 4A/4B)
+      const returnFl = cachedEntry?.returnFulfillment || null;
+      const deliveryFls = baseFulfillments.filter(f => f.type !== 'Return' && f.type !== 'Cancel').map(f =>
+        buildFulfillmentWithLocation(f, vendor, fulfillmentCode, now)
+      );
+      const allFulfillments = returnFl ? [...deliveryFls, returnFl] : deliveryFls;
+      const effectiveState = returnFl ? 'Completed' : currentStatus;
+
       const orderPayload = {
         id:       ondcOrderId,
-        state:    currentStatus,
+        state:    effectiveState,
         provider: cachedOrder?.provider,
         items:    cachedOrder?.items,
         billing:  cachedOrder?.billing,
-        fulfillments: baseFulfillments.map(f =>
-          buildFulfillmentWithLocation(f, vendor, fulfillmentCode, now)
-        ),
+        fulfillments: allFulfillments,
         quote:     cachedOrder?.quote,
         payment: {
           ...(cachedOrder?.payment || {}),
+          status: returnFl ? 'PAID' : (cachedOrder?.payment?.status || 'PAID'),
           '@ondc/org/settlement_details': SETTLEMENT_DETAILS,
         },
         tags:       ORDER_TAGS,
@@ -1066,29 +1073,49 @@ const handleUpdate = async (req, res) => {
         const now = new Date().toISOString();
         const providerName = vendor?.business_name || fullOrder.provider?.descriptor?.name || '';
 
-        // Build return fulfillment helper
-        const buildReturnFulfillment = (returnState) => ({
-          id: 'r1',
-          type: 'Return',
-          state: { descriptor: { code: returnState } },
-          '@ondc/org/provider_name': providerName,
-          tags: [{
-            code: 'return_request',
-            list: [
-              { code: 'id', value: 'r1' },
-              { code: 'item_id', value: (fullOrder.items?.[0]?.id || '') },
-              { code: 'parent_item_id', value: (fullOrder.items?.[0]?.parent_item_id || fullOrder.items?.[0]?.id || 'N/A') },
-              { code: 'item_quantity', value: String(fullOrder.items?.[0]?.quantity?.count || 1) },
-              { code: 'reason_id', value: '001' },
-              { code: 'reason_desc', value: 'detailed description for return' },
-              { code: 'images', value: 'https://ondc.cottkart.com/placeholder.png' },
-              { code: 'ttl_approval', value: 'PT24H' },
-              { code: 'ttl_reverseqc', value: 'P3D' },
-            ],
-          }],
-        });
+        // Extract Return fulfillments from BAP's /update request
+        const bapReturnFulfillments = (order.fulfillments || []).filter(f => f.type === 'Return');
 
-        const buildReturnPayload = (returnState) => {
+        // Build return fulfillment for on_update, using BAP's return request details
+        const buildReturnFulfillment = (returnState, bapReturnFl) => {
+          const returnId = bapReturnFl?.id
+            || bapReturnFl?.tags?.[0]?.list?.find(t => t.code === 'id')?.value
+            || 'r1';
+          // Preserve BAP's return_request tags and add initiated_by
+          let tags = bapReturnFl?.tags || [];
+          if (tags.length > 0) {
+            const tagList = [...(tags[0].list || [])];
+            if (!tagList.find(t => t.code === 'initiated_by')) {
+              tagList.push({ code: 'initiated_by', value: context?.bap_id || fullContext?.bap_id || '' });
+            }
+            tags = [{ ...tags[0], list: tagList }];
+          } else {
+            tags = [{
+              code: 'return_request',
+              list: [
+                { code: 'id', value: returnId },
+                { code: 'item_id', value: (fullOrder.items?.[0]?.id || '') },
+                { code: 'parent_item_id', value: (fullOrder.items?.[0]?.parent_item_id || fullOrder.items?.[0]?.id || 'N/A') },
+                { code: 'item_quantity', value: String(fullOrder.items?.[0]?.quantity?.count || 1) },
+                { code: 'reason_id', value: '001' },
+                { code: 'reason_desc', value: 'detailed description for return' },
+                { code: 'images', value: 'https://ondc.cottkart.com/placeholder.png' },
+                { code: 'ttl_approval', value: 'PT24H' },
+                { code: 'ttl_reverseqc', value: 'P3D' },
+                { code: 'initiated_by', value: context?.bap_id || fullContext?.bap_id || '' },
+              ],
+            }];
+          }
+          return {
+            id: returnId,
+            type: 'Return',
+            state: { descriptor: { code: returnState } },
+            '@ondc/org/provider_name': providerName,
+            tags,
+          };
+        };
+
+        const buildReturnPayload = (returnState, bapReturnFl) => {
           const deliveryFulfillments = (confirmedOrder.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
             buildFulfillmentWithLocation(f, vendor, 'Order-delivered', now)
           );
@@ -1098,30 +1125,34 @@ const handleUpdate = async (req, res) => {
             provider: fullOrder.provider,
             items:    fullOrder.items,
             billing:  fullOrder.billing,
-            fulfillments: [...deliveryFulfillments, buildReturnFulfillment(returnState)],
+            fulfillments: [...deliveryFulfillments, buildReturnFulfillment(returnState, bapReturnFl)],
             quote:    fullOrder.quote,
             payment:  { ...(fullOrder.payment || {}), status: 'PAID' },
             tags:     ORDER_TAGS,
             created_at: fullOrder.created_at || now,
-            updated_at: confirmTimestamp || confirmedOrder.updated_at || now,
+            updated_at: now,
           };
         };
 
         // payment = Flow 3A settlement ACK only; fulfillment/item = Flow 4A/4B return sequence
-        const delay = ms => new Promise(r => setTimeout(r, ms));
-
         if (update_target === 'payment') {
           logger.info('handleUpdate payment: ACK only (Flow 3A settlement)', { order_id: order.id });
 
         } else if (update_target === 'fulfillment' || update_target === 'item') {
-          // Return request — send full return sequence
-          const returnSteps = ['Return_Initiated', 'Return_Approved', 'Return_Picked', 'Return_Delivered'];
-          for (const returnState of returnSteps) {
-            const payload = buildReturnPayload(returnState);
-            await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: payload }, tenant);
-            logger.info(`on_update (${returnState}) sent OK`, { order_id: fullOrder.id });
-            if (returnState !== 'Return_Delivered') await delay(2000);
+          // Return request from BAP — send ONLY Return_Initiated; remaining states via /trigger/merchant-return-update
+          const bapReturnFl = bapReturnFulfillments[0] || null;
+
+          // Store return fulfillment in cache for triggerMerchantReturnUpdate
+          const cached = confirmedOrderCache.get(fullOrder.id);
+          if (cached) {
+            cached.returnFulfillment = buildReturnFulfillment('Return_Initiated', bapReturnFl);
+            cached.returnContext = { ...fullContext };
           }
+
+          const payload = buildReturnPayload('Return_Initiated', bapReturnFl);
+          // Use incoming message_id for the direct Return_Initiated response
+          await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: payload }, tenant);
+          logger.info('on_update (Return_Initiated) sent OK', { order_id: fullOrder.id });
         }
 
         logger.info('handleUpdate complete', { order_id: fullOrder.id, update_target });
@@ -1198,13 +1229,46 @@ const triggerMerchantReturnUpdate = async (req, res) => {
     res.json({ success: true, message: `on_update return sequence started`, steps, order_id });
 
     const providerName = vendor?.business_name || order.provider?.descriptor?.name || '';
-    // Separate delivery and return fulfillments from cached order
-    const deliveryFulfillments = (order.fulfillments || []).filter(f => f.type !== 'Return');
-    const returnFulfillments = (order.fulfillments || []).filter(f => f.type === 'Return');
+
+    // Get stored return fulfillment from cache (saved by handleUpdate when BAP sent /update)
+    const storedReturnFl = cachedEntry.returnFulfillment;
+    const returnContext = cachedEntry.returnContext || context;
+
+    if (!storedReturnFl) {
+      logger.warn('No return fulfillment in cache — handleUpdate may not have been called yet', { order_id });
+    }
+
+    // Delivery fulfillments from confirmed order
+    const deliveryFulfillments = (order.fulfillments || []).filter(f => f.type !== 'Return' && f.type !== 'Cancel');
 
     const delay = ms => new Promise(r => setTimeout(r, ms));
     for (const returnState of steps) {
       const now = new Date().toISOString();
+
+      // Build return fulfillment using stored data from BAP's /update, with updated state
+      const returnFl = storedReturnFl
+        ? { ...storedReturnFl, state: { descriptor: { code: returnState } } }
+        : {
+            id: 'r1',
+            type: 'Return',
+            state: { descriptor: { code: returnState } },
+            '@ondc/org/provider_name': providerName,
+            tags: [{
+              code: 'return_request',
+              list: [
+                { code: 'id', value: 'r1' },
+                { code: 'item_id', value: (order.items?.[0]?.id || '') },
+                { code: 'item_quantity', value: String(order.items?.[0]?.quantity?.count || 1) },
+                { code: 'reason_id', value: '001' },
+                { code: 'reason_desc', value: 'detailed description for return' },
+                { code: 'images', value: 'https://ondc.cottkart.com/placeholder.png' },
+                { code: 'ttl_approval', value: 'PT24H' },
+                { code: 'ttl_reverseqc', value: 'P3D' },
+                { code: 'initiated_by', value: returnContext?.bap_id || '' },
+              ],
+            }],
+          };
+
       const returnPayload = {
         id:    order_id,
         state: 'Completed',
@@ -1212,35 +1276,29 @@ const triggerMerchantReturnUpdate = async (req, res) => {
         items:     order.items,
         billing:   order.billing,
         quote:     order.quote,
-        payment:   order.payment,
+        payment:   { ...(order.payment || {}), status: 'PAID' },
         fulfillments: [
-          // Delivery fulfillment(s) with full start/end location
           ...(deliveryFulfillments.length > 0
             ? deliveryFulfillments
             : [{ id: 'f1', type: 'Delivery' }]
           ).map(f => buildFulfillmentWithLocation(f, vendor, 'Order-delivered', now)),
-          // Return fulfillment(s) with id + provider_name
-          ...returnFulfillments.map((f, idx) => ({
-            ...f,
-            id:   f.id || `r${idx + 1}`,
-            type: f.type || 'Return',
-            state: { descriptor: { code: returnState } },
-            '@ondc/org/provider_name': f['@ondc/org/provider_name'] || providerName,
-          })),
+          returnFl,
         ],
+        tags: ORDER_TAGS,
         created_at: order.created_at || now,
         updated_at: now,
       };
 
       // Push N.O. log before HTTP callback
+      const cbMsgId = uuidv4();
       const onUpdatePayload = {
         context: {
-          ...context,
+          ...returnContext,
           action: 'on_update',
-          bpp_id:  process.env.ONDC_SUBSCRIBER_ID || context.bpp_id,
-          bpp_uri: process.env.ONDC_SUBSCRIBER_URL || context.bpp_uri,
-          timestamp: new Date().toISOString(),
-          message_id: uuidv4(),
+          bpp_id:  process.env.ONDC_SUBSCRIBER_ID || returnContext.bpp_id,
+          bpp_uri: process.env.ONDC_SUBSCRIBER_URL || returnContext.bpp_uri,
+          timestamp: now,
+          message_id: cbMsgId,
           ttl: 'PT30S',
         },
         message: { order: returnPayload },
@@ -1250,8 +1308,12 @@ const triggerMerchantReturnUpdate = async (req, res) => {
       );
 
       try {
-        await sendCallback(context.bap_uri, 'on_update', { ...context, message_id: uuidv4() }, { order: returnPayload }, tenant);
+        await sendCallback(returnContext.bap_uri, 'on_update', { ...returnContext, message_id: cbMsgId }, { order: returnPayload }, tenant);
         logger.info('on_update (return state) sent', { order_id, returnState });
+        // Update cached return fulfillment state for /status responses
+        if (cachedEntry?.returnFulfillment) {
+          cachedEntry.returnFulfillment = { ...cachedEntry.returnFulfillment, state: { descriptor: { code: returnState } } };
+        }
       } catch (cbErr) {
         logger.error(`on_update (${returnState}) HTTP callback failed:`, cbErr.message);
       }
