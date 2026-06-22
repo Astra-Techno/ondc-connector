@@ -1,5 +1,6 @@
 const axios = require('axios');
 const logger = require('../../utils/logger');
+const { ondcTrace } = require('../../utils/logger');
 
 const ANALYTICS_URL =
   process.env.ONDC_ANALYTICS_URL ||
@@ -131,6 +132,16 @@ const pushTxnLog = async (type, data, retries = 3) => {
         msg: data?.context?.message_id,
         status: result.status,
       });
+      ondcTrace.info({
+        analytics: 'push_ok',
+        type,
+        txn_id:   data?.context?.transaction_id,
+        msg_id:   data?.context?.message_id,
+        action:   data?.context?.action,
+        status:   result.status,
+        subscriber_id: subscriberId,
+        endpoint: ANALYTICS_URL,
+      });
       return result;
     }
     lastError = result;
@@ -141,6 +152,17 @@ const pushTxnLog = async (type, data, retries = 3) => {
     `ONDC txn log push FAILED (${type}) [${lastError?.status || 'no-response'}]: ${lastError?.error}`,
     { txn: data?.context?.transaction_id }
   );
+  ondcTrace.info({
+    analytics: 'push_FAILED',
+    type,
+    txn_id:   data?.context?.transaction_id,
+    msg_id:   data?.context?.message_id,
+    action:   data?.context?.action,
+    status:   lastError?.status || 'no-response',
+    error:    lastError?.error,
+    subscriber_id: subscriberId,
+    endpoint: ANALYTICS_URL,
+  });
   return { ok: false, ...lastError };
 };
 
