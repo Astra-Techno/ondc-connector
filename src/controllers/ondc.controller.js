@@ -578,15 +578,13 @@ const handleSelect = async (req, res) => {
         },
       };
 
-      // Pramaan always verifies on_select error block with DOMAIN-ERROR / 40002
-      payload.error = {
-        type: 'DOMAIN-ERROR',
-        code: '40002',
-        message: outOfStockItems.length > 0
-          ? `Items out of stock: ${outOfStockItems.join(', ')}`
-          : 'Non-serviceable items or quantity unavailable',
-      };
+      // Only include error block when items are actually out of stock (ONDC spec DOMAIN-ERROR 40002)
       if (outOfStockItems.length > 0) {
+        payload.error = {
+          type: 'DOMAIN-ERROR',
+          code: '40002',
+          message: `Items out of stock: ${outOfStockItems.join(', ')}`,
+        };
         logger.warn('Out of stock items in /select', { outOfStockItems });
       }
 
@@ -759,13 +757,15 @@ const handleConfirm = async (req, res) => {
 
         for (const step of steps) {
           if (isCancelled()) { logger.info('Auto on_status aborted (order cancelled)', { order_id: order.id }); return; }
+          // Each proactive callback must have a unique message_id (Pramaan: "message_id should be unique for each call lifecycle")
+          const stepContext = { ...context, message_id: uuidv4() };
           const payload = buildStatusPayload(order.id, order, step.fulfillmentState, step.orderState, vendor);
-          await sendCallback(context.bap_uri, 'on_status', context, { order: payload }, tenant);
+          await sendCallback(context.bap_uri, 'on_status', stepContext, { order: payload }, tenant);
           logger.info('Auto on_status sent', { order_id: order.id, ...step });
 
           // Flow 3A: send on_update (Cancelled) right after Packed — Pramaan N.O. filters by Cancelled state
           if (autoPartialCancel && step.fulfillmentState === 'Packed') {
-            await sendPartialCancelOnUpdate(context, order, vendor, tenant, confirmUpdatedAt);
+            await sendPartialCancelOnUpdate({ ...context, message_id: uuidv4() }, order, vendor, tenant, confirmUpdatedAt);
           }
 
           await delay(2000);
@@ -1200,7 +1200,7 @@ const triggerMerchantReturnUpdate = async (req, res) => {
       );
 
       try {
-        await sendCallback(context.bap_uri, 'on_update', context, { order: returnPayload }, tenant);
+        await sendCallback(context.bap_uri, 'on_update', { ...context, message_id: uuidv4() }, { order: returnPayload }, tenant);
         logger.info('on_update (return state) sent', { order_id, returnState });
       } catch (cbErr) {
         logger.error(`on_update (${returnState}) HTTP callback failed:`, cbErr.message);
@@ -1261,7 +1261,7 @@ const triggerMerchantCancel = async (req, res) => {
       updated_at:  now,
     };
 
-    await sendCallback(context.bap_uri, 'on_cancel', context, { order: cancelPayload }, tenant);
+    await sendCallback(context.bap_uri, 'on_cancel', { ...context, message_id: uuidv4() }, { order: cancelPayload }, tenant);
     logger.info('Merchant on_cancel sent', { order_id, reason_id, rto });
     res.json({ success: true, message: 'on_cancel sent', order_id });
   } catch (err) {
@@ -1306,7 +1306,7 @@ const triggerMerchantStatus = async (req, res) => {
       updated_at:   now,
     };
 
-    await sendCallback(context.bap_uri, 'on_status', context, { order: statusPayload }, tenant);
+    await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: statusPayload }, tenant);
     logger.info('Proactive on_status sent', { order_id, fulfillmentState, orderState });
     res.json({ success: true, message: 'on_status sent', order_id, state: fulfillmentState });
   } catch (err) {
@@ -1389,7 +1389,7 @@ const triggerMerchantStatusSequence = async (req, res) => {
     const delay = ms => new Promise(r => setTimeout(r, ms));
     for (const step of steps) {
       const payload = buildStatusPayload(order_id, order, step.fulfillmentState, step.orderState, vendor);
-      await sendCallback(context.bap_uri, 'on_status', context, { order: payload }, tenant);
+      await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: payload }, tenant);
       logger.info('on_status sequence step sent', { order_id, ...step });
       await delay(2000);
     }
