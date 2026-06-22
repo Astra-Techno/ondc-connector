@@ -1285,8 +1285,18 @@ const triggerMerchantStatus = async (req, res) => {
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
 
-    const fulfillmentState = req.body?.state || 'Pending';
-    const orderState       = req.body?.order_state || 'Accepted';
+    // Map shorthand status param to fulfillment/order state pairs
+    const STATUS_MAP = {
+      pending:          { fulfillmentState: 'Pending',          orderState: 'Accepted' },
+      packed:           { fulfillmentState: 'Packed',           orderState: 'In-progress' },
+      shipped:          { fulfillmentState: 'Order-picked-up',  orderState: 'In-progress' },
+      out_for_delivery: { fulfillmentState: 'Out-for-delivery', orderState: 'In-progress' },
+      delivered:        { fulfillmentState: 'Order-delivered',   orderState: 'Completed' },
+      cancelled:        { fulfillmentState: 'Cancelled',        orderState: 'Cancelled' },
+    };
+    const mapped = STATUS_MAP[req.body?.status];
+    const fulfillmentState = mapped?.fulfillmentState || req.body?.state || 'Pending';
+    const orderState       = mapped?.orderState       || req.body?.order_state || 'Accepted';
 
     const now = new Date().toISOString();
     const statusPayload = {
