@@ -1270,6 +1270,26 @@ const triggerMerchantReturnUpdate = async (req, res) => {
   }
 };
 
+// Build RTO fulfillment object (type "RTO") for Flow 3B
+const buildRtoFulfillment = (rtoState, reasonId) => {
+  const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';
+  return {
+    id:   'rto1',
+    type: 'RTO',
+    state: { descriptor: { code: rtoState } },
+    tags: [{
+      code: 'rto_event',
+      list: [
+        { code: 'retry_count',            value: '0' },
+        { code: 'rto_id',                 value: 'rto1' },
+        { code: 'cancellation_reason_id', value: reasonId || '011' },
+        { code: 'cancelled_by',           value: subscriberId },
+        { code: 'sub_reason_id',          value: '' },
+      ],
+    }],
+  };
+};
+
 // triggerMerchantCancel — internal endpoint to initiate merchant-side on_cancel
 // Used for Flow 3B/3C testing
 const triggerMerchantCancel = async (req, res) => {
@@ -1288,6 +1308,18 @@ const triggerMerchantCancel = async (req, res) => {
 
     const now = new Date().toISOString();
     const cancelFulfillmentTags = [{ code: 'cancellation_terms', list: [{ code: 'reason_required', value: 'false' }] }];
+
+    // For RTO: Delivery fulfillment keeps Out-for-delivery + RTO fulfillment (RTO-Initiated)
+    // For non-RTO (3C): single Delivery fulfillment with state Cancelled
+    const deliveryFulfillments = (order.fulfillments || []).map(f => ({
+      ...buildFulfillmentWithLocation(f, cachedVendor, rto ? 'Out-for-delivery' : 'Cancelled', now),
+      tags: cancelFulfillmentTags,
+    }));
+
+    const fulfillments = rto
+      ? [...deliveryFulfillments, buildRtoFulfillment('RTO-Initiated', reason_id)]
+      : deliveryFulfillments;
+
     const cancelPayload = {
       id:    order_id,
       state: 'Cancelled',
@@ -1306,14 +1338,11 @@ const triggerMerchantCancel = async (req, res) => {
         status: 'PAID',
       },
       cancellation: {
-        cancelled_by: 'SELLER',
+        cancelled_by: rto ? context?.bap_id || 'BAP' : 'SELLER',
         reason: { id: reason_id },
-        ...(rto ? { return_reason: { id: reason_id } } : {}),
       },
-      fulfillments: (order.fulfillments || []).map(f => ({
-        ...buildFulfillmentWithLocation(f, cachedVendor, rto ? 'RTO-Initiated' : 'Cancelled', now),
-        tags: cancelFulfillmentTags,
-      })),
+      fulfillments,
+      tags: ORDER_TAGS,
       created_at:  order.created_at || now,
       updated_at:  now,
     };
@@ -1385,15 +1414,23 @@ const triggerMerchantStatus = async (req, res) => {
 // Helper: build an on_status payload for a given fulfillment state + order state
 const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendor) => {
   const now = new Date().toISOString();
+  const isRto = fulfillmentState === 'RTO-Delivered';
+
+  // For RTO-Delivered: Delivery stays at Out-for-delivery + RTO fulfillment with RTO-Delivered
+  const deliveryFulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
+    buildFulfillmentWithLocation(f, vendor, isRto ? 'Out-for-delivery' : fulfillmentState, now)
+  );
+  const fulfillments = isRto
+    ? [...deliveryFulfillments, buildRtoFulfillment('RTO-Delivered', '011')]
+    : deliveryFulfillments;
+
   return {
     id:       order_id,
     state:    orderState,
     provider: order.provider,
     items:    order.items,
     billing:  order.billing,
-    fulfillments: (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
-      buildFulfillmentWithLocation(f, vendor, fulfillmentState, now)
-    ),
+    fulfillments,
     quote:     order.quote,
     payment: {
       ...order.payment,
