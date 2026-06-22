@@ -226,7 +226,7 @@ const buildPartialCancelUpdatePayload = (order, vendor, confirmTimestamp) => {
     fulfillments: [...deliveryFulfillments, cancelFulfillment],
     tags: ORDER_TAGS,
     created_at: order.created_at || now,
-    updated_at: now,
+    updated_at: confirmTimestamp || order.updated_at || now,
   };
 };
 
