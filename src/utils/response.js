@@ -44,9 +44,7 @@ const ack = async (res, context = null, status = 'ACK') => {
     }
   }
 
-  const httpResponseBody = { ...body };
-  delete httpResponseBody.context;
-  return res.status(200).json(httpResponseBody);
+  return res.status(200).json(body);
 };
 
 const nack = (res, message = 'NACK') => {
