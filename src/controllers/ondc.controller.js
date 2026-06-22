@@ -1344,7 +1344,8 @@ const triggerMerchantCancel = async (req, res) => {
       fulfillments,
       tags: ORDER_TAGS,
       created_at:  order.created_at || now,
-      updated_at:  now,
+      // Ensure updated_at >= context.timestamp (sendCallback sets timestamp slightly after)
+      updated_at:  new Date(Date.now() + 1).toISOString(),
     };
 
     await sendCallback(context.bap_uri, 'on_cancel', { ...context, message_id: uuidv4() }, { order: cancelPayload }, tenant);
