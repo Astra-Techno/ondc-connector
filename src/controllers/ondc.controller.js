@@ -123,37 +123,94 @@ const buildFulfillmentWithLocation = (f, vendor, stateCode, now) => {
   };
 };
 
-// Flow 3A — merchant partial cancel on_update (Pramaan N.O. key: fulfillment state Cancelled)
+// Flow 3A — merchant partial cancel on_update (ONDC spec: Cancel fulfillment + precancel_state)
 const buildPartialCancelUpdatePayload = (order, vendor, confirmTimestamp) => {
   const now = new Date().toISOString();
+  const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';
   const allItems = order.items || [];
   const cancelledItem = allItems[0];
-  const remainingItems = allItems.length > 1 ? allItems.slice(1) : [];
+  const remainingItems = allItems.length > 1 ? allItems.slice(1) : allItems;
+  const cancelledQty = cancelledItem?.quantity?.count || 1;
+  const cancelledPrice = parseFloat(
+    order.quote?.breakup?.find(b => b['@ondc/org/item_id'] === cancelledItem?.id)?.item?.price?.value
+    || cancelledItem?.price?.value || '0'
+  );
+  const cancelledLineTotal = (cancelledPrice * cancelledQty).toFixed(2);
+
+  // Recalculate quote: remove cancelled item, keep delivery + remaining items
   const originalBreakup = order.quote?.breakup || [];
-  const updatedBreakup = cancelledItem
-    ? originalBreakup.filter(b =>
-        !(b['@ondc/org/title_type'] === 'item' && b['@ondc/org/item_id'] === cancelledItem.id)
-      )
-    : originalBreakup;
-  const updatedTotal = updatedBreakup.length > 0
-    ? updatedBreakup.reduce((sum, b) => sum + parseFloat(b.price?.value || 0), 0).toFixed(2)
-    : order.quote?.price?.value || '0.00';
+  const updatedBreakup = originalBreakup.filter(b =>
+    !(b['@ondc/org/title_type'] === 'item' && b['@ondc/org/item_id'] === cancelledItem?.id)
+  );
+  const updatedTotal = updatedBreakup.reduce((sum, b) => sum + parseFloat(b.price?.value || 0), 0).toFixed(2);
+
+  // Cancel fulfillment (type "Cancel", state "Cancelled") — separate from Delivery
+  const cancelFulfillmentId = 'c1';
+  const cancelFulfillment = {
+    id:    cancelFulfillmentId,
+    type:  'Cancel',
+    state: { descriptor: { code: 'Cancelled' } },
+    tags: [
+      {
+        code: 'cancel_request',
+        list: [
+          { code: 'reason_id',    value: '001' },
+          { code: 'initiated_by', value: subscriberId },
+        ],
+      },
+      {
+        code: 'quote_trail',
+        list: [
+          { code: 'type',     value: 'item' },
+          { code: 'id',       value: cancelledItem?.id || 'P001' },
+          { code: 'currency', value: 'INR' },
+          { code: 'value',    value: `-${cancelledLineTotal}` },
+        ],
+      },
+    ],
+  };
+
+  // Delivery fulfillment keeps its precancel state (Packed) + precancel_state tag
+  const preCancelState = 'Packed';
+  const deliveryFulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f => ({
+    ...buildFulfillmentWithLocation(f, vendor, preCancelState, now),
+    tags: [
+      {
+        code: 'cancel_request',
+        list: [
+          { code: 'reason_id',    value: '001' },
+          { code: 'initiated_by', value: subscriberId },
+        ],
+      },
+      {
+        code: 'precancel_state',
+        list: [
+          { code: 'fulfillment_state', value: preCancelState },
+          { code: 'updated_at',        value: confirmTimestamp || order.updated_at || now },
+        ],
+      },
+    ],
+  }));
+
+  // Items: remaining items keep their fulfillment_id, cancelled item points to Cancel fulfillment
+  const itemsPayload = [
+    ...remainingItems.map(i => ({ ...i })),
+    ...(cancelledItem ? [{
+      ...cancelledItem,
+      fulfillment_id: cancelFulfillmentId,
+      tags: [{ code: 'cancellation', list: [{ code: 'reason_id', value: '001' }] }],
+    }] : []),
+  ];
 
   return {
     id:       order.id,
-    state:    'Accepted',
+    state:    'In-progress',
     provider: order.provider,
-    items: [
-      ...remainingItems.map(i => ({ ...i })),
-      ...(cancelledItem ? [{
-        ...cancelledItem,
-        tags: [{ code: 'cancellation', list: [{ code: 'reason_id', value: '001' }] }],
-      }] : []),
-    ],
-    billing: order.billing,
+    items:    itemsPayload,
+    billing:  order.billing,
     quote: {
       price:   { currency: 'INR', value: updatedTotal },
-      breakup: updatedBreakup.length > 0 ? updatedBreakup : originalBreakup,
+      breakup: updatedBreakup,
       ttl:     order.quote?.ttl || 'P1D',
     },
     payment: {
@@ -166,12 +223,10 @@ const buildPartialCancelUpdatePayload = (order, vendor, confirmTimestamp) => {
       '@ondc/org/settlement_details':           SETTLEMENT_DETAILS,
       status: 'PAID',
     },
-    fulfillments: (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
-      buildFulfillmentWithLocation(f, vendor, 'Cancelled', now)
-    ),
-    tags: [{ code: 'cancellation_initiated_by', list: [{ code: 'reason_id', value: '001' }] }],
+    fulfillments: [...deliveryFulfillments, cancelFulfillment],
+    tags: ORDER_TAGS,
     created_at: order.created_at || now,
-    updated_at: confirmTimestamp || order.updated_at || now,
+    updated_at: now,
   };
 };
 
