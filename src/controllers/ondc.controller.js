@@ -808,8 +808,6 @@ const handleConfirm = async (req, res) => {
         // Wait 15s after on_confirm for Pramaan to process /status first
         await delay(15000);
 
-        const autoPartialCancel = process.env.ONDC_AUTO_PARTIAL_CANCEL !== 'false';
-
         for (const step of steps) {
           if (isCancelled()) { logger.info('Auto on_status aborted (order cancelled)', { order_id: order.id }); return; }
           // Each proactive callback must have a unique message_id (Pramaan: "message_id should be unique for each call lifecycle")
@@ -817,11 +815,6 @@ const handleConfirm = async (req, res) => {
           const payload = buildStatusPayload(order.id, order, step.fulfillmentState, step.orderState, vendor);
           await sendCallback(context.bap_uri, 'on_status', stepContext, { order: payload }, tenant);
           logger.info('Auto on_status sent', { order_id: order.id, ...step });
-
-          // Flow 3A: send on_update (Cancelled) right after Packed — Pramaan N.O. filters by Cancelled state
-          if (autoPartialCancel && step.fulfillmentState === 'Packed') {
-            await sendPartialCancelOnUpdate({ ...context, message_id: uuidv4() }, order, vendor, tenant, confirmUpdatedAt);
-          }
 
           await delay(2000);
         }
@@ -1306,7 +1299,11 @@ const triggerMerchantCancel = async (req, res) => {
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
 
+    // Signal auto-sequence to stop for this order (same as handleCancel)
+    cancelledOrders.add(order_id);
+
     const now = new Date().toISOString();
+    const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';
     const cancelFulfillmentTags = [{ code: 'cancellation_terms', list: [{ code: 'reason_required', value: 'false' }] }];
 
     // For RTO: Delivery fulfillment keeps Out-for-delivery + RTO fulfillment (RTO-Initiated)
@@ -1338,7 +1335,7 @@ const triggerMerchantCancel = async (req, res) => {
         status: 'PAID',
       },
       cancellation: {
-        cancelled_by: rto ? context?.bap_id || 'BAP' : 'SELLER',
+        cancelled_by: rto ? subscriberId : (context?.bap_id || 'SELLER'),
         reason: { id: reason_id },
       },
       fulfillments,
