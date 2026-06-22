@@ -170,14 +170,27 @@ const pushTxnLog = async (type, data, retries = 3) => {
 const SYNC_LOG_PUSH_DEADLINE_MS = Number(process.env.ONDC_SYNC_LOG_DEADLINE_MS) || 2500;
 
 // Push request + sync-response logs for select/init/confirm (parallel, capped wait)
+// Pramaan queries N.O. by ONDC action type (on_select, on_init, on_confirm) — not select_response.
+// The on_action response must also preserve the original message_id (Pramaan issue #1049).
 const pushSyncTxnLogs = async (action, reqBody, responseBody, { blockMs = SYNC_LOG_PUSH_DEADLINE_MS, retries = 2 } = {}) => {
-  const logType = `${action}_response`;
+  const logType = `on_${action}`;
   const pushes = [];
+
+  // Build N.O. response body with on_action context (action → on_action, preserve message_id)
+  const noResponseBody = responseBody?.context
+    ? {
+        ...responseBody,
+        context: {
+          ...responseBody.context,
+          action: `on_${action}`,
+        },
+      }
+    : responseBody;
 
   if (reqBody?.context?.transaction_id === responseBody?.context?.transaction_id) {
     pushes.push(pushTxnLog(action, reqBody, retries));
   }
-  pushes.push(pushTxnLog(logType, responseBody, retries));
+  pushes.push(pushTxnLog(logType, noResponseBody, retries));
 
   const allPushes = Promise.all(pushes).then(results => {
     const responseResult = results[results.length - 1];
@@ -258,7 +271,7 @@ const testAnalyticsPush = async () => {
       domain: 'ONDC:RET10',
       country: 'IND',
       city: 'std:080',
-      action: 'select',
+      action: 'on_select',
       core_version: '1.2.0',
       bap_id: 'pramaan.ondc.org/beta/preprod/mock/buyer',
       bap_uri: 'https://pramaan.ondc.org/beta/preprod/mock/buyer',
@@ -271,7 +284,7 @@ const testAnalyticsPush = async () => {
     },
     message: { ack: { status: 'ACK' } },
   };
-  return pushTxnLog('select_response', sample, 1);
+  return pushTxnLog('on_select', sample, 1);
 };
 
 module.exports = {

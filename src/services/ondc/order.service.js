@@ -174,7 +174,8 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
       bpp_id:     config.subscriber_id,
       bpp_uri:    config.subscriber_url,
       timestamp:  new Date().toISOString(),
-      message_id: uuidv4(),
+      // Preserve original message_id for on_action callbacks (Pramaan #1049 requires matching message_id)
+      message_id: context?.message_id || uuidv4(),
       ttl:        'PT30S',
     },
     message: messageBody,

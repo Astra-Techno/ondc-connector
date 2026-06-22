@@ -67,7 +67,7 @@ app.get('/health/analytics', async (req, res) => {
   const tokenInfo = getTokenDiagnostics();
   let hint = 'Analytics API unreachable — check ONDC_ANALYTICS_URL and VPS outbound HTTPS';
   if (result.ok) {
-    hint = 'Analytics API accepted select_response — Pramaan sync checks should pass';
+    hint = 'Analytics API accepted on_select — Pramaan sync checks should pass';
   } else if (result.status === 401) {
     if (tokenInfo.jwt?.expired) {
       hint = 'JWT is expired — regenerate N.O. token in ONDC portal (step 2.b)';
@@ -320,7 +320,7 @@ const start = async () => {
       logger.info('ONDC Network Observability log publisher: enabled');
       testAnalyticsPush()
         .then(r => {
-          if (r.ok) logger.info('Analytics API probe: OK — select_response accepted');
+          if (r.ok) logger.info('Analytics API probe: OK — on_select accepted');
           else logger.error('Analytics API probe FAILED — Pramaan sync tests will fail until fixed', r);
         })
         .catch(e => logger.error('Analytics API probe error:', e.message));
