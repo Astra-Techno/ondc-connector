@@ -1130,13 +1130,46 @@ const handleUpdate = async (req, res) => {
             payment:  { ...(fullOrder.payment || {}), status: 'PAID' },
             tags:     ORDER_TAGS,
             created_at: fullOrder.created_at || now,
-            updated_at: now,
+            updated_at: confirmTimestamp || fullOrder.updated_at || now,
           };
         };
 
-        // payment = Flow 3A settlement ACK only; fulfillment/item = Flow 4A/4B return sequence
+        // payment = Flow 3A settlement OR Flow 4A refund response; fulfillment/item = Flow 4A/4B return sequence
         if (update_target === 'payment') {
-          logger.info('handleUpdate payment: ACK only (Flow 3A settlement)', { order_id: order.id });
+          // Flow 4A: if a return was already triggered (via /trigger/merchant-return-update),
+          // respond to BAP's payment/refund update with the full return sequence again
+          const paymentReturnFl = cachedEntry.returnFulfillment;
+          if (paymentReturnFl) {
+            logger.info('handleUpdate payment: sending return sequence (Flow 4A refund)', { order_id: order.id });
+            const delay = ms => new Promise(r => setTimeout(r, ms));
+            for (const returnState of ['Return_Approved', 'Return_Picked', 'Return_Delivered']) {
+              const nowR = new Date().toISOString();
+              const returnFl = { ...paymentReturnFl, state: { descriptor: { code: returnState } } };
+              const deliveryFls = (confirmedOrder.fulfillments || [{ id: 'f1', type: 'Delivery' }])
+                .filter(f => f.type !== 'Return' && f.type !== 'Cancel')
+                .map(f => buildFulfillmentWithLocation(f, vendor, 'Order-delivered', nowR));
+              const rPayload = {
+                id:       fullOrder.id,
+                state:    'Completed',
+                provider: fullOrder.provider,
+                items:    fullOrder.items,
+                billing:  fullOrder.billing,
+                fulfillments: [...deliveryFls, returnFl],
+                quote:    fullOrder.quote,
+                payment:  { ...(fullOrder.payment || {}), status: 'PAID' },
+                tags:     ORDER_TAGS,
+                created_at: fullOrder.created_at || nowR,
+                updated_at: confirmTimestamp || fullOrder.updated_at || nowR,
+              };
+              const msgId = uuidv4();
+              await sendCallback(fullContext.bap_uri, 'on_update', { ...fullContext, message_id: msgId }, { order: rPayload }, tenant);
+              logger.info('on_update (payment return seq) sent', { order_id: order.id, returnState });
+              cachedEntry.returnFulfillment = returnFl;
+              await delay(2000);
+            }
+          } else {
+            logger.info('handleUpdate payment: ACK only (Flow 3A settlement)', { order_id: order.id });
+          }
 
         } else if (update_target === 'fulfillment' || update_target === 'item') {
           // Return request from BAP — send ONLY Return_Initiated; remaining states via /trigger/merchant-return-update
@@ -1204,7 +1237,7 @@ const triggerMerchantReturnUpdate = async (req, res) => {
     const cachedEntry = confirmedOrderCache.get(order_id);
     if (!cachedEntry) return res.status(404).json({ error: 'Order not found in cache' });
 
-    const { order, context, vendor: cachedVendor } = cachedEntry;
+    const { order, context, vendor: cachedVendor, confirmTimestamp } = cachedEntry;
     const tenant = await resolveTenant(context?.bpp_id);
     const vendor = cachedVendor || (tenant?.id
       ? await fetchVendorForOrder(tenant.id, order.provider?.id).catch(() => null)
@@ -1234,8 +1267,31 @@ const triggerMerchantReturnUpdate = async (req, res) => {
     const storedReturnFl = cachedEntry.returnFulfillment;
     const returnContext = cachedEntry.returnContext || context;
 
-    if (!storedReturnFl) {
-      logger.warn('No return fulfillment in cache — handleUpdate may not have been called yet', { order_id });
+    // Build base return fulfillment once (state is set per iteration below)
+    const baseReturnFl = storedReturnFl || {
+      id: 'r1',
+      type: 'Return',
+      '@ondc/org/provider_name': providerName,
+      tags: [{
+        code: 'return_request',
+        list: [
+          { code: 'id',           value: 'r1' },
+          { code: 'item_id',      value: (order.items?.[0]?.id || '') },
+          { code: 'item_quantity',value: String(order.items?.[0]?.quantity?.count || 1) },
+          { code: 'reason_id',    value: '001' },
+          { code: 'reason_desc',  value: 'detailed description for return' },
+          { code: 'images',       value: 'https://ondc.cottkart.com/placeholder.png' },
+          { code: 'ttl_approval', value: 'PT24H' },
+          { code: 'ttl_reverseqc',value: 'P3D' },
+          { code: 'initiated_by', value: returnContext?.bap_id || '' },
+        ],
+      }],
+    };
+
+    // Save to cache so handleUpdate(payment) can reference it for the refund response sequence
+    if (!storedReturnFl && cachedEntry) {
+      cachedEntry.returnFulfillment = baseReturnFl;
+      cachedEntry.returnContext = cachedEntry.returnContext || context;
     }
 
     // Delivery fulfillments from confirmed order
@@ -1245,29 +1301,7 @@ const triggerMerchantReturnUpdate = async (req, res) => {
     for (const returnState of steps) {
       const now = new Date().toISOString();
 
-      // Build return fulfillment using stored data from BAP's /update, with updated state
-      const returnFl = storedReturnFl
-        ? { ...storedReturnFl, state: { descriptor: { code: returnState } } }
-        : {
-            id: 'r1',
-            type: 'Return',
-            state: { descriptor: { code: returnState } },
-            '@ondc/org/provider_name': providerName,
-            tags: [{
-              code: 'return_request',
-              list: [
-                { code: 'id', value: 'r1' },
-                { code: 'item_id', value: (order.items?.[0]?.id || '') },
-                { code: 'item_quantity', value: String(order.items?.[0]?.quantity?.count || 1) },
-                { code: 'reason_id', value: '001' },
-                { code: 'reason_desc', value: 'detailed description for return' },
-                { code: 'images', value: 'https://ondc.cottkart.com/placeholder.png' },
-                { code: 'ttl_approval', value: 'PT24H' },
-                { code: 'ttl_reverseqc', value: 'P3D' },
-                { code: 'initiated_by', value: returnContext?.bap_id || '' },
-              ],
-            }],
-          };
+      const returnFl = { ...baseReturnFl, state: { descriptor: { code: returnState } } };
 
       const returnPayload = {
         id:    order_id,
@@ -1286,7 +1320,7 @@ const triggerMerchantReturnUpdate = async (req, res) => {
         ],
         tags: ORDER_TAGS,
         created_at: order.created_at || now,
-        updated_at: now,
+        updated_at: confirmTimestamp || order.updated_at || now,
       };
 
       // Push N.O. log before HTTP callback
