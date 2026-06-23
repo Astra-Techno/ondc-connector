@@ -1777,7 +1777,8 @@ const handleIssue = async (req, res) => {
       lastIssueId = issueId;
       logger.info('Cached issue (stage 0→1)', { issue_id: issueId });
 
-      await sendCallback(context.bap_uri, 'on_issue', context, {
+      // Each on_issue callback must have a unique message_id (Pramaan uniqueness check)
+      await sendCallback(context.bap_uri, 'on_issue', { ...context, message_id: uuidv4() }, {
         issue: {
           id: issueId,
           issue_actions: {
@@ -1797,7 +1798,7 @@ const handleIssue = async (req, res) => {
         try {
           // Step 2: NEED-MORE-INFO
           await new Promise(r => setTimeout(r, 2000));
-          await sendCallback(context.bap_uri, 'on_issue', context, {
+          await sendCallback(context.bap_uri, 'on_issue', { ...context, message_id: uuidv4() }, {
             issue: {
               id: issueId,
               issue_actions: {
@@ -1821,7 +1822,7 @@ const handleIssue = async (req, res) => {
           // Step 3: Resolution Options (after 3s more)
           await new Promise(r => setTimeout(r, 3000));
           const resAction = issueCache.get(issueId)?.resolveAction || 'REFUND';
-          await sendCallback(context.bap_uri, 'on_issue', context, {
+          await sendCallback(context.bap_uri, 'on_issue', { ...context, message_id: uuidv4() }, {
             issue: {
               id: issueId,
               issue_actions: {
@@ -1868,7 +1869,7 @@ const handleIssue = async (req, res) => {
       logger.info('Issue info received (stage 1→2), sending resolution options', { issue_id: issueId });
 
       const resolutionAction = issueCache.get(issueId)?.resolveAction || 'REFUND';
-      await sendCallback(context.bap_uri, 'on_issue', context, {
+      await sendCallback(context.bap_uri, 'on_issue', { ...context, message_id: uuidv4() }, {
         issue: {
           id: issueId,
           issue_actions: {
@@ -1937,7 +1938,7 @@ const handleIssueStatus = async (req, res) => {
       }
     } catch (e) {}
 
-    await sendCallback(context.bap_uri, 'on_issue_status', context, {
+    await sendCallback(context.bap_uri, 'on_issue_status', { ...context, message_id: uuidv4() }, {
       issue: {
         id: issue_id,
         issue_actions: {
@@ -1976,7 +1977,7 @@ const triggerIssueResolve = async (req, res) => {
 
     const now = new Date().toISOString();
 
-    await sendCallback(context.bap_uri, 'on_issue_status', context, {
+    await sendCallback(context.bap_uri, 'on_issue_status', { ...context, message_id: uuidv4() }, {
       issue: {
         id: issue_id,
         issue_actions: {
