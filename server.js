@@ -28,6 +28,8 @@ const {
   triggerMerchantStatus,
   triggerMerchantStatusSequence,
   triggerIssueResolve,
+  triggerSetOutOfStock,
+  triggerClearOutOfStock,
 } = require('./src/controllers/ondc.controller');
 
 const app  = express();
@@ -221,6 +223,8 @@ app.post('/trigger/merchant-cancel/:order_id',           triggerMerchantCancel);
 app.post('/trigger/merchant-status/:order_id',           triggerMerchantStatus);
 app.post('/trigger/merchant-status-sequence/:order_id',  triggerMerchantStatusSequence);
 app.post('/trigger/issue-resolve/:issue_id',             triggerIssueResolve);
+app.post('/trigger/set-out-of-stock',                    triggerSetOutOfStock);
+app.post('/trigger/clear-out-of-stock',                  triggerClearOutOfStock);
 
 // GCR catalog validation feedback
 app.post('/catalog_rejection', (req, res) => {

@@ -21,6 +21,8 @@ const confirmedOrderCache = new Map();
 let lastConfirmedOrderId = null; // track most recent for /latest shortcut
 // Track cancelled orders so auto-sequence can abort
 const cancelledOrders = new Set();
+// Forced out-of-stock items for Flow 5 testing (cleared on server restart or via trigger)
+const forcedOutOfStockItems = new Set();
 
 // In-memory cache: issue_id → { issue, context } (for proactive on_issue_status)
 const issueCache = new Map();
@@ -599,9 +601,17 @@ const handleSelect = async (req, res) => {
       const fulfillments = order.fulfillments   || [];
 
       const tenantId = tenant.id || tenant.tenant_id;
-      const { quote, outOfStockItems } = tenantId
+      const { quote, outOfStockItems: dbOutOfStock } = tenantId
         ? await buildQuote(items, tenantId)
         : { quote: { price: { currency: 'INR', value: '30' }, breakup: [], ttl: 'P1D' }, outOfStockItems: [] };
+
+      // Merge forced out-of-stock items (Flow 5 testing via /trigger/set-out-of-stock)
+      const outOfStockItems = [...dbOutOfStock];
+      for (const item of items) {
+        if (forcedOutOfStockItems.has(item.id) && !outOfStockItems.includes(item.id)) {
+          outOfStockItems.push(item.id);
+        }
+      }
 
       let providerName = '';
       try {
@@ -2030,6 +2040,22 @@ const triggerIssueResolve = async (req, res) => {
   }
 };
 
+// Flow 5: Force items out of stock for testing (without touching DB)
+const triggerSetOutOfStock = (req, res) => {
+  const { item_ids, item_id } = req.body || {};
+  const ids = item_ids || (item_id ? [item_id] : []);
+  if (!ids.length) return res.status(400).json({ error: 'Provide item_id or item_ids array' });
+  for (const id of ids) forcedOutOfStockItems.add(String(id));
+  logger.info('forcedOutOfStockItems set', { items: [...forcedOutOfStockItems] });
+  res.json({ success: true, forcedOutOfStockItems: [...forcedOutOfStockItems] });
+};
+
+const triggerClearOutOfStock = (req, res) => {
+  forcedOutOfStockItems.clear();
+  logger.info('forcedOutOfStockItems cleared');
+  res.json({ success: true, message: 'Forced out-of-stock cleared' });
+};
+
 // Generic ACK for ONDC callbacks we receive (on_*)
 const handleACK = (action) => async (req, res) => {
   logger.info(`ONDC /${action} received`);
@@ -2059,4 +2085,6 @@ module.exports = {
   triggerMerchantCancel,
   triggerMerchantStatus,
   triggerMerchantStatusSequence,
+  triggerSetOutOfStock,
+  triggerClearOutOfStock,
 };
