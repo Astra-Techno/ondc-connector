@@ -234,22 +234,9 @@ const buildPartialCancelUpdatePayload = (order, vendor, confirmTimestamp) => {
 
 const sendPartialCancelOnUpdate = async (context, order, vendor, tenant, confirmTimestamp) => {
   const cancelPayload = buildPartialCancelUpdatePayload(order, vendor, confirmTimestamp);
-  const onUpdatePayload = {
-    context: {
-      ...context,
-      action:     'on_update',
-      bpp_id:     process.env.ONDC_SUBSCRIBER_ID || context.bpp_id,
-      bpp_uri:    process.env.ONDC_SUBSCRIBER_URL || context.bpp_uri,
-      timestamp:  new Date().toISOString(),
-      message_id: uuidv4(),
-      ttl:        'PT30S',
-    },
-    message: { order: cancelPayload },
-  };
-  pushTxnLog('on_update', onUpdatePayload).catch(e =>
-    logger.warn('N.O. on_update (Cancelled) push failed:', e.message)
-  );
-  await sendCallback(context.bap_uri, 'on_update', context, { order: cancelPayload }, tenant);
+  // Use a fresh message_id — this is a proactive BPP-initiated callback, NOT a direct response
+  // to a specific BAP request, so it must not reuse the confirm's message_id
+  await sendCallback(context.bap_uri, 'on_update', { ...context, message_id: uuidv4() }, { order: cancelPayload }, tenant);
   logger.info('on_update (Cancelled/partial) sent', { order_id: order.id, txn: context?.transaction_id });
 };
 
