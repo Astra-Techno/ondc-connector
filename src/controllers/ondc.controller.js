@@ -1796,9 +1796,11 @@ const handleIssue = async (req, res) => {
       }, tenant);
 
       // Auto-send NEED-MORE-INFO after 2s — BAP will then show "Share Information" button.
+      // additional_info_required triggers the "Share Information" UI button in Pramaan.
       // Resolution options are sent only after BAP clicks "Share Information" (stage 1 path below).
       setTimeout(async () => {
         try {
+          const nmiNow = new Date().toISOString();
           await sendCallback(context.bap_uri, 'on_issue', { ...context, message_id: uuidv4() }, {
             issue: {
               id: issueId,
@@ -1811,11 +1813,22 @@ const handleIssue = async (req, res) => {
                 }, {
                   respondent_action: 'NEED-MORE-INFO',
                   short_desc:        'Please share additional details about the issue',
-                  updated_at:        new Date().toISOString(),
+                  updated_at:        nmiNow,
                   updated_by:        updatedBy,
                 }],
               },
-              created_at: now, updated_at: new Date().toISOString(), status: 'OPEN',
+              additional_info_required: [{
+                info_required: {
+                  issue_update_info: {
+                    code:       'REASON',
+                    name:       'Additional information required',
+                    short_desc: 'Please share additional details (e.g. photos, order reference) to help process your refund',
+                  },
+                  updated_at: nmiNow,
+                  message_id: uuidv4(),
+                },
+              }],
+              created_at: now, updated_at: nmiNow, status: 'OPEN',
             },
           }, tenant);
           logger.info('on_issue (NEED-MORE-INFO) sent — waiting for BAP Share Information click', { issue_id: issueId });
@@ -1852,13 +1865,24 @@ const handleIssue = async (req, res) => {
             }],
           },
           resolution: {
-            short_desc:        `${resolutionAction} - Issue resolved`,
-            long_desc:         `Issue has been resolved with ${resolutionAction.toLowerCase()}`,
-            action_triggered:  resolutionAction,
-            refund_amount:     '0.00',
+            network_issue_id:   issueId,
+            resolution_remarks: `Issue resolved — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`,
+            resolution_action:  'RESOLVE',
+            action_triggered:   resolutionAction,
+            refund_amount:      '0.00',
           },
           resolution_provider: {
-            respondent_info: updatedBy,
+            respondent_info: {
+              type:         'TRANSACTION-COUNTERPARTY-NP',
+              organization: updatedBy,
+              resolution_support: {
+                respondentEmail:   process.env.SUPPORT_EMAIL || '',
+                respondentContact: {
+                  phone: process.env.SUPPORT_PHONE || '',
+                  email: process.env.SUPPORT_EMAIL || '',
+                },
+              },
+            },
           },
           created_at: now, updated_at: now, status: 'RESOLVED',
         },
@@ -1899,19 +1923,48 @@ const handleIssueStatus = async (req, res) => {
       }
     } catch (e) {}
 
-    await sendCallback(context.bap_uri, 'on_issue_status', { ...context, message_id: uuidv4() }, {
-      issue: {
-        id: issue_id,
-        issue_actions: {
-          respondent_actions: [{
-            respondent_action: issueStatus === 'RESOLVED' ? 'RESOLVED' : 'PROCESSING',
-            short_desc:        resolution || 'Being processed',
-            updated_at:        new Date().toISOString(),
-          }],
-        },
-        status:     issueStatus,
-        updated_at: new Date().toISOString(),
+    const statusNow   = new Date().toISOString();
+    const isResolved  = issueStatus === 'RESOLVED';
+    const supportOrg  = {
+      org:     { name: tenant.subscriber_id },
+      contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+      person:  { name: 'Support Desk' },
+    };
+    const issuePayload = {
+      id: issue_id,
+      issue_actions: {
+        respondent_actions: [{
+          respondent_action: isResolved ? 'RESOLVED' : 'PROCESSING',
+          short_desc:        resolution || (isResolved ? 'Issue resolved' : 'Being processed'),
+          updated_at:        statusNow,
+          updated_by:        supportOrg,
+        }],
       },
+      status:     issueStatus,
+      updated_at: statusNow,
+    };
+    if (isResolved) {
+      issuePayload.resolution = {
+        network_issue_id:   issue_id,
+        resolution_remarks: resolution || 'Issue has been resolved',
+        resolution_action:  'RESOLVE',
+        action_triggered:   'REFUND',
+        refund_amount:      '0.00',
+      };
+      issuePayload.resolution_provider = {
+        respondent_info: {
+          type:         'TRANSACTION-COUNTERPARTY-NP',
+          organization: supportOrg,
+          resolution_support: {
+            respondentEmail:   process.env.SUPPORT_EMAIL || '',
+            respondentContact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+          },
+        },
+      };
+    }
+
+    await sendCallback(context.bap_uri, 'on_issue_status', { ...context, message_id: uuidv4() }, {
+      issue: issuePayload,
     }, tenant);
   } catch (err) {
     logger.error('handleIssueStatus failed:', err.message);
@@ -1970,10 +2023,24 @@ const triggerIssueResolve = async (req, res) => {
           ],
         },
         resolution: {
-          short_desc:    shortDesc,
-          long_desc:     shortDesc,
-          action_triggered: action,
-          refund_amount: '0.00',
+          network_issue_id:   issue_id,
+          resolution_remarks: shortDesc,
+          resolution_action:  'RESOLVE',
+          action_triggered:   action,
+          refund_amount:      '0.00',
+        },
+        resolution_provider: {
+          respondent_info: {
+            type:         'TRANSACTION-COUNTERPARTY-NP',
+            organization: {
+              org:     { name: tenant.subscriber_id },
+              contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+            },
+            resolution_support: {
+              respondentEmail:   process.env.SUPPORT_EMAIL || '',
+              respondentContact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+            },
+          },
         },
         created_at: now,
         updated_at: now,
