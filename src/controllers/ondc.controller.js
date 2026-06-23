@@ -794,12 +794,14 @@ const handleConfirm = async (req, res) => {
         const delay = ms => new Promise(r => setTimeout(r, ms));
         const isCancelled = () => cancelledOrders.has(order.id);
 
+        // Steps 1-4 fire rapidly (2s apart). Step 5 (Order-delivered) is delayed by 45s
+        // to give Flow 3B/3C time to trigger cancel before Order-delivered fires.
         const steps = [
-          { fulfillmentState: 'Packed',            orderState: 'In-progress' },
-          { fulfillmentState: 'Agent-assigned',     orderState: 'In-progress' },
-          { fulfillmentState: 'Order-picked-up',    orderState: 'In-progress' },
-          { fulfillmentState: 'Out-for-delivery',   orderState: 'In-progress' },
-          { fulfillmentState: 'Order-delivered',    orderState: 'Completed'   },
+          { fulfillmentState: 'Packed',            orderState: 'In-progress', delayAfter: 2000  },
+          { fulfillmentState: 'Agent-assigned',     orderState: 'In-progress', delayAfter: 2000  },
+          { fulfillmentState: 'Order-picked-up',    orderState: 'In-progress', delayAfter: 2000  },
+          { fulfillmentState: 'Out-for-delivery',   orderState: 'In-progress', delayAfter: 45000 },
+          { fulfillmentState: 'Order-delivered',    orderState: 'Completed',   delayAfter: 2000  },
         ];
 
         // Wait 15s after on_confirm for Pramaan to process /status first
@@ -813,7 +815,7 @@ const handleConfirm = async (req, res) => {
           await sendCallback(context.bap_uri, 'on_status', stepContext, { order: payload }, tenant);
           logger.info('Auto on_status sent', { order_id: order.id, ...step });
 
-          await delay(2000);
+          await delay(step.delayAfter);
         }
         logger.info('Auto on_status sequence complete', { order_id: order.id });
 
