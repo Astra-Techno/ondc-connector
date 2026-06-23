@@ -1793,11 +1793,10 @@ const handleIssue = async (req, res) => {
         },
       }, tenant);
 
-      // Auto-chain: NEED-MORE-INFO (2s) → Resolution Options (5s)
-      const autoChain = async () => {
+      // Auto-send NEED-MORE-INFO after 2s — BAP will then show "Share Information" button.
+      // Resolution options are sent only after BAP clicks "Share Information" (stage 1 path below).
+      setTimeout(async () => {
         try {
-          // Step 2: NEED-MORE-INFO
-          await new Promise(r => setTimeout(r, 2000));
           await sendCallback(context.bap_uri, 'on_issue', { ...context, message_id: uuidv4() }, {
             issue: {
               id: issueId,
@@ -1817,51 +1816,11 @@ const handleIssue = async (req, res) => {
               created_at: now, updated_at: new Date().toISOString(), status: 'OPEN',
             },
           }, tenant);
-          logger.info('on_issue (NEED-MORE-INFO) sent', { issue_id: issueId });
-
-          // Step 3: Resolution Options (after 3s more)
-          await new Promise(r => setTimeout(r, 3000));
-          const resAction = issueCache.get(issueId)?.resolveAction || 'REFUND';
-          await sendCallback(context.bap_uri, 'on_issue', { ...context, message_id: uuidv4() }, {
-            issue: {
-              id: issueId,
-              issue_actions: {
-                respondent_actions: [{
-                  respondent_action: 'PROCESSING',
-                  short_desc:        'Issue received and being processed',
-                  updated_at:        now,
-                  updated_by:        updatedBy,
-                }, {
-                  respondent_action: 'NEED-MORE-INFO',
-                  short_desc:        'Please share additional details',
-                  updated_at:        now,
-                  updated_by:        updatedBy,
-                }, {
-                  respondent_action: 'RESOLVED',
-                  short_desc:        `${resAction} - Issue resolved with ${resAction.toLowerCase()}`,
-                  updated_at:        new Date().toISOString(),
-                  updated_by:        updatedBy,
-                }],
-              },
-              resolution: {
-                short_desc:        `${resAction} - Issue resolved`,
-                long_desc:         `Issue has been resolved with ${resAction.toLowerCase()}`,
-                action_triggered:  resAction,
-                refund_amount:     '0.00',
-              },
-              resolution_provider: {
-                respondent_info: updatedBy,
-              },
-              created_at: now, updated_at: new Date().toISOString(), status: 'RESOLVED',
-            },
-          }, tenant);
-          issueCache.set(issueId, { ...issueCache.get(issueId), stage: 2 });
-          logger.info('on_issue (resolution options) auto-sent', { issue_id: issueId, resAction });
+          logger.info('on_issue (NEED-MORE-INFO) sent — waiting for BAP Share Information click', { issue_id: issueId });
         } catch (err) {
-          logger.error('on_issue auto-chain failed:', err.message);
+          logger.error('on_issue NEED-MORE-INFO auto-send failed:', err.message);
         }
-      };
-      autoChain();
+      }, 2000);
 
     } else if (stage === 1) {
       // Second /issue — buyer shared info → send on_issue with resolution options
