@@ -1774,10 +1774,12 @@ const handleIssue = async (req, res) => {
     };
 
     if (stage === 0) {
-      // First /issue — send PROCESSING, then auto-send NEED-MORE-INFO after 2s
+      // First /issue — send PROCESSING immediately.
+      // Stage advances to 1 now (NEED-MORE-INFO in flight), then to 2 ONLY after NEED-MORE-INFO is sent.
+      // stage=1 acts as a guard: any /issue arriving before NEED-MORE-INFO is sent is ignored.
       issueCache.set(issueId, { issue, context, tenant, stage: 1 });
       lastIssueId = issueId;
-      logger.info('Cached issue (stage 0→1)', { issue_id: issueId });
+      logger.info('Cached issue (stage 0→1, NEED-MORE-INFO pending)', { issue_id: issueId });
 
       // Each on_issue callback must have a unique message_id (Pramaan uniqueness check)
       await sendCallback(context.bap_uri, 'on_issue', { ...context, message_id: uuidv4() }, {
@@ -1831,16 +1833,23 @@ const handleIssue = async (req, res) => {
               created_at: now, updated_at: nmiNow, status: 'OPEN',
             },
           }, tenant);
-          logger.info('on_issue (NEED-MORE-INFO) sent — waiting for BAP Share Information click', { issue_id: issueId });
+          // Advance to stage 2 only AFTER NEED-MORE-INFO is sent — BAP can now send Share Information /issue
+          const latest = issueCache.get(issueId);
+          issueCache.set(issueId, { ...(latest || { issue, context, tenant }), stage: 2 });
+          logger.info('on_issue (NEED-MORE-INFO) sent — advanced to stage 2, waiting for Share Information', { issue_id: issueId });
         } catch (err) {
           logger.error('on_issue NEED-MORE-INFO auto-send failed:', err.message);
         }
       }, 2000);
 
     } else if (stage === 1) {
-      // Second /issue — buyer shared info → send on_issue with resolution options
-      issueCache.set(issueId, { ...cached, stage: 2 });
-      logger.info('Issue info received (stage 1→2), sending resolution options', { issue_id: issueId });
+      // /issue arrived before NEED-MORE-INFO was sent (within 2s window) — guard state, do nothing
+      logger.info('Issue received while NEED-MORE-INFO pending (stage 1) — ignoring, waiting for stage 2', { issue_id: issueId });
+
+    } else if (stage === 2) {
+      // Third /issue — buyer shared info after Share Information click → send on_issue with resolution options
+      issueCache.set(issueId, { ...cached, stage: 3 });
+      logger.info('Issue info received (stage 2→3), sending resolution options', { issue_id: issueId });
 
       const resolutionAction = issueCache.get(issueId)?.resolveAction || 'REFUND';
       await sendCallback(context.bap_uri, 'on_issue', { ...context, message_id: uuidv4() }, {
@@ -1890,7 +1899,7 @@ const handleIssue = async (req, res) => {
       logger.info('on_issue (resolution options) sent', { issue_id: issueId });
 
     } else {
-      // Stage 2+ — buyer selected resolution, just ACK (already sent above)
+      // Stage 3+ — buyer selected resolution, just ACK (already sent above)
       logger.info('Issue resolution selected — ACK only', { issue_id: issueId, stage });
     }
   } catch (err) {
