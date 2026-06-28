@@ -1781,7 +1781,7 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
     // IGM 1.x respondent_actions (backwards compat — use new format keys)
     issue_actions: {
       respondent_actions: allBppActions.map(a => ({
-        respondent_action: a.descriptor?.code || a.respondent_action,
+        respondent_action: (() => { const c = a.descriptor?.code || a.respondent_action; return c === 'NEED-MORE-INFO' ? 'PROCESSING' : c; })(),
         short_desc:        a.descriptor?.short_desc || a.short_desc,
         updated_at:        a.updated_at,
         updated_by: a.action_by ? {
@@ -2023,7 +2023,7 @@ const handleIssue = async (req, res) => {
                   organization: updatedBy,
                   resolution_support: {
                     respondentEmail:   process.env.SUPPORT_EMAIL || '',
-                    respondentContact: {
+                    contact: {
                       phone: process.env.SUPPORT_PHONE || '',
                       email: process.env.SUPPORT_EMAIL || '',
                     },
@@ -2205,7 +2205,7 @@ const handleIssueStatus = async (req, res) => {
           organization: updatedBy,
           resolution_support: {
             respondentEmail:   process.env.SUPPORT_EMAIL || '',
-            respondentContact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+            contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
           },
         },
       },
@@ -2268,7 +2268,7 @@ const triggerIssueResolve = async (req, res) => {
             organization: updatedBy,
             resolution_support: {
               respondentEmail:   process.env.SUPPORT_EMAIL || '',
-              respondentContact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+              contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
             },
           },
         },
