@@ -1731,14 +1731,16 @@ const buildIgmContext = (ctx) => {
   return out;
 };
 
-/** Create a BPP respondent action entry (IGM 2.0 format with stable id) */
-const makeBppIgmAction = (respondent_action, short_desc, updatedBy, ts) => ({
-  id: uuidv4(),
-  respondent_action,
-  short_desc,
-  updated_at: ts,
-  updated_by: updatedBy,
-  cascaded_level: 1,
+/** Create a BPP respondent action entry (IGM 2.0 format) */
+const makeBppIgmAction = (code, short_desc, updatedBy, ts) => ({
+  id:          uuidv4(),
+  descriptor:  { code, short_desc },
+  updated_at:  ts,
+  action_by:   updatedBy.org?.name || '',
+  actor_details: {
+    name:    updatedBy.person?.name || 'Support Desk',
+    contact: updatedBy.contact || {},
+  },
 });
 
 /**
@@ -1771,13 +1773,13 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
     order_details:            origIssue.order_details,
     expected_response_time:   { duration: 'PT2H' },
     expected_resolution_time: { duration: 'P1D'  },
-    // IGM 1.x respondent_actions (backwards compat)
+    // IGM 1.x respondent_actions (backwards compat — use new format keys)
     issue_actions: {
       respondent_actions: allBppActions.map(a => ({
-        respondent_action: a.respondent_action,
-        short_desc:        a.short_desc,
+        respondent_action: a.descriptor?.code || a.respondent_action,
+        short_desc:        a.descriptor?.short_desc || a.short_desc,
         updated_at:        a.updated_at,
-        updated_by:        a.updated_by,
+        updated_by:        a.action_by ? { org: { name: a.action_by }, person: { name: a.actor_details?.name || '' } } : a.updated_by,
       })),
     },
     // IGM 2.0: full ordered actions array (BAP actions first, then BPP actions)
@@ -1792,7 +1794,7 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
   Object.keys(issueBody).forEach(k => issueBody[k] === undefined && delete issueBody[k]);
 
   return {
-    update_target: ['issue'],
+    update_target: [{ path: 'issue', action: 'APPENDED' }],
     level: 'ISSUE',
     issue: issueBody,
   };
@@ -1913,52 +1915,108 @@ const handleIssue = async (req, res) => {
       logger.info('Issue received while NEED-MORE-INFO pending (stage 1) — ignoring', { issue_id: issueId });
 
     } else if (stage === 2) {
-      // BAP clicked "Share Information" → send resolution options (RESOLVED with resolution object)
-      issueCache.set(issueId, { ...cached, stage: 3 });
-      logger.info('Share Information received (stage 2→3), sending resolution options', { issue_id: issueId });
+      // BAP clicked "Share Information" — send PROCESSING first, then auto-send Resolution Options
+      const origIssue = cached?.issue   || issue;
+      const origCtx   = cached?.context || context;
 
-      const resolutionAction = cached?.resolveAction || 'REFUND';
-      const resolvedAction   = makeBppIgmAction(
-        'RESOLVED',
-        `Issue resolved with ${resolutionAction.toLowerCase()}`,
-        updatedBy, now
-      );
-      const allBppActions = [...(cached?.bppActions || []), resolvedAction];
-      const origIssue     = cached?.issue    || issue;
-      const origCtx       = cached?.context  || context;
+      const processing2Action = makeBppIgmAction('PROCESSING', 'Information received, processing resolution', updatedBy, now);
+      const bppActionsP2      = [...(cached?.bppActions || []), processing2Action];
+      // stage 3 = guard while auto Resolution Options is pending
+      issueCache.set(issueId, { ...cached, stage: 3, bppActions: bppActionsP2 });
+      logger.info('Share Information received (stage 2→3), sending PROCESSING then auto Resolution Options', { issue_id: issueId });
 
       await sendCallback(
         origCtx.bap_uri, 'on_issue',
         { ...buildIgmContext(origCtx), message_id: uuidv4() },
-        buildIgmMessage(origIssue, origCtx, tenant.subscriber_id, allBppActions, 'OPEN', {
+        buildIgmMessage(origIssue, origCtx, tenant.subscriber_id, bppActionsP2, 'PROCESSING'),
+        tenant
+      );
+
+      // Auto-send Resolution Options after 2s
+      setTimeout(async () => {
+        try {
+          const resolutionAction = cached?.resolveAction || 'REFUND';
+          const roNow  = new Date().toISOString();
+          const roAction = makeBppIgmAction(
+            'RESOLVED',
+            `Resolution offered — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`,
+            updatedBy, roNow
+          );
+          const latestRo   = issueCache.get(issueId);
+          const bppActionsRO = [...(latestRo?.bppActions || bppActionsP2), roAction];
+          // stage 4 = waiting for BAP to confirm resolution selection
+          issueCache.set(issueId, { ...(latestRo || { issue: origIssue, context: origCtx, tenant }), stage: 4, bppActions: bppActionsRO });
+
+          await sendCallback(
+            origCtx.bap_uri, 'on_issue',
+            { ...buildIgmContext(origCtx), message_id: uuidv4() },
+            buildIgmMessage(origIssue, origCtx, tenant.subscriber_id, bppActionsRO, 'OPEN', {
+              resolution: {
+                network_issue_id:   issueId,
+                resolution_remarks: `Issue resolved — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`,
+                resolution_action:  'RESOLVE',
+                action_triggered:   resolutionAction,
+                refund_amount:      '0.00',
+              },
+              resolution_provider: {
+                respondent_info: {
+                  type:         'TRANSACTION-COUNTERPARTY-NP',
+                  organization: updatedBy,
+                  resolution_support: {
+                    respondentEmail:   process.env.SUPPORT_EMAIL || '',
+                    respondentContact: {
+                      phone: process.env.SUPPORT_PHONE || '',
+                      email: process.env.SUPPORT_EMAIL || '',
+                    },
+                  },
+                },
+              },
+            }),
+            tenant
+          );
+          logger.info('on_issue (Resolution Options) sent — advanced to stage 4', { issue_id: issueId });
+        } catch (err) {
+          logger.error('on_issue Resolution Options auto-send failed:', err.message);
+        }
+      }, 2000);
+
+    } else if (stage === 3) {
+      // Guard — PROCESSING sent, auto Resolution Options pending
+      logger.info('Issue received while Resolution Options pending (stage 3) — ignoring', { issue_id: issueId });
+
+    } else if (stage === 4) {
+      // BAP confirmed/selected resolution → send "Resolution Provided"
+      const origIssue = cached?.issue   || issue;
+      const origCtx   = cached?.context || context;
+      const resolutionAction = cached?.resolveAction || 'REFUND';
+
+      const resolvedProvidedAction = makeBppIgmAction(
+        'RESOLVED',
+        `Resolution provided — ${resolutionAction.toLowerCase()} confirmed`,
+        updatedBy, now
+      );
+      const allBppActions = [...(cached?.bppActions || []), resolvedProvidedAction];
+      issueCache.set(issueId, { ...cached, stage: 5, bppActions: allBppActions });
+      logger.info('Resolution Provided (stage 4→5)', { issue_id: issueId });
+
+      await sendCallback(
+        origCtx.bap_uri, 'on_issue',
+        { ...buildIgmContext(origCtx), message_id: uuidv4() },
+        buildIgmMessage(origIssue, origCtx, tenant.subscriber_id, allBppActions, 'RESOLVED', {
           resolution: {
             network_issue_id:   issueId,
-            resolution_remarks: `Issue resolved — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`,
+            resolution_remarks: `Resolution confirmed — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`,
             resolution_action:  'RESOLVE',
             action_triggered:   resolutionAction,
             refund_amount:      '0.00',
           },
-          resolution_provider: {
-            respondent_info: {
-              type:         'TRANSACTION-COUNTERPARTY-NP',
-              organization: updatedBy,
-              resolution_support: {
-                respondentEmail:   process.env.SUPPORT_EMAIL || '',
-                respondentContact: {
-                  phone: process.env.SUPPORT_PHONE || '',
-                  email: process.env.SUPPORT_EMAIL || '',
-                },
-              },
-            },
-          },
         }),
         tenant
       );
-      logger.info('on_issue (resolution options) sent', { issue_id: issueId });
 
     } else {
-      // Stage 3+ — buyer selected resolution, ACK only
-      logger.info('Issue resolution selected — ACK only', { issue_id: issueId, stage });
+      // Stage 5+ — resolution confirmed, ACK only
+      logger.info('Issue stage 5+ — ACK only', { issue_id: issueId, stage });
     }
   } catch (err) {
     logger.error('handleIssue failed:', err.message);
