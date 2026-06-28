@@ -1879,7 +1879,19 @@ const handleIssue = async (req, res) => {
       //   t=8s:  on_issue #5 — RESOLVED   (resolution provided / confirmed)
       //   then:  update DB → on_issue_status will return CLOSED
 
-      const resolutionAction = 'REFUND';
+      // Detect resolution type from incoming issue (IGM 2.0: expected_resolution.action,
+      // or tags, or sub_category mapping). Falls back to REFUND.
+      const SUB_CAT_RESOLUTION = {
+        FLM06: 'REPLACEMENT', FLM05: 'CANCEL', FLM07: 'NO-ACTION',
+        ITM04: 'REPLACEMENT', ITM05: 'CANCEL', ITM06: 'NO-ACTION',
+        PMT03: 'REFUND',
+      };
+      const resolutionAction =
+        issue.expected_resolution?.action                                             ||
+        issue.tags?.find?.(t => t.code === 'resolution_action')?.value?.toUpperCase() ||
+        SUB_CAT_RESOLUTION[issue.sub_category]                                        ||
+        'REFUND';
+      logger.info('IGM resolution action detected', { issue_id: issueId, resolutionAction, sub_category: issue.sub_category });
 
       // Mark as in-progress (stage 1) so any duplicate /issue is ignored
       const processingAction = makeBppIgmAction('PROCESSING', 'Issue received and being processed', updatedBy, now);
