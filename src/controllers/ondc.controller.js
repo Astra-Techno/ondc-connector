@@ -1822,9 +1822,35 @@ const handleIssue = async (req, res) => {
     const issueId    = issue.id || uuidv4();
     const issueStatus = issue.status;
 
-    // If issue status is CLOSED, just ACK — no on_issue callback (per PDF §11.12)
+    // If issue status is CLOSED — BAP is closing/rating the issue (Flow 6F Escalation).
+    // BPP must send a final on_issue confirming the closure ("Resolution Provided").
     if (issueStatus === 'CLOSED') {
-      logger.info('Issue CLOSED received — ACK only', { issue_id: issueId });
+      const closeCached = issueCache.get(issueId);
+      if (!closeCached) {
+        logger.info('Issue CLOSED received with no cached issue — ACK only', { issue_id: issueId });
+        return;
+      }
+      const closeNow    = new Date().toISOString();
+      const closeAction = makeBppIgmAction('RESOLVED', 'Issue closure acknowledged — resolution confirmed', updatedBy, closeNow);
+      const bppActClose = [...(closeCached.bppActions || []), closeAction];
+      issueCache.set(issueId, { ...closeCached, stage: 5, bppActions: bppActClose });
+
+      const igmCtxClose = buildIgmContext(closeCached.context || context);
+      await sendCallback(
+        (closeCached.context || context).bap_uri, 'on_issue',
+        { ...igmCtxClose, message_id: uuidv4() },
+        buildIgmMessage(closeCached.issue || issue, closeCached.context || context, tenant.subscriber_id, bppActClose, 'CLOSED', {
+          resolution: {
+            network_issue_id:   issueId,
+            resolution_remarks: 'Issue has been closed and resolution confirmed',
+            resolution_action:  'RESOLVE',
+            action_triggered:   closeCached.resolveAction || 'REFUND',
+            refund_amount:      '0.00',
+          },
+        }),
+        tenant
+      );
+      logger.info('on_issue (CLOSED — Resolution Provided) sent for Flow 6F', { issue_id: issueId });
       return;
     }
 
