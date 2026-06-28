@@ -2039,6 +2039,66 @@ const handleIssue = async (req, res) => {
         } catch (err) { logger.error('on_issue #5 failed:', err.message); }
       }, 8000);
 
+    } else if (issueStatus === 'ESCALATED') {
+      // ── Escalation flow (Flow 6F) ────────────────────────────────────────────
+      // BAP escalated the issue — send PROCESSING then auto RESOLVED (t+3s)
+      logger.info('Escalated issue received — sending escalation response', { issue_id: issueId, stage });
+
+      const resolutionAction = cached?.resolveAction ||
+        issue.expected_resolution?.action ||
+        'REFUND';
+
+      const escNow    = new Date().toISOString();
+      const escAction = makeBppIgmAction('PROCESSING', 'Escalation received, reviewing the issue', updatedBy, escNow);
+      const bppActEsc = [...(cached?.bppActions || []), escAction];
+      issueCache.set(issueId, { ...(cached || { issue, context, tenant }), stage: 1, bppActions: bppActEsc });
+
+      await sendCallback(
+        context.bap_uri, 'on_issue',
+        { ...igmCtx, message_id: uuidv4() },
+        buildIgmMessage(issue, context, tenant.subscriber_id, bppActEsc, 'OPEN'),
+        tenant
+      );
+      logger.info('on_issue (escalation PROCESSING) sent', { issue_id: issueId });
+
+      // Auto-send RESOLVED after 3s
+      setTimeout(async () => {
+        try {
+          const escResNow    = new Date().toISOString();
+          const escResAction = makeBppIgmAction(
+            'RESOLVED',
+            `Escalation resolved — ${resolutionAction.toLowerCase()} confirmed`,
+            updatedBy, escResNow
+          );
+          const latestEsc  = issueCache.get(issueId);
+          const bppActEscR = [...(latestEsc?.bppActions || bppActEsc), escResAction];
+          issueCache.set(issueId, { ...(latestEsc || { issue, context, tenant }), stage: 5, bppActions: bppActEscR });
+
+          await sendCallback(
+            context.bap_uri, 'on_issue',
+            { ...igmCtx, message_id: uuidv4() },
+            buildIgmMessage(issue, context, tenant.subscriber_id, bppActEscR, 'RESOLVED', {
+              resolution: {
+                network_issue_id:   issueId,
+                resolution_remarks: `Escalation resolved — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`,
+                resolution_action:  'RESOLVE',
+                action_triggered:   resolutionAction,
+                refund_amount:      '0.00',
+                resolution_type:    resolutionAction,
+              },
+            }),
+            tenant
+          );
+
+          pool.query(
+            `UPDATE issue_grievances SET status = 'resolved', updated_at = NOW() WHERE issue_id = ? AND tenant_id = ?`,
+            [issueId, tenant.id]
+          ).catch(e => logger.warn('Issue status update failed:', e.message));
+
+          logger.info('on_issue (escalation RESOLVED) sent', { issue_id: issueId });
+        } catch (err) { logger.error('on_issue escalation RESOLVED failed:', err.message); }
+      }, 3000);
+
     } else {
       // Stage 1+ — auto-chain already running or complete — ACK only
       logger.info('Issue received (auto-chain in progress/complete) — ACK only', { issue_id: issueId, stage });
