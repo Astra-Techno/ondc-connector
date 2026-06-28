@@ -1716,6 +1716,90 @@ const handleRating = async (req, res) => {
   }
 };
 
+// ═══ IGM 2.0 HELPERS ════════════════════════════════════════════════════════════
+
+/** Enhance context for IGM 2.0: add location object + version field */
+const buildIgmContext = (ctx) => {
+  const out = { ...ctx };
+  if (!out.version) out.version = out.core_version || '2.0.0';
+  if (!out.location) {
+    out.location = {
+      country: { code: out.country || 'IND' },
+      city:    { code: out.city    || 'std:080' },
+    };
+  }
+  return out;
+};
+
+/** Create a BPP respondent action entry (IGM 2.0 format with stable id) */
+const makeBppIgmAction = (respondent_action, short_desc, updatedBy, ts) => ({
+  id: uuidv4(),
+  respondent_action,
+  short_desc,
+  updated_at: ts,
+  updated_by: updatedBy,
+  cascaded_level: 1,
+});
+
+/**
+ * Build a complete IGM 2.0 message body for on_issue / on_issue_status callbacks.
+ * Echoes all IGM 2.0 fields from the original /issue (actors, refs, descriptor, etc.)
+ * and appends BPP actions to the actions array.
+ */
+const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions, status, extraFields = {}) => {
+  const bapActions    = origIssue.actions || [];
+  const lastBppAction = allBppActions[allBppActions.length - 1];
+  const now           = new Date().toISOString();
+
+  const issueBody = {
+    id:     origIssue.id,
+    status,
+    level:  'ISSUE',
+    // IGM 2.0: complainant / source / respondent identifiers
+    complainant_id: origIssue.complainant_id || origIssue.actors?.[0]?.actor_id || origContext?.bap_id,
+    source_id:      origIssue.source_id      || origIssue.actors?.[0]?.actor_id || origContext?.bap_id,
+    respondent_ids: [bppSubscriberId],
+    // Echo back IGM 2.0 arrays from original /issue
+    refs:    origIssue.refs    || [],
+    actors:  origIssue.actors  || [],
+    descriptor: origIssue.descriptor || {
+      code:       origIssue.category || 'ITEM',
+      short_desc: origIssue.description?.short_desc || 'Issue reported',
+      long_desc:  origIssue.description?.long_desc  || '',
+      images:     origIssue.description?.images     || [],
+    },
+    order_details:            origIssue.order_details,
+    expected_response_time:   { duration: 'PT2H' },
+    expected_resolution_time: { duration: 'P1D'  },
+    // IGM 1.x respondent_actions (backwards compat)
+    issue_actions: {
+      respondent_actions: allBppActions.map(a => ({
+        respondent_action: a.respondent_action,
+        short_desc:        a.short_desc,
+        updated_at:        a.updated_at,
+        updated_by:        a.updated_by,
+      })),
+    },
+    // IGM 2.0: full ordered actions array (BAP actions first, then BPP actions)
+    actions:        [...bapActions, ...allBppActions],
+    last_action_id: lastBppAction?.id,
+    created_at: origIssue.created_at || now,
+    updated_at: now,
+    ...extraFields,
+  };
+
+  // Strip undefined top-level keys
+  Object.keys(issueBody).forEach(k => issueBody[k] === undefined && delete issueBody[k]);
+
+  return {
+    update_target: ['issue'],
+    level: 'ISSUE',
+    issue: issueBody,
+  };
+};
+
+// ═══ IGM HANDLERS ════════════════════════════════════════════════════════════
+
 const handleIssue = async (req, res) => {
   try {
     const body    = req.body;
@@ -1728,7 +1812,7 @@ const handleIssue = async (req, res) => {
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
 
-    const issueId = issue.id || uuidv4();
+    const issueId    = issue.id || uuidv4();
     const issueStatus = issue.status;
 
     // If issue status is CLOSED, just ACK — no on_issue callback (per PDF §11.12)
@@ -1763,62 +1847,47 @@ const handleIssue = async (req, res) => {
       logger.warn('Issue save failed:', e.message);
     }
 
-    // Check if this is a subsequent /issue call (info shared or resolution selected)
     const cached = issueCache.get(issueId);
     const stage  = cached?.stage || 0;
     const now    = new Date().toISOString();
+
     const updatedBy = {
       org:     { name: tenant.subscriber_id },
       contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
       person:  { name: 'Support Desk' },
     };
 
+    const igmCtx = buildIgmContext(context);
+
     if (stage === 0) {
-      // First /issue — send PROCESSING immediately.
-      // Stage advances to 1 now (NEED-MORE-INFO in flight), then to 2 ONLY after NEED-MORE-INFO is sent.
-      // stage=1 acts as a guard: any /issue arriving before NEED-MORE-INFO is sent is ignored.
-      issueCache.set(issueId, { issue, context, tenant, stage: 1 });
+      // First /issue — send PROCESSING immediately, then auto-send NEED-MORE-INFO after 2s.
+      // stage=1 is a guard: any /issue arriving before NEED-MORE-INFO is sent is ignored.
+      // stage=2 is set only AFTER NEED-MORE-INFO is sent (inside setTimeout).
+      const processingAction = makeBppIgmAction('PROCESSING', 'Issue received and being processed', updatedBy, now);
+      issueCache.set(issueId, { issue, context, tenant, stage: 1, bppActions: [processingAction] });
       lastIssueId = issueId;
       logger.info('Cached issue (stage 0→1, NEED-MORE-INFO pending)', { issue_id: issueId });
 
-      // Each on_issue callback must have a unique message_id (Pramaan uniqueness check)
-      await sendCallback(context.bap_uri, 'on_issue', { ...context, message_id: uuidv4() }, {
-        issue: {
-          id: issueId,
-          issue_actions: {
-            respondent_actions: [{
-              respondent_action: 'PROCESSING',
-              short_desc:        'Issue received and being processed',
-              updated_at:        now,
-              updated_by:        updatedBy,
-            }],
-          },
-          created_at: now, updated_at: now, status: 'OPEN',
-        },
-      }, tenant);
+      await sendCallback(
+        context.bap_uri, 'on_issue',
+        { ...igmCtx, message_id: uuidv4() },
+        buildIgmMessage(issue, context, tenant.subscriber_id, [processingAction], 'OPEN'),
+        tenant
+      );
 
-      // Auto-send NEED-MORE-INFO after 2s — BAP will then show "Share Information" button.
-      // additional_info_required triggers the "Share Information" UI button in Pramaan.
-      // Resolution options are sent only after BAP clicks "Share Information" (stage 1 path below).
+      // Auto-send NEED-MORE-INFO after 2s — triggers "Share Information" button in Pramaan
       setTimeout(async () => {
         try {
-          const nmiNow = new Date().toISOString();
-          await sendCallback(context.bap_uri, 'on_issue', { ...context, message_id: uuidv4() }, {
-            issue: {
-              id: issueId,
-              issue_actions: {
-                respondent_actions: [{
-                  respondent_action: 'PROCESSING',
-                  short_desc:        'Issue received and being processed',
-                  updated_at:        now,
-                  updated_by:        updatedBy,
-                }, {
-                  respondent_action: 'NEED-MORE-INFO',
-                  short_desc:        'Please share additional details about the issue',
-                  updated_at:        nmiNow,
-                  updated_by:        updatedBy,
-                }],
-              },
+          const nmiNow    = new Date().toISOString();
+          const nmiAction = makeBppIgmAction('NEED-MORE-INFO', 'Please share additional details about the issue', updatedBy, nmiNow);
+          const latest    = issueCache.get(issueId);
+          const bppActions = [...(latest?.bppActions || [processingAction]), nmiAction];
+          issueCache.set(issueId, { ...(latest || { issue, context, tenant }), stage: 2, bppActions });
+
+          await sendCallback(
+            context.bap_uri, 'on_issue',
+            { ...igmCtx, message_id: uuidv4() },
+            buildIgmMessage(issue, context, tenant.subscriber_id, bppActions, 'OPEN', {
               additional_info_required: [{
                 info_required: {
                   issue_update_info: {
@@ -1830,49 +1899,38 @@ const handleIssue = async (req, res) => {
                   message_id: uuidv4(),
                 },
               }],
-              created_at: now, updated_at: nmiNow, status: 'OPEN',
-            },
-          }, tenant);
-          // Advance to stage 2 only AFTER NEED-MORE-INFO is sent — BAP can now send Share Information /issue
-          const latest = issueCache.get(issueId);
-          issueCache.set(issueId, { ...(latest || { issue, context, tenant }), stage: 2 });
-          logger.info('on_issue (NEED-MORE-INFO) sent — advanced to stage 2, waiting for Share Information', { issue_id: issueId });
+            }),
+            tenant
+          );
+          logger.info('on_issue (NEED-MORE-INFO) sent — advanced to stage 2', { issue_id: issueId });
         } catch (err) {
           logger.error('on_issue NEED-MORE-INFO auto-send failed:', err.message);
         }
       }, 2000);
 
     } else if (stage === 1) {
-      // /issue arrived before NEED-MORE-INFO was sent (within 2s window) — guard state, do nothing
-      logger.info('Issue received while NEED-MORE-INFO pending (stage 1) — ignoring, waiting for stage 2', { issue_id: issueId });
+      // /issue arrived before NEED-MORE-INFO was sent (within 2s window) — guard, do nothing
+      logger.info('Issue received while NEED-MORE-INFO pending (stage 1) — ignoring', { issue_id: issueId });
 
     } else if (stage === 2) {
-      // Third /issue — buyer shared info after Share Information click → send on_issue with resolution options
+      // BAP clicked "Share Information" → send resolution options (RESOLVED with resolution object)
       issueCache.set(issueId, { ...cached, stage: 3 });
-      logger.info('Issue info received (stage 2→3), sending resolution options', { issue_id: issueId });
+      logger.info('Share Information received (stage 2→3), sending resolution options', { issue_id: issueId });
 
-      const resolutionAction = issueCache.get(issueId)?.resolveAction || 'REFUND';
-      await sendCallback(context.bap_uri, 'on_issue', { ...context, message_id: uuidv4() }, {
-        issue: {
-          id: issueId,
-          issue_actions: {
-            respondent_actions: [{
-              respondent_action: 'PROCESSING',
-              short_desc:        'Issue received and being processed',
-              updated_at:        now,
-              updated_by:        updatedBy,
-            }, {
-              respondent_action: 'NEED-MORE-INFO',
-              short_desc:        'Please share additional details',
-              updated_at:        now,
-              updated_by:        updatedBy,
-            }, {
-              respondent_action: 'RESOLVED',
-              short_desc:        `Issue resolved with ${resolutionAction.toLowerCase()}`,
-              updated_at:        now,
-              updated_by:        updatedBy,
-            }],
-          },
+      const resolutionAction = cached?.resolveAction || 'REFUND';
+      const resolvedAction   = makeBppIgmAction(
+        'RESOLVED',
+        `Issue resolved with ${resolutionAction.toLowerCase()}`,
+        updatedBy, now
+      );
+      const allBppActions = [...(cached?.bppActions || []), resolvedAction];
+      const origIssue     = cached?.issue    || issue;
+      const origCtx       = cached?.context  || context;
+
+      await sendCallback(
+        origCtx.bap_uri, 'on_issue',
+        { ...buildIgmContext(origCtx), message_id: uuidv4() },
+        buildIgmMessage(origIssue, origCtx, tenant.subscriber_id, allBppActions, 'OPEN', {
           resolution: {
             network_issue_id:   issueId,
             resolution_remarks: `Issue resolved — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`,
@@ -1893,13 +1951,13 @@ const handleIssue = async (req, res) => {
               },
             },
           },
-          created_at: now, updated_at: now, status: 'OPEN',
-        },
-      }, tenant);
+        }),
+        tenant
+      );
       logger.info('on_issue (resolution options) sent', { issue_id: issueId });
 
     } else {
-      // Stage 3+ — buyer selected resolution, just ACK (already sent above)
+      // Stage 3+ — buyer selected resolution, ACK only
       logger.info('Issue resolution selected — ACK only', { issue_id: issueId, stage });
     }
   } catch (err) {
@@ -1919,62 +1977,65 @@ const handleIssueStatus = async (req, res) => {
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
 
-    let issueStatus = 'OPEN';
-    let resolution  = null;
+    let dbStatus   = 'OPEN';
+    let resolution = null;
     try {
       const [rows] = await pool.query(
         `SELECT * FROM issue_grievances WHERE issue_id = ? AND tenant_id = ?`,
         [issue_id, tenant.id]
       );
       if (rows.length) {
-        issueStatus = (rows[0].status || 'open').toUpperCase();
-        resolution  = rows[0].resolution;
+        dbStatus   = (rows[0].status || 'open').toUpperCase();
+        resolution = rows[0].resolution;
       }
     } catch (e) {}
 
-    const statusNow   = new Date().toISOString();
-    const isResolved  = issueStatus === 'RESOLVED';
-    const supportOrg  = {
+    const isResolved = dbStatus === 'RESOLVED';
+    const now        = new Date().toISOString();
+    const updatedBy  = {
       org:     { name: tenant.subscriber_id },
       contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
       person:  { name: 'Support Desk' },
     };
-    const issuePayload = {
-      id: issue_id,
-      issue_actions: {
-        respondent_actions: [{
-          respondent_action: isResolved ? 'RESOLVED' : 'PROCESSING',
-          short_desc:        resolution || (isResolved ? 'Issue resolved' : 'Being processed'),
-          updated_at:        statusNow,
-          updated_by:        supportOrg,
-        }],
-      },
-      status:     isResolved ? 'CLOSED' : 'OPEN',
-      updated_at: statusNow,
-    };
-    if (isResolved) {
-      issuePayload.resolution = {
+
+    // Get original issue from cache for IGM 2.0 echo fields
+    const cached    = issue_id ? issueCache.get(issue_id) : null;
+    const origIssue = cached?.issue    || { id: issue_id, actions: [], actors: [], refs: [] };
+    const origCtx   = cached?.context  || context;
+
+    const statusAction  = makeBppIgmAction(
+      isResolved ? 'RESOLVED' : 'PROCESSING',
+      resolution || (isResolved ? 'Issue resolved' : 'Being processed'),
+      updatedBy, now
+    );
+    const allBppActions = [...(cached?.bppActions || []), statusAction];
+
+    const extraFields = isResolved ? {
+      resolution: {
         network_issue_id:   issue_id,
         resolution_remarks: resolution || 'Issue has been resolved',
         resolution_action:  'RESOLVE',
         action_triggered:   'REFUND',
         refund_amount:      '0.00',
-      };
-      issuePayload.resolution_provider = {
+      },
+      resolution_provider: {
         respondent_info: {
           type:         'TRANSACTION-COUNTERPARTY-NP',
-          organization: supportOrg,
+          organization: updatedBy,
           resolution_support: {
             respondentEmail:   process.env.SUPPORT_EMAIL || '',
             respondentContact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
           },
         },
-      };
-    }
+      },
+    } : {};
 
-    await sendCallback(context.bap_uri, 'on_issue_status', { ...context, message_id: uuidv4() }, {
-      issue: issuePayload,
-    }, tenant);
+    await sendCallback(
+      origCtx.bap_uri || context.bap_uri, 'on_issue_status',
+      { ...buildIgmContext(origCtx || context), message_id: uuidv4() },
+      buildIgmMessage(origIssue, origCtx || context, tenant.subscriber_id, allBppActions, isResolved ? 'CLOSED' : 'OPEN', extraFields),
+      tenant
+    );
   } catch (err) {
     logger.error('handleIssueStatus failed:', err.message);
   }
@@ -1984,53 +2045,35 @@ const handleIssueStatus = async (req, res) => {
 // Body: { action: 'REFUND' | 'REPLACEMENT' | 'CANCEL' | 'NO_ACTION', short_desc?: string }
 const triggerIssueResolve = async (req, res) => {
   try {
-    const rawId = req.params.issue_id;
+    const rawId    = req.params.issue_id;
     const issue_id = rawId === 'latest' ? lastIssueId : rawId;
     if (!issue_id) return res.status(404).json({ error: 'No issue in cache' });
 
     const cached = issueCache.get(issue_id);
     if (!cached) return res.status(404).json({ error: 'Issue not found in cache' });
 
-    const { context, tenant } = cached;
-    const action    = req.body?.action || 'REFUND';
+    const { context, tenant, issue: origIssue } = cached;
+    const action    = req.body?.action    || 'REFUND';
     const shortDesc = req.body?.short_desc || `Issue resolved with ${action.toLowerCase()}`;
 
     // Pre-set resolve action in cache for on_issue resolution options
     issueCache.set(issue_id, { ...cached, resolveAction: action });
 
-    const now = new Date().toISOString();
+    const now       = new Date().toISOString();
+    const updatedBy = {
+      org:     { name: tenant.subscriber_id },
+      contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+      person:  { name: 'Support Desk' },
+    };
 
-    await sendCallback(context.bap_uri, 'on_issue_status', { ...context, message_id: uuidv4() }, {
-      issue: {
-        id: issue_id,
-        issue_actions: {
-          respondent_actions: [
-            {
-              respondent_action: 'PROCESSING',
-              short_desc:        'Issue received and being processed',
-              updated_at:        now,
-              updated_by: {
-                org:     { name: tenant.subscriber_id },
-                contact: {
-                  phone: process.env.SUPPORT_PHONE || '',
-                  email: process.env.SUPPORT_EMAIL || '',
-                },
-              },
-            },
-            {
-              respondent_action: 'RESOLVED',
-              short_desc:        shortDesc,
-              updated_at:        now,
-              updated_by: {
-                org:     { name: tenant.subscriber_id },
-                contact: {
-                  phone: process.env.SUPPORT_PHONE || '',
-                  email: process.env.SUPPORT_EMAIL || '',
-                },
-              },
-            },
-          ],
-        },
+    const resolvedAction = makeBppIgmAction('RESOLVED', shortDesc, updatedBy, now);
+    const allBppActions  = [...(cached?.bppActions || []), resolvedAction];
+    const safeOrigIssue  = origIssue || { id: issue_id, actions: [], actors: [], refs: [] };
+
+    await sendCallback(
+      context.bap_uri, 'on_issue_status',
+      { ...buildIgmContext(context), message_id: uuidv4() },
+      buildIgmMessage(safeOrigIssue, context, tenant.subscriber_id, allBppActions, 'CLOSED', {
         resolution: {
           network_issue_id:   issue_id,
           resolution_remarks: shortDesc,
@@ -2041,21 +2084,16 @@ const triggerIssueResolve = async (req, res) => {
         resolution_provider: {
           respondent_info: {
             type:         'TRANSACTION-COUNTERPARTY-NP',
-            organization: {
-              org:     { name: tenant.subscriber_id },
-              contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
-            },
+            organization: updatedBy,
             resolution_support: {
               respondentEmail:   process.env.SUPPORT_EMAIL || '',
               respondentContact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
             },
           },
         },
-        created_at: now,
-        updated_at: now,
-        status:     'CLOSED',
-      },
-    }, tenant);
+      }),
+      tenant
+    );
 
     logger.info('Proactive on_issue_status (RESOLVED) sent', { issue_id, action });
     res.json({ success: true, message: `on_issue_status RESOLVED sent`, issue_id, action });
