@@ -1732,9 +1732,14 @@ const buildIgmContext = (ctx) => {
 };
 
 /** Create a BPP respondent action entry (IGM 2.0 format) */
-const makeBppIgmAction = (code, short_desc, updatedBy, ts) => ({
+const makeBppIgmAction = (code, short_desc, updatedBy, ts, refId = '') => ({
   id:          uuidv4(),
-  descriptor:  { code, short_desc },
+  ref_id:      refId,
+  descriptor:  {
+    code,
+    name:      code.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+    short_desc,
+  },
   updated_at:  ts,
   action_by:   updatedBy.org?.name || '',
   actor_details: {
