@@ -1928,7 +1928,7 @@ const handleIssue = async (req, res) => {
       await sendCallback(
         origCtx.bap_uri, 'on_issue',
         { ...buildIgmContext(origCtx), message_id: uuidv4() },
-        buildIgmMessage(origIssue, origCtx, tenant.subscriber_id, bppActionsP2, 'PROCESSING'),
+        buildIgmMessage(origIssue, origCtx, tenant.subscriber_id, bppActionsP2, 'OPEN'),
         tenant
       );
 
@@ -1999,6 +1999,12 @@ const handleIssue = async (req, res) => {
       issueCache.set(issueId, { ...cached, stage: 5, bppActions: allBppActions });
       logger.info('Resolution Provided (stage 4→5)', { issue_id: issueId });
 
+      // Update DB so on_issue_status returns RESOLVED/CLOSED correctly
+      pool.query(
+        `UPDATE issue_grievances SET status = 'resolved', updated_at = NOW() WHERE issue_id = ? AND tenant_id = ?`,
+        [issueId, tenant.id]
+      ).catch(e => logger.warn('Issue status update failed:', e.message));
+
       await sendCallback(
         origCtx.bap_uri, 'on_issue',
         { ...buildIgmContext(origCtx), message_id: uuidv4() },
@@ -2048,9 +2054,8 @@ const handleIssueStatus = async (req, res) => {
       }
     } catch (e) {}
 
-    const isResolved = dbStatus === 'RESOLVED';
-    const now        = new Date().toISOString();
-    const updatedBy  = {
+    const now       = new Date().toISOString();
+    const updatedBy = {
       org:     { name: tenant.subscriber_id },
       contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
       person:  { name: 'Support Desk' },
@@ -2060,6 +2065,9 @@ const handleIssueStatus = async (req, res) => {
     const cached    = issue_id ? issueCache.get(issue_id) : null;
     const origIssue = cached?.issue    || { id: issue_id, actions: [], actors: [], refs: [] };
     const origCtx   = cached?.context  || context;
+
+    // Use cache stage (>=5 = Resolution Provided sent) as fallback for DB-resolved check
+    const isResolved = dbStatus === 'RESOLVED' || (cached?.stage || 0) >= 5;
 
     const statusAction  = makeBppIgmAction(
       isResolved ? 'RESOLVED' : 'PROCESSING',
