@@ -1831,7 +1831,12 @@ const handleIssue = async (req, res) => {
         return;
       }
       const closeNow    = new Date().toISOString();
-      const closeAction = makeBppIgmAction('RESOLVED', 'Issue closure acknowledged — resolution confirmed', updatedBy, closeNow);
+      const closeUpdatedBy = {
+        org:     { name: tenant.subscriber_id },
+        contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+        person:  { name: 'Support Desk' },
+      };
+      const closeAction = makeBppIgmAction('RESOLVED', 'Issue closure acknowledged — resolution confirmed', closeUpdatedBy, closeNow);
       const bppActClose = [...(closeCached.bppActions || []), closeAction];
       issueCache.set(issueId, { ...closeCached, stage: 5, bppActions: bppActClose });
 
@@ -1921,7 +1926,7 @@ const handleIssue = async (req, res) => {
 
       // Mark as in-progress (stage 1) so any duplicate /issue is ignored
       const processingAction = makeBppIgmAction('PROCESSING', 'Issue received and being processed', updatedBy, now);
-      issueCache.set(issueId, { issue, context, tenant, stage: 1, bppActions: [processingAction] });
+      issueCache.set(issueId, { issue, context, tenant, stage: 1, bppActions: [processingAction], resolveAction: resolutionAction });
       lastIssueId = issueId;
       logger.info('IGM auto-chain started (stage 0→1)', { issue_id: issueId });
 
