@@ -1784,7 +1784,12 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
         respondent_action: a.descriptor?.code || a.respondent_action,
         short_desc:        a.descriptor?.short_desc || a.short_desc,
         updated_at:        a.updated_at,
-        updated_by:        a.action_by ? { org: { name: a.action_by }, person: { name: a.actor_details?.name || '' } } : a.updated_by,
+        updated_by: a.action_by ? {
+          org:     { name: a.action_by },
+          contact: a.actor_details?.contact || { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+          person:  { name: a.actor_details?.name || 'Support Desk' },
+        } : a.updated_by,
+        cascaded_level: 'ORDER',
       })),
     },
     // IGM 2.0: full ordered actions array (BAP actions first, then BPP actions)
