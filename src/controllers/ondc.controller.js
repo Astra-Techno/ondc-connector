@@ -1893,7 +1893,7 @@ const handleIssue = async (req, res) => {
               },
             },
           },
-          created_at: now, updated_at: now, status: 'RESOLVED',
+          created_at: now, updated_at: now, status: 'OPEN',
         },
       }, tenant);
       logger.info('on_issue (resolution options) sent', { issue_id: issueId });
@@ -1949,7 +1949,7 @@ const handleIssueStatus = async (req, res) => {
           updated_by:        supportOrg,
         }],
       },
-      status:     issueStatus,
+      status:     isResolved ? 'CLOSED' : 'OPEN',
       updated_at: statusNow,
     };
     if (isResolved) {
@@ -2053,7 +2053,7 @@ const triggerIssueResolve = async (req, res) => {
         },
         created_at: now,
         updated_at: now,
-        status:     'RESOLVED',
+        status:     'CLOSED',
       },
     }, tenant);
 
