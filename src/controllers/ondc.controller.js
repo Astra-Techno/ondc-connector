@@ -2073,49 +2073,54 @@ const handleIssue = async (req, res) => {
           ).catch(e => logger.warn('Issue status update failed:', e.message));
 
           logger.info('on_issue #5 (RESOLVED/provided) sent — auto-chain complete', { issue_id: issueId });
-
-          // ── Proactive on_issue_status CLOSED (t+10s) ───────────────────────
-          // BPP must proactively push on_issue_status when issue is resolved
-          // (Pramaan Flow 6A verifies this as "on_issue_status (II)")
-          setTimeout(async () => {
-            try {
-              const finalUpdatedBy = {
-                org:     { name: tenant.subscriber_id },
-                contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
-                person:  { name: 'Support Desk' },
-              };
-              const latestFinal   = issueCache.get(issueId);
-              const finalActions  = latestFinal?.bppActions || bppAct5;
-              await sendCallback(
-                context.bap_uri, 'on_issue_status',
-                { ...igmCtx, message_id: uuidv4() },
-                buildIgmMessage(issue, context, tenant.subscriber_id, finalActions, 'CLOSED', {
-                  resolution: {
-                    network_issue_id:   issueId,
-                    resolution_remarks: `Resolution confirmed — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`,
-                    resolution_action:  'RESOLVE',
-                    action_triggered:   resolutionAction,
-                    refund_amount:      '0.00',
-                  },
-                  resolution_provider: {
-                    respondent_info: {
-                      type:         'TRANSACTION-COUNTERPARTY-NP',
-                      organization: finalUpdatedBy,
-                      resolution_support: {
-                        respondentEmail: process.env.SUPPORT_EMAIL || '',
-                        contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
-                        gros: [],
-                      },
-                    },
-                  },
-                }),
-                tenant
-              );
-              logger.info('Proactive on_issue_status CLOSED sent (auto-chain)', { issue_id: issueId });
-            } catch (err) { logger.error('Proactive on_issue_status failed:', err.message); }
-          }, 2000);
         } catch (err) { logger.error('on_issue #5 failed:', err.message); }
       }, 8000);
+
+      // ── Proactive on_issue_status CLOSED (t+9s) ─────────────────────────────
+      // Registered at stage-0 start so it fires exactly 9s after /issue received,
+      // independent of how long on_issue callbacks take.
+      // Pramaan Flow 6A captures this as "on_issue_status (II)".
+      setTimeout(async () => {
+        try {
+          const proactiveUpdatedBy = {
+            org:     { name: tenant.subscriber_id },
+            contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+            person:  { name: 'Support Desk' },
+          };
+          const latestFinal  = issueCache.get(issueId);
+          const finalActions = latestFinal?.bppActions || [];
+          const proactiveRemarks = `Resolution confirmed — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`;
+          await sendCallback(
+            context.bap_uri, 'on_issue_status',
+            { ...igmCtx, message_id: uuidv4() },
+            buildIgmMessage(issue, context, tenant.subscriber_id, finalActions, 'CLOSED', {
+              resolution: {
+                network_issue_id:   issueId,
+                short_desc:         proactiveRemarks,
+                long_desc:          proactiveRemarks,
+                resolution_remarks: proactiveRemarks,
+                resolution_action:  'RESOLVE',
+                action_triggered:   resolutionAction,
+                refund_amount:      '0.00',
+              },
+              resolution_provider: {
+                respondent_info: {
+                  type:         'TRANSACTION-COUNTERPARTY-NP',
+                  organization: proactiveUpdatedBy,
+                  resolution_support: {
+                    respondentEmail: process.env.SUPPORT_EMAIL || '',
+                    contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+                    gros: [],
+                    chat_link: '',
+                  },
+                },
+              },
+            }),
+            tenant
+          );
+          logger.info('Proactive on_issue_status CLOSED sent (t+9s)', { issue_id: issueId });
+        } catch (err) { logger.error('Proactive on_issue_status failed:', err.message); }
+      }, 9000);
 
     } else if (issueStatus === 'ESCALATED') {
       // ── Escalation flow (Flow 6F) ────────────────────────────────────────────
@@ -2233,12 +2238,15 @@ const handleIssueStatus = async (req, res) => {
     );
     const allBppActions = [...(cached?.bppActions || []), statusAction];
 
+    const resolutionRemarks = resolution || 'Issue has been resolved';
     const extraFields = isResolved ? {
       resolution: {
         network_issue_id:   issue_id,
-        resolution_remarks: resolution || 'Issue has been resolved',
+        short_desc:         resolutionRemarks,
+        long_desc:          resolutionRemarks,
+        resolution_remarks: resolutionRemarks,
         resolution_action:  'RESOLVE',
-        action_triggered:   'REFUND',
+        action_triggered:   cached?.resolveAction || 'REFUND',
         refund_amount:      '0.00',
       },
       resolution_provider: {
@@ -2249,6 +2257,7 @@ const handleIssueStatus = async (req, res) => {
             respondentEmail:   process.env.SUPPORT_EMAIL || '',
             contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
             gros: [],
+            chat_link:         '',
           },
         },
       },
@@ -2300,6 +2309,8 @@ const triggerIssueResolve = async (req, res) => {
       buildIgmMessage(safeOrigIssue, context, tenant.subscriber_id, allBppActions, 'CLOSED', {
         resolution: {
           network_issue_id:   issue_id,
+          short_desc:         shortDesc,
+          long_desc:          shortDesc,
           resolution_remarks: shortDesc,
           resolution_action:  'RESOLVE',
           action_triggered:   action,
@@ -2313,6 +2324,7 @@ const triggerIssueResolve = async (req, res) => {
               respondentEmail:   process.env.SUPPORT_EMAIL || '',
               contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
               gros: [],
+              chat_link:         '',
             },
           },
         },
