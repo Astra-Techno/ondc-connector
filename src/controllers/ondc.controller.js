@@ -2027,6 +2027,7 @@ const handleIssue = async (req, res) => {
                       phone: process.env.SUPPORT_PHONE || '',
                       email: process.env.SUPPORT_EMAIL || '',
                     },
+                    gros: [],
                   },
                 },
               },
@@ -2072,6 +2073,47 @@ const handleIssue = async (req, res) => {
           ).catch(e => logger.warn('Issue status update failed:', e.message));
 
           logger.info('on_issue #5 (RESOLVED/provided) sent — auto-chain complete', { issue_id: issueId });
+
+          // ── Proactive on_issue_status CLOSED (t+10s) ───────────────────────
+          // BPP must proactively push on_issue_status when issue is resolved
+          // (Pramaan Flow 6A verifies this as "on_issue_status (II)")
+          setTimeout(async () => {
+            try {
+              const finalUpdatedBy = {
+                org:     { name: tenant.subscriber_id },
+                contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+                person:  { name: 'Support Desk' },
+              };
+              const latestFinal   = issueCache.get(issueId);
+              const finalActions  = latestFinal?.bppActions || bppAct5;
+              await sendCallback(
+                context.bap_uri, 'on_issue_status',
+                { ...igmCtx, message_id: uuidv4() },
+                buildIgmMessage(issue, context, tenant.subscriber_id, finalActions, 'CLOSED', {
+                  resolution: {
+                    network_issue_id:   issueId,
+                    resolution_remarks: `Resolution confirmed — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`,
+                    resolution_action:  'RESOLVE',
+                    action_triggered:   resolutionAction,
+                    refund_amount:      '0.00',
+                  },
+                  resolution_provider: {
+                    respondent_info: {
+                      type:         'TRANSACTION-COUNTERPARTY-NP',
+                      organization: finalUpdatedBy,
+                      resolution_support: {
+                        respondentEmail: process.env.SUPPORT_EMAIL || '',
+                        contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+                        gros: [],
+                      },
+                    },
+                  },
+                }),
+                tenant
+              );
+              logger.info('Proactive on_issue_status CLOSED sent (auto-chain)', { issue_id: issueId });
+            } catch (err) { logger.error('Proactive on_issue_status failed:', err.message); }
+          }, 2000);
         } catch (err) { logger.error('on_issue #5 failed:', err.message); }
       }, 8000);
 
@@ -2206,6 +2248,7 @@ const handleIssueStatus = async (req, res) => {
           resolution_support: {
             respondentEmail:   process.env.SUPPORT_EMAIL || '',
             contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+            gros: [],
           },
         },
       },
@@ -2269,6 +2312,7 @@ const triggerIssueResolve = async (req, res) => {
             resolution_support: {
               respondentEmail:   process.env.SUPPORT_EMAIL || '',
               contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+              gros: [],
             },
           },
         },
