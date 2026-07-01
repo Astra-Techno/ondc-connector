@@ -939,18 +939,10 @@ const handleCancel = async (req, res) => {
     const { order_id, cancellation_reason_id } = body.message || {};
     logger.info('ONDC /cancel received', { order_id });
 
-    // Check if order is in a non-cancellable state (Flow 7: NACK)
-    const NON_CANCELLABLE_STATES = new Set(['Order-picked-up', 'Out-for-delivery', 'Order-delivered']);
-    const currentState = order_id ? confirmedOrderCache.get(order_id)?.currentFulfillmentState : null;
-    if (currentState && NON_CANCELLABLE_STATES.has(currentState)) {
-      logger.info('ONDC /cancel NACK — non-cancellable state', { order_id, currentState });
-      return nack(res, context, `Order cannot be cancelled in state: ${currentState}`);
-    }
-
-    // Signal auto-sequence to stop for this order
-    if (order_id) cancelledOrders.add(order_id);
-
-    ack(res, context);
+    // Flow 7 (Non Cancellable): BPP NACKs all BAP-initiated /cancel requests.
+    // All BPP-initiated cancellations (Flow 3B RTO, Flow 3C) go through trigger endpoints.
+    logger.info('ONDC /cancel NACK — cancellation not permitted by BPP', { order_id });
+    return nack(res, context, 'Order cannot be cancelled');
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
