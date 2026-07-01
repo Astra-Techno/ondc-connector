@@ -13,7 +13,7 @@ const {
   buildCallbackUrl,
 } = require('../services/ondc/order.service');
 const cottKartOrder = require('../services/cloudkart/order.service');
-const { ack, buildAckBody } = require('../utils/response');
+const { ack, nack, buildAckBody } = require('../utils/response');
 const { pushTxnLog } = require('../services/ondc/logPublisher.service');
 
 // In-memory cache: order_id → { order, context } (for on_status/on_update/on_cancel callbacks)
@@ -813,6 +813,9 @@ const handleConfirm = async (req, res) => {
           const stepContext = { ...context, message_id: uuidv4() };
           const payload = buildStatusPayload(order.id, order, step.fulfillmentState, step.orderState, vendor);
           await sendCallback(context.bap_uri, 'on_status', stepContext, { order: payload }, tenant);
+          // Track current fulfillment state so handleCancel can decide ACK vs NACK
+          const cacheEntry = confirmedOrderCache.get(order.id);
+          if (cacheEntry) cacheEntry.currentFulfillmentState = step.fulfillmentState;
           logger.info('Auto on_status sent', { order_id: order.id, ...step });
 
           await delay(step.delayAfter);
@@ -935,6 +938,14 @@ const handleCancel = async (req, res) => {
     const context = body.context ? JSON.parse(JSON.stringify(body.context)) : {};
     const { order_id, cancellation_reason_id } = body.message || {};
     logger.info('ONDC /cancel received', { order_id });
+
+    // Check if order is in a non-cancellable state (Flow 7: NACK)
+    const NON_CANCELLABLE_STATES = new Set(['Order-picked-up', 'Out-for-delivery', 'Order-delivered']);
+    const currentState = order_id ? confirmedOrderCache.get(order_id)?.currentFulfillmentState : null;
+    if (currentState && NON_CANCELLABLE_STATES.has(currentState)) {
+      logger.info('ONDC /cancel NACK — non-cancellable state', { order_id, currentState });
+      return nack(res, context, `Order cannot be cancelled in state: ${currentState}`);
+    }
 
     // Signal auto-sequence to stop for this order
     if (order_id) cancelledOrders.add(order_id);

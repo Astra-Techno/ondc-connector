@@ -47,8 +47,10 @@ const ack = async (res, context = null, status = 'ACK') => {
   return res.status(200).json(body);
 };
 
-const nack = (res, message = 'NACK') => {
-  return res.status(200).json({ message: { ack: { status: 'NACK' }, error: { message } } });
+const nack = (res, context = null, errorMessage = 'Order cannot be cancelled at this stage') => {
+  const body = buildAckBody(context, 'NACK');
+  body.message.error = { type: 'DOMAIN-ERROR', code: '40002', message: errorMessage };
+  return res.status(200).json(body);
 };
 
 module.exports = { success, error, ack, nack, buildAckBody };
