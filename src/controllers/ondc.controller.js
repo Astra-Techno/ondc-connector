@@ -267,14 +267,17 @@ const getActiveTenants = async () => {
 };
 
 // Build ONDC catalog from DB for a tenant
+// contextCity: specific city code (e.g. "std:044"), null = no filter, "*" = all cities (treated as no filter)
 const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
   try {
+    // city="*" means "all cities" — treat as no filter
+    const cityFilter = (contextCity && contextCity !== '*') ? contextCity : null;
     // Filter vendors strictly by city — prevents GCR catalog_rejection for area_code/city mismatch.
     // Vendors with NULL std_city_code are excluded from city-specific searches (they have no registered city).
     const [vendors] = await pool.query(
       `SELECT * FROM vendors WHERE tenant_id = ? AND status = 'active'
        AND (? IS NULL OR std_city_code = ?)`,
-      [tenantId, contextCity, contextCity]
+      [tenantId, cityFilter, cityFilter]
     );
 
     const providers = [];
@@ -437,38 +440,29 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
       });
     }
 
-    return providers.length
-      ? {
-          'bpp/descriptor': {
-            name:       ondcConfig?.subscriber_id || 'ONDC Connector',
-            symbol:     'https://ondc.cottkart.com/assets/logo.png',
-            short_desc: 'ONDC Seller Platform',
-            long_desc:  'Multi-vendor ONDC Seller Platform powered by CottKart',
-            images:     ['https://ondc.cottkart.com/assets/logo.png'],
-            tags: [{
-              code: 'bpp_terms',
-              list: [
-                { code: 'np_type',         value: 'MSN' },
-                { code: 'accept_bap_terms', value: 'Y'  },
-              ],
-            }],
-          },
-          'bpp/categories': [
-            { id: 'Grocery', descriptor: { name: 'Grocery' } },
-          ],
-          'bpp/providers': providers,
-          // Required at catalog level per ONDC API v1.2 spec
-          'bpp/fulfillments': [{
-            id:   'f1',
-            type: 'Delivery',
-          }],
-          'bpp/payments': [{
-            '@ondc/org/buyer_app_finder_fee_type':   'percent',
-            '@ondc/org/buyer_app_finder_fee_amount': '3',
-          }],
-          'bpp/offers': [],
-        }
-      : null;
+    const bppDescriptor = {
+      name:       ondcConfig?.subscriber_id || 'ONDC Connector',
+      symbol:     'https://ondc.cottkart.com/assets/logo.png',
+      short_desc: 'ONDC Seller Platform',
+      long_desc:  'Multi-vendor ONDC Seller Platform powered by CottKart',
+      images:     ['https://ondc.cottkart.com/assets/logo.png'],
+      tags: [{
+        code: 'bpp_terms',
+        list: [
+          { code: 'np_type',         value: 'MSN' },
+          { code: 'accept_bap_terms', value: 'Y'  },
+        ],
+      }],
+    };
+
+    return {
+      'bpp/descriptor':   bppDescriptor,
+      'bpp/categories':   [{ id: 'Grocery', descriptor: { name: 'Grocery' } }],
+      'bpp/providers':    providers,
+      'bpp/fulfillments': [{ id: 'f1', type: 'Delivery' }],
+      'bpp/payments':     [{ '@ondc/org/buyer_app_finder_fee_type': 'percent', '@ondc/org/buyer_app_finder_fee_amount': '3' }],
+      'bpp/offers':       [],
+    };
   } catch (err) {
     logger.error('buildCatalog failed:', err.message);
     return null;
@@ -555,10 +549,17 @@ const handleSearch = async (req, res) => {
     const tenants = await getActiveTenants();
     if (!tenants.length) { logger.info('No active tenants for /search'); return; }
 
+    // Detect incremental vs full catalog request
+    const intentTags  = req.body?.message?.intent?.tags || [];
+    const isIncremental = intentTags.some(t => t.code === 'catalog_inc');
+
     for (const tenant of tenants) {
       const ondcConfig = resolveOndcConfig(tenant);
-      const catalog = await buildCatalog(tenant.id, ondcConfig, context?.city);
-      if (catalog?.['bpp/providers']?.length) {
+      const catalog    = await buildCatalog(tenant.id, ondcConfig, context?.city);
+      if (!catalog) continue;
+      // For incremental search: always send (even empty providers — means no changes)
+      // For full catalog search: only send if we have providers to return
+      if (isIncremental || catalog['bpp/providers']?.length) {
         await sendOnSearch(context, catalog, ondcConfig);
       }
     }
