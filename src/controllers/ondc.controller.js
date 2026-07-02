@@ -2372,6 +2372,58 @@ const handleACK = (action) => async (req, res) => {
   res.json(body);
 };
 
+// ─── Flow 11A — RSF (Reconciliation and Settlement Framework) ─────────────────
+// BPP receives /recon from BAP, ACKs, then sends on_recon callback with
+// recon_status:"01" (PAID) for each settlement in the request.
+const handleRecon = async (req, res) => {
+  try {
+    const { context, message } = req.body;
+    logger.info('ONDC /recon received', { txn: context?.transaction_id });
+
+    await ack(res, context);
+
+    if (!context?.bap_uri || !message?.settlement?.settlements?.length) return;
+
+    const tenant = await getTenantByBppId(context.bpp_id);
+    const config  = resolveOndcConfig(tenant);
+
+    // Echo back settlements with recon_status and reciever_recon_status = "01" (PAID)
+    const settlements = message.settlement.settlements.map(s => ({
+      ...s,
+      recon_status: '01',
+      order_details: (s.order_details || []).map(od => ({
+        ...od,
+        reciever_recon_status: '01',
+      })),
+    }));
+
+    const cbCtx = {
+      ...context,
+      action:    'on_recon',
+      bpp_id:    config.subscriber_id,
+      bpp_uri:   config.subscriber_url,
+      message_id: uuidv4(),
+      timestamp:  new Date().toISOString(),
+    };
+
+    setTimeout(async () => {
+      try {
+        await sendCallback(
+          context.bap_uri, 'on_recon', cbCtx,
+          { settlement: { settlements } },
+          tenant
+        );
+        logger.info('on_recon sent', { txn: context.transaction_id });
+      } catch (e) {
+        logger.error('on_recon callback failed:', e.message);
+      }
+    }, 1000);
+
+  } catch (err) {
+    logger.error('handleRecon failed:', err.message);
+  }
+};
+
 module.exports = {
   handleSearch,
   handleSelect,
@@ -2385,6 +2437,7 @@ module.exports = {
   handleRating,
   handleIssue,
   handleIssueStatus,
+  handleRecon,
   handleACK,
   triggerIssueResolve,
   triggerMerchantUpdate,

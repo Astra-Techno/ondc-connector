@@ -22,6 +22,7 @@ const {
   handleRating,
   handleIssue,
   handleIssueStatus,
+  handleRecon,
   handleACK,
   triggerMerchantUpdate,
   triggerMerchantReturnUpdate,
@@ -216,6 +217,7 @@ app.post('/rating',       handleRating);
 app.post('/issue',        handleIssue);
 app.post('/issue_status', handleIssueStatus);
 app.post('/update',       handleUpdate);
+app.post('/recon',        handleRecon);
 
 // Merchant-initiated trigger endpoints (for Flow 3A/3B/3C testing)
 app.post('/trigger/merchant-update/:order_id',           triggerMerchantUpdate);
@@ -247,6 +249,7 @@ app.post('/on_support',      handleACK('on_support'));
 app.post('/on_rating',       handleACK('on_rating'));
 app.post('/on_issue',        handleACK('on_issue'));
 app.post('/on_issue_status', handleACK('on_issue_status'));
+app.post('/on_recon',        handleACK('on_recon'));
 
 // ─── API v1 routes ────────────────────────────────────────────────────────────
 app.use('/api/v1/tenant',      require('./src/routes/tenant.routes'));
