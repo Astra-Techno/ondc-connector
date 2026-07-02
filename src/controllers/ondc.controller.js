@@ -2428,6 +2428,62 @@ const handleRecon = async (req, res) => {
   }
 };
 
+// ─── Flow 11A — Proactive on_recon trigger (BPP as collector/initiator) ──────
+// After order is delivered, trigger BPP to proactively send on_recon to BAP.
+// Call: POST /trigger/send-recon/latest  (or /:order_id)
+const triggerSendRecon = async (req, res) => {
+  try {
+    const orderId = req.params.order_id === 'latest' ? lastConfirmedOrderId : req.params.order_id;
+    const cached  = orderId ? confirmedOrderCache.get(orderId) : null;
+
+    if (!cached) {
+      return res.status(404).json({ error: 'Order not found in cache. Run Flow 1A first.' });
+    }
+
+    const { order, context, tenant } = cached;
+    const config = resolveOndcConfig(tenant);
+    const amount = order.quote?.price?.value || '0.00';
+    const settlementDetails = buildSettlementDetails(amount)[0];
+
+    const cbCtx = {
+      ...context,
+      action:     'on_recon',
+      bpp_id:     config.subscriber_id,
+      bpp_uri:    config.subscriber_url,
+      message_id: uuidv4(),
+      timestamp:  new Date().toISOString(),
+    };
+
+    const settlements = [{
+      ...settlementDetails,
+      payer_app_id:      context.bap_id,
+      payer_app_uri:     context.bap_uri,
+      receiver_app_id:   config.subscriber_id,
+      receiver_app_uri:  config.subscriber_url,
+      recon_status:      '01',
+      order_details: [{
+        id:                    order.id,
+        state:                 'Complete',
+        provider_id:           order.provider?.id || 'V001',
+        withholding_amount:    '0.00',
+        reciever_recon_status: '01',
+      }],
+    }];
+
+    await sendCallback(
+      context.bap_uri, 'on_recon', cbCtx,
+      { settlement: { settlements } },
+      tenant
+    );
+
+    logger.info('Proactive on_recon sent', { order_id: order.id, txn: context.transaction_id });
+    res.json({ success: true, order_id: order.id, settlement_id: settlementDetails.settlement_id });
+  } catch (err) {
+    logger.error('triggerSendRecon failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   handleSearch,
   handleSelect,
@@ -2442,6 +2498,7 @@ module.exports = {
   handleIssue,
   handleIssueStatus,
   handleRecon,
+  triggerSendRecon,
   handleACK,
   triggerIssueResolve,
   triggerMerchantUpdate,

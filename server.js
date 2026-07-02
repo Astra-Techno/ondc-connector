@@ -23,6 +23,7 @@ const {
   handleIssue,
   handleIssueStatus,
   handleRecon,
+  triggerSendRecon,
   handleACK,
   triggerMerchantUpdate,
   triggerMerchantReturnUpdate,
@@ -226,6 +227,7 @@ app.post('/trigger/merchant-cancel/:order_id',           triggerMerchantCancel);
 app.post('/trigger/merchant-status/:order_id',           triggerMerchantStatus);
 app.post('/trigger/merchant-status-sequence/:order_id',  triggerMerchantStatusSequence);
 app.post('/trigger/issue-resolve/:issue_id',             triggerIssueResolve);
+app.post('/trigger/send-recon/:order_id',               triggerSendRecon);
 app.post('/trigger/set-out-of-stock',                    triggerSetOutOfStock);
 app.post('/trigger/clear-out-of-stock',                  triggerClearOutOfStock);
 
