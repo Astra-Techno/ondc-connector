@@ -228,8 +228,10 @@ app.post('/trigger/clear-out-of-stock',                  triggerClearOutOfStock)
 
 // GCR catalog validation feedback
 app.post('/catalog_rejection', (req, res) => {
+  const context = req.body?.context;
   logger.warn(`GCR catalog_rejection: ${JSON.stringify(req.body)}`);
-  res.json({ message: { ack: { status: 'ACK' } } });
+  const { buildAckBody } = require('./src/utils/response');
+  res.json(buildAckBody(context, 'ACK'));
 });
 
 // Callbacks we may receive from BAP (just ACK)

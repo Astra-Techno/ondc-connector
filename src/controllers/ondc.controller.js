@@ -262,6 +262,7 @@ const getActiveTenants = async () => {
     FROM tenants t
     JOIN tenant_ondc_config oc ON oc.tenant_id = t.id
     WHERE t.status = 'active' AND oc.is_active = 1
+    GROUP BY t.id
   `);
   return tenants;
 };
