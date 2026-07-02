@@ -6,6 +6,7 @@ const morgan     = require('morgan');
 const rateLimit  = require('express-rate-limit');
 const logger          = require('./src/utils/logger');
 const { ondcTrace }   = require('./src/utils/logger');
+const { buildAckBody } = require('./src/utils/response');
 const { connectDB } = require('./src/config/database');
 const { pushTxnLog, isLogPublisherConfigured, testAnalyticsPush, getTokenDiagnostics, getAnalyticsSubscriberId } = require('./src/services/ondc/logPublisher.service');
 const {
@@ -230,7 +231,6 @@ app.post('/trigger/clear-out-of-stock',                  triggerClearOutOfStock)
 app.post('/catalog_rejection', (req, res) => {
   const context = req.body?.context;
   logger.warn(`GCR catalog_rejection: ${JSON.stringify(req.body)}`);
-  const { buildAckBody } = require('./src/utils/response');
   res.json(buildAckBody(context, 'ACK'));
 });
 

@@ -256,15 +256,17 @@ const fetchVendorForOrder = async (tenantId, providerId) => {
 
 // Get all active tenants (used only by /search which is broadcast)
 const getActiveTenants = async () => {
-  const [tenants] = await pool.query(`
+  const [rows] = await pool.query(`
     SELECT t.*, oc.subscriber_id, oc.subscriber_url,
            oc.signing_private_key, oc.unique_key_id
     FROM tenants t
     JOIN tenant_ondc_config oc ON oc.tenant_id = t.id
     WHERE t.status = 'active' AND oc.is_active = 1
-    GROUP BY t.id
   `);
-  return tenants;
+  // Deduplicate by tenant id — prevents multiple on_search with same message_id
+  // if a tenant has more than one active tenant_ondc_config row
+  const seen = new Set();
+  return rows.filter(r => seen.has(r.id) ? false : seen.add(r.id));
 };
 
 // Build ONDC catalog from DB for a tenant
