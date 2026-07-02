@@ -58,10 +58,14 @@ const ORDER_TAGS = [{
   ],
 }];
 
-const SETTLEMENT_DETAILS = [{
+// RSF 2.0 requires settlement_id, settlement_amount, settlement_timestamp per settlement
+const buildSettlementDetails = (settlementAmount = '0.00') => [{
   settlement_counterparty:    'buyer-app',
   settlement_phase:           'sale-amount',
   settlement_type:            'upi',
+  settlement_id:              uuidv4(),
+  settlement_amount:          String(settlementAmount),
+  settlement_timestamp:       new Date().toISOString(),
   beneficiary_name:           'CottKart Pvt Ltd',
   settlement_bank_account_no: '1234567890',
   settlement_ifsc_code:       'ICIC0001234',
@@ -222,7 +226,7 @@ const buildPartialCancelUpdatePayload = (order, vendor, confirmTimestamp) => {
       '@ondc/org/settlement_basis':             'return_window_expiry',
       '@ondc/org/settlement_window':            'P1D',
       '@ondc/org/withholding_amount':           '10.00',
-      '@ondc/org/settlement_details':           SETTLEMENT_DETAILS,
+      '@ondc/org/settlement_details':           buildSettlementDetails(),
       status: 'PAID',
     },
     fulfillments: [...deliveryFulfillments, cancelFulfillment],
@@ -689,7 +693,7 @@ const handleInit = async (req, res) => {
             '@ondc/org/settlement_basis':             'return_window_expiry',
             '@ondc/org/settlement_window':            'P1D',
             '@ondc/org/withholding_amount':           '10.00',
-            '@ondc/org/settlement_details':           SETTLEMENT_DETAILS,
+            '@ondc/org/settlement_details':           buildSettlementDetails(),
             type:   'ON-ORDER',
             status: 'NOT-PAID',
           },
@@ -776,7 +780,7 @@ const handleConfirm = async (req, res) => {
             '@ondc/org/settlement_basis':             'return_window_expiry',
             '@ondc/org/settlement_window':            'P1D',
             '@ondc/org/withholding_amount':           '10.00',
-            '@ondc/org/settlement_details':           SETTLEMENT_DETAILS,
+            '@ondc/org/settlement_details':           buildSettlementDetails(quote?.price?.value || order.payment?.['@ondc/org/settlement_details']?.[0]?.settlement_amount || '0.00'),
             status: 'PAID',
           },
           cancellation_terms: CANCELLATION_TERMS,
@@ -918,7 +922,7 @@ const handleStatus = async (req, res) => {
         payment: {
           ...(cachedOrder?.payment || {}),
           status: returnFl ? 'PAID' : (cachedOrder?.payment?.status || 'PAID'),
-          '@ondc/org/settlement_details': SETTLEMENT_DETAILS,
+          '@ondc/org/settlement_details': buildSettlementDetails(),
         },
         tags:       ORDER_TAGS,
         created_at: cachedOrder?.created_at || now,
@@ -997,7 +1001,7 @@ const handleCancel = async (req, res) => {
           '@ondc/org/settlement_basis':             'return_window_expiry',
           '@ondc/org/settlement_window':            'P1D',
           '@ondc/org/withholding_amount':           '10.00',
-          '@ondc/org/settlement_details':           SETTLEMENT_DETAILS,
+          '@ondc/org/settlement_details':           buildSettlementDetails(),
           status: 'PAID',
         },
         cancellation: {
@@ -1433,7 +1437,7 @@ const triggerMerchantCancel = async (req, res) => {
         '@ondc/org/settlement_basis':             'return_window_expiry',
         '@ondc/org/settlement_window':            'P1D',
         '@ondc/org/withholding_amount':           '10.00',
-        '@ondc/org/settlement_details':           SETTLEMENT_DETAILS,
+        '@ondc/org/settlement_details':           buildSettlementDetails(),
         status: 'PAID',
       },
       cancellation: {
@@ -1534,7 +1538,7 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
     quote:     order.quote,
     payment: {
       ...order.payment,
-      '@ondc/org/settlement_details': SETTLEMENT_DETAILS,
+      '@ondc/org/settlement_details': buildSettlementDetails(),
     },
     tags:       ORDER_TAGS,
     created_at: order.created_at || now,
