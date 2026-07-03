@@ -15,6 +15,7 @@ const {
 const cottKartOrder = require('../services/cloudkart/order.service');
 const { ack, nack, buildAckBody } = require('../utils/response');
 const { pushTxnLog } = require('../services/ondc/logPublisher.service');
+const { createAuthHeader } = require('../utils/crypto');
 
 // In-memory cache: order_id → { order, context } (for on_status/on_update/on_cancel callbacks)
 const confirmedOrderCache = new Map();
@@ -2398,33 +2399,52 @@ const handleRecon = async (req, res) => {
     const tenant = await getTenantByBppId(context.bpp_id);
     const config  = resolveOndcConfig(tenant);
 
-    // Echo back orders with recon_status = "01" (settled) per settlement
+    // Echo back orders with recon_status="01" and recon_accord=true per order
     const reconOrders = orders.map(order => ({
       ...order,
+      recon_accord: true,
       settlements: (order.settlements || []).map(s => ({
         ...s,
         recon_status: '01',
       })),
     }));
 
-    // Preserve incoming RSF 2.0 context (domain:NTS10, version:2.0.0, location:{...})
+    // RSF 2.0 context: preserve only RSF fields — do NOT include core_version/country/city
     const cbCtx = {
-      ...context,
-      action:     'on_recon',
-      bpp_id:     config.subscriber_id,
-      bpp_uri:    config.subscriber_url,
-      message_id: uuidv4(),
-      timestamp:  new Date().toISOString(),
+      domain:         context.domain,
+      location:       context.location,
+      version:        context.version,
+      action:         'on_recon',
+      transaction_id: context.transaction_id,
+      message_id:     uuidv4(),
+      timestamp:      new Date().toISOString(),
+      bap_id:         context.bap_id,
+      bap_uri:        context.bap_uri,
+      bpp_id:         config.subscriber_id,
+      bpp_uri:        config.subscriber_url,
+      ttl:            context.ttl || 'PT30S',
     };
 
     setTimeout(async () => {
       try {
-        await sendCallback(
-          context.bap_uri, 'on_recon', cbCtx,
-          { orders: reconOrders },
-          tenant
-        );
-        logger.info('on_recon sent (RSF 2.0)', { txn: context.transaction_id, orders: reconOrders.length });
+        const payload = { context: cbCtx, message: { orders: reconOrders } };
+        const headers = { 'Content-Type': 'application/json' };
+        try {
+          if (config.signing_private_key) {
+            headers['Authorization'] = createAuthHeader(
+              config.signing_private_key,
+              config.subscriber_id,
+              config.unique_key_id,
+              payload
+            );
+          }
+        } catch (e) {
+          logger.error('on_recon auth header failed:', e.message);
+        }
+        const callbackUrl = `${context.bap_uri.replace(/\/+$/, '')}/on_recon`;
+        const resp = await axios.post(callbackUrl, payload, { headers, timeout: 30000 });
+        logger.info(`on_recon → ${callbackUrl} [${resp.status}]`, { txn: context.transaction_id, orders: reconOrders.length });
+        pushTxnLog('on_recon', payload).catch(() => {});
       } catch (e) {
         logger.error('on_recon callback failed:', e.message);
       }
