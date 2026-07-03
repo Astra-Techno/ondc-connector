@@ -2376,36 +2376,43 @@ const handleACK = (action) => async (req, res) => {
   res.json(body);
 };
 
-// ─── Flow 11A — RSF (Reconciliation and Settlement Framework) ─────────────────
-// BPP receives /recon from BAP, ACKs, then sends on_recon callback with
-// recon_status:"01" (PAID) for each settlement in the request.
+// ─── Flow 11A — RSF 2.0 (Reconciliation and Settlement Framework) ────────────
+// BPP receives /recon from BAP (domain:ONDC:NTS10, version:2.0.0, message.orders format),
+// ACKs, then sends on_recon callback echoing back the orders with recon_status:"01".
 const handleRecon = async (req, res) => {
   try {
     const { context, message } = req.body;
-    logger.info('ONDC /recon received', { txn: context?.transaction_id });
+    logger.info('ONDC /recon received', { txn: context?.transaction_id, domain: context?.domain });
 
     await ack(res, context);
 
-    if (!context?.bap_uri || !message?.settlement?.settlements?.length) return;
+    if (!context?.bap_uri) return;
+
+    // RSF 2.0: Pramaan sends message.orders (not message.settlement.settlements)
+    const orders = message?.orders;
+    if (!orders?.length) {
+      logger.warn('handleRecon: no message.orders in /recon payload, skipping on_recon');
+      return;
+    }
 
     const tenant = await getTenantByBppId(context.bpp_id);
     const config  = resolveOndcConfig(tenant);
 
-    // Echo back settlements with recon_status and reciever_recon_status = "01" (PAID)
-    const settlements = message.settlement.settlements.map(s => ({
-      ...s,
-      recon_status: '01',
-      order_details: (s.order_details || []).map(od => ({
-        ...od,
-        reciever_recon_status: '01',
+    // Echo back orders with recon_status = "01" (settled) per settlement
+    const reconOrders = orders.map(order => ({
+      ...order,
+      settlements: (order.settlements || []).map(s => ({
+        ...s,
+        recon_status: '01',
       })),
     }));
 
+    // Preserve incoming RSF 2.0 context (domain:NTS10, version:2.0.0, location:{...})
     const cbCtx = {
       ...context,
-      action:    'on_recon',
-      bpp_id:    config.subscriber_id,
-      bpp_uri:   config.subscriber_url,
+      action:     'on_recon',
+      bpp_id:     config.subscriber_id,
+      bpp_uri:    config.subscriber_url,
       message_id: uuidv4(),
       timestamp:  new Date().toISOString(),
     };
@@ -2414,10 +2421,10 @@ const handleRecon = async (req, res) => {
       try {
         await sendCallback(
           context.bap_uri, 'on_recon', cbCtx,
-          { settlement: { settlements } },
+          { orders: reconOrders },
           tenant
         );
-        logger.info('on_recon sent', { txn: context.transaction_id });
+        logger.info('on_recon sent (RSF 2.0)', { txn: context.transaction_id, orders: reconOrders.length });
       } catch (e) {
         logger.error('on_recon callback failed:', e.message);
       }
