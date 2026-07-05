@@ -2479,6 +2479,7 @@ const triggerSendReconReceiver = async (req, res) => {
     };
 
     const settlementId = uuidv4();
+    const moneyObj = (val) => ({ currency: 'INR', value: String(val) });
     const reconOrders = [{
       id:           order.id,
       recon_accord: true,
@@ -2487,11 +2488,11 @@ const triggerSendReconReceiver = async (req, res) => {
         payment_id:            order.payment?.params?.transaction_id || settlementId,
         status:                'SETTLED',
         settlement_ref_no:     `REF${Date.now()}`,
-        amount:                amount,
-        commission:            '0.00',
-        withholding_amount:    '0.00',
-        tcs:                   '0.00',
-        tds:                   '0.00',
+        amount:                moneyObj(amount),
+        commission:            moneyObj('0.00'),
+        withholding_amount:    moneyObj('0.00'),
+        tcs:                   moneyObj('0.00'),
+        tds:                   moneyObj('0.00'),
         updated_at:            new Date().toISOString(),
         recon_status:          '01',
         receiver_recon_status: '01',
