@@ -31,6 +31,7 @@ const {
   triggerMerchantStatus,
   triggerMerchantStatusSequence,
   triggerIssueResolve,
+  triggerSendReconReceiver,
   triggerSetOutOfStock,
   triggerClearOutOfStock,
 } = require('./src/controllers/ondc.controller');
@@ -228,6 +229,7 @@ app.post('/trigger/merchant-status/:order_id',           triggerMerchantStatus);
 app.post('/trigger/merchant-status-sequence/:order_id',  triggerMerchantStatusSequence);
 app.post('/trigger/issue-resolve/:issue_id',             triggerIssueResolve);
 app.post('/trigger/send-recon/:order_id',               triggerSendRecon);
+app.post('/trigger/send-recon-receiver/:order_id',      triggerSendReconReceiver);
 app.post('/trigger/set-out-of-stock',                    triggerSetOutOfStock);
 app.post('/trigger/clear-out-of-stock',                  triggerClearOutOfStock);
 

@@ -2455,6 +2455,91 @@ const handleRecon = async (req, res) => {
   }
 };
 
+// ─── Flow 11B — RSF 2.0 Receiver: BPP sends /recon to BAP ───────────────────
+// BPP initiates reconciliation by sending /recon (RSF 2.0 format) to BAP.
+// BAP validates the request and sends back on_recon. We ACK it at /on_recon.
+// Call: POST /trigger/send-recon-receiver/latest  (or /:order_id)
+const triggerSendReconReceiver = async (req, res) => {
+  try {
+    const orderId = req.params.order_id === 'latest' ? lastConfirmedOrderId : req.params.order_id;
+    const cached  = orderId ? confirmedOrderCache.get(orderId) : null;
+
+    if (!cached) {
+      return res.status(404).json({ error: 'Order not found in cache. Run Flow 1A first.' });
+    }
+
+    const { order, context, tenant } = cached;
+    const config = resolveOndcConfig(tenant);
+    const amount = order.quote?.price?.value || '0.00';
+
+    // Derive RSF 2.0 location from cached RET10 context
+    const cityCode    = context.city || 'std:044';
+    const countryCode = context.country || 'IND';
+
+    // RSF 2.0 context for /recon — must NOT include core_version/country/city string fields
+    const reconCtx = {
+      domain:         'ONDC:NTS10',
+      location:       { country: { code: countryCode }, city: { code: cityCode } },
+      version:        '2.0.0',
+      action:         'recon',
+      transaction_id: context.transaction_id,
+      message_id:     uuidv4(),
+      timestamp:      new Date().toISOString(),
+      bap_id:         context.bap_id,
+      bap_uri:        context.bap_uri,
+      bpp_id:         config.subscriber_id,
+      bpp_uri:        config.subscriber_url,
+      ttl:            'PT30S',
+    };
+
+    const settlementId = uuidv4();
+    const reconOrders = [{
+      id:           order.id,
+      recon_accord: true,
+      settlements:  [{
+        id:                    settlementId,
+        payment_id:            order.payment?.params?.transaction_id || settlementId,
+        status:                'SETTLED',
+        settlement_ref_no:     `REF${Date.now()}`,
+        amount:                amount,
+        commission:            '0.00',
+        withholding_amount:    '0.00',
+        tcs:                   '0.00',
+        tds:                   '0.00',
+        updated_at:            new Date().toISOString(),
+        recon_status:          '01',
+        receiver_recon_status: '01',
+      }],
+    }];
+
+    const payload = { context: reconCtx, message: { orders: reconOrders } };
+    const headers = { 'Content-Type': 'application/json' };
+
+    try {
+      if (config.signing_private_key) {
+        headers['Authorization'] = createAuthHeader(
+          config.signing_private_key,
+          config.subscriber_id,
+          config.unique_key_id,
+          payload
+        );
+      }
+    } catch (e) {
+      logger.error('triggerSendReconReceiver auth header failed:', e.message);
+    }
+
+    const reconUrl = `${context.bap_uri.replace(/\/+$/, '')}/recon`;
+    const resp = await axios.post(reconUrl, payload, { headers, timeout: 30000 });
+    logger.info(`/recon (receiver) → ${reconUrl} [${resp.status}]`, { txn: context.transaction_id, order_id: order.id });
+    pushTxnLog('recon', payload).catch(() => {});
+
+    res.json({ success: true, order_id: order.id, recon_url: reconUrl, status: resp.status, data: resp.data });
+  } catch (err) {
+    logger.error('triggerSendReconReceiver failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 // ─── Flow 11A — Proactive on_recon trigger (BPP as collector/initiator) ──────
 // After order is delivered, trigger BPP to proactively send on_recon to BAP.
 // Call: POST /trigger/send-recon/latest  (or /:order_id)
@@ -2526,6 +2611,7 @@ module.exports = {
   handleIssueStatus,
   handleRecon,
   triggerSendRecon,
+  triggerSendReconReceiver,
   handleACK,
   triggerIssueResolve,
   triggerMerchantUpdate,
