@@ -2483,6 +2483,7 @@ const triggerSendReconReceiver = async (req, res) => {
     const reconOrders = [{
       id:           order.id,
       recon_accord: true,
+      amount:       moneyObj(amount),
       settlements:  [{
         id:                settlementId,
         payment_id:        order.payment?.params?.transaction_id || settlementId,
