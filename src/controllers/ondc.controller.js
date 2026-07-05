@@ -782,7 +782,7 @@ const handleConfirm = async (req, res) => {
             '@ondc/org/settlement_window':            'P1D',
             '@ondc/org/withholding_amount':           '10.00',
             '@ondc/org/settlement_details':           buildSettlementDetails(quote?.price?.value || order.payment?.['@ondc/org/settlement_details']?.[0]?.settlement_amount || '0.00'),
-            status: 'PAID',
+            status: order.payment?.type === 'ON-FULFILLMENT' ? 'NOT-PAID' : 'PAID',
           },
           cancellation_terms: CANCELLATION_TERMS,
           tags:       ORDER_TAGS,
@@ -1526,6 +1526,9 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
     payment: {
       ...order.payment,
       '@ondc/org/settlement_details': buildSettlementDetails(),
+      status: (order.payment?.type === 'ON-FULFILLMENT')
+        ? (fulfillmentState === 'Order-delivered' || orderState === 'Completed' ? 'PAID' : 'NOT-PAID')
+        : 'PAID',
     },
     tags:       ORDER_TAGS,
     created_at: order.created_at || now,
