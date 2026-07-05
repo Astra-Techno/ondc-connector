@@ -1472,9 +1472,11 @@ const triggerMerchantStatus = async (req, res) => {
     const cachedEntry = confirmedOrderCache.get(order_id);
     if (!cachedEntry) return res.status(404).json({ error: 'Order not found in cache' });
 
-    const { order, context } = cachedEntry;
+    const { order, context, vendor: cachedVendor } = cachedEntry;
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    const vendor = cachedVendor || await fetchVendorForOrder(tenant?.id, order.provider?.id).catch(() => null);
 
     // Map shorthand status param to fulfillment/order state pairs
     const STATUS_MAP = {
@@ -1489,23 +1491,7 @@ const triggerMerchantStatus = async (req, res) => {
     const fulfillmentState = mapped?.fulfillmentState || req.body?.state || 'Pending';
     const orderState       = mapped?.orderState       || req.body?.order_state || 'Accepted';
 
-    const now = new Date().toISOString();
-    const statusPayload = {
-      id:           order_id,
-      state:        orderState,
-      provider:     order.provider,
-      items:        order.items,
-      billing:      order.billing,
-      fulfillments: (order.fulfillments || []).map(f => ({
-        ...f,
-        state: { descriptor: { code: fulfillmentState } },
-        tracking: false,
-      })),
-      quote:        order.quote,
-      payment:      order.payment,
-      created_at:   order.created_at || now,
-      updated_at:   now,
-    };
+    const statusPayload = buildStatusPayload(order_id, order, fulfillmentState, orderState, vendor);
 
     await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: statusPayload }, tenant);
     logger.info('Proactive on_status sent', { order_id, fulfillmentState, orderState });
