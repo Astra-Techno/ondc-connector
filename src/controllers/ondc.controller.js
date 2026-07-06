@@ -1272,6 +1272,20 @@ const triggerMerchantReturnUpdate = async (req, res) => {
     // Respond immediately, send callbacks in background
     res.json({ success: true, message: `on_update return sequence started`, steps, order_id });
 
+    // For type 4b: if Order-delivered hasn't fired yet from the auto-sequence, send it now
+    // (user may trigger return before the 45s auto-delay elapses)
+    if (type === '4b' && cachedEntry.currentFulfillmentState !== 'Order-delivered') {
+      try {
+        const deliveredPayload = buildStatusPayload(order_id, order, 'Order-delivered', 'Completed', vendor);
+        await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: deliveredPayload }, tenant);
+        if (cachedEntry) cachedEntry.currentFulfillmentState = 'Order-delivered';
+        logger.info('on_status (Order-delivered) sent before return sequence', { order_id });
+        await new Promise(r => setTimeout(r, 2000));
+      } catch (e) {
+        logger.warn('Failed to send Order-delivered before return sequence:', e.message);
+      }
+    }
+
     const providerName = vendor?.business_name || order.provider?.descriptor?.name || '';
 
     // Get stored return fulfillment from cache (saved by handleUpdate when BAP sent /update)
