@@ -1748,25 +1748,38 @@ const handleInfo = async (req, res) => {
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
 
-    // Fetch vendors to build a basic catalog response
-    let providers = [];
-    try {
-      const vendors = await fetchVendors(tenant.id);
-      providers = (vendors || []).slice(0, 1).map(v => ({
-        id:         String(v.id),
-        descriptor: { name: v.business_name || 'Store', short_desc: v.description || '' },
-        locations:  [{ id: `${v.id}_loc`, gps: v.gps || '12.914082,77.638980' }],
-      }));
-    } catch (e) {
-      logger.warn('handleInfo: vendor fetch failed', e.message);
-    }
-
-    await sendCallback(context.bap_uri, 'on_info', context, {
-      catalog: {
-        'bpp/descriptor': { name: tenant.business_name || 'CottKart' },
-        'bpp/providers':  providers,
+    // on_info returns BPP entity/KYC information (GST, PAN, bank details)
+    const cityCode = process.env.ONDC_CITY_CODE || context?.city || 'std:080';
+    const info = {
+      type: 'SELLER_NP',
+      entity: {
+        gst: {
+          legal_entity_name:  process.env.INFO_GST_LEGAL_NAME   || 'CottKart Private Limited',
+          business_address:   process.env.INFO_GST_ADDRESS       || '123, MG Road, Bengaluru, Karnataka - 560001',
+          city_code:          [cityCode === '*' ? 'std:080' : cityCode],
+          gst_no:             process.env.INFO_GST_NO            || '29AABCT1332L1Z1',
+        },
+        pan: {
+          name_as_per_pan:       process.env.INFO_PAN_NAME        || 'CottKart Private Limited',
+          pan_no:                process.env.INFO_PAN_NO          || 'AABCT1332L',
+          date_of_incorporation: process.env.INFO_DATE_OF_INCORP  || '2020-01-01',
+        },
+        name_of_authorised_signatory:    process.env.INFO_SIGNATORY_NAME    || 'Authorised Signatory',
+        address_of_authorised_signatory: process.env.INFO_SIGNATORY_ADDRESS || '123, MG Road, Bengaluru, Karnataka - 560001',
+        email_id:   process.env.SUPPORT_EMAIL || 'support@cottkart.com',
+        mobile_no:  Number((process.env.SUPPORT_PHONE || '+919999999999').replace(/\D/g, '').slice(-10)),
+        country:    process.env.ONDC_COUNTRY_CODE || 'IND',
+        bank_details: {
+          account_no:       process.env.INFO_BANK_ACCOUNT    || '1234567890',
+          ifsc_code:        process.env.INFO_BANK_IFSC       || 'HDFC0001234',
+          beneficiary_name: process.env.INFO_BANK_BENEFICIARY || 'CottKart Private Limited',
+          bank_name:        process.env.INFO_BANK_NAME       || 'HDFC Bank',
+          branch_name:      process.env.INFO_BANK_BRANCH     || 'MG Road, Bengaluru',
+        },
       },
-    }, tenant);
+    };
+
+    await sendCallback(context.bap_uri, 'on_info', context, { info }, tenant);
   } catch (err) {
     logger.error('handleInfo failed:', err.message);
   }
