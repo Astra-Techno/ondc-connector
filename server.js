@@ -22,6 +22,7 @@ const {
   handleRating,
   handleIssue,
   handleIssueStatus,
+  handleInfo,
   handleRecon,
   triggerSendRecon,
   handleACK,
@@ -218,6 +219,7 @@ app.post('/support',      handleSupport);
 app.post('/rating',       handleRating);
 app.post('/issue',        handleIssue);
 app.post('/issue_status', handleIssueStatus);
+app.post('/info',         handleInfo);
 app.post('/update',       handleUpdate);
 app.post('/recon',        handleRecon);
 
@@ -253,6 +255,7 @@ app.post('/on_support',      handleACK('on_support'));
 app.post('/on_rating',       handleACK('on_rating'));
 app.post('/on_issue',        handleACK('on_issue'));
 app.post('/on_issue_status', handleACK('on_issue_status'));
+app.post('/on_info',         handleACK('on_info'));
 app.post('/on_recon',        handleACK('on_recon'));
 
 // ─── API v1 routes ────────────────────────────────────────────────────────────

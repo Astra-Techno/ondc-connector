@@ -818,6 +818,12 @@ const handleConfirm = async (req, res) => {
 
         for (const step of steps) {
           if (isCancelled()) { logger.info('Auto on_status aborted (order cancelled)', { order_id: order.id }); return; }
+          // Skip if this state was already sent proactively (e.g. by triggerMerchantReturnUpdate for Flow 4B)
+          const currentEntry = confirmedOrderCache.get(order.id);
+          if (step.fulfillmentState === 'Order-delivered' && currentEntry?.currentFulfillmentState === 'Order-delivered') {
+            logger.info('Auto on_status skipping Order-delivered (already sent proactively)', { order_id: order.id });
+            continue;
+          }
           // Each proactive callback must have a unique message_id (Pramaan: "message_id should be unique for each call lifecycle")
           const stepContext = { ...context, message_id: uuidv4() };
           const payload = buildStatusPayload(order.id, order, step.fulfillmentState, step.orderState, vendor);
@@ -1731,6 +1737,41 @@ const handleRating = async (req, res) => {
   }
 };
 
+const handleInfo = async (req, res) => {
+  try {
+    const body    = req.body;
+    const context = body.context;
+    logger.info('ONDC /info received');
+
+    ack(res, context);
+
+    const tenant = await getTenantByBppId(context?.bpp_id);
+    if (!tenant) return;
+
+    // Fetch vendors to build a basic catalog response
+    let providers = [];
+    try {
+      const vendors = await fetchVendors(tenant.id);
+      providers = (vendors || []).slice(0, 1).map(v => ({
+        id:         String(v.id),
+        descriptor: { name: v.business_name || 'Store', short_desc: v.description || '' },
+        locations:  [{ id: `${v.id}_loc`, gps: v.gps || '12.914082,77.638980' }],
+      }));
+    } catch (e) {
+      logger.warn('handleInfo: vendor fetch failed', e.message);
+    }
+
+    await sendCallback(context.bap_uri, 'on_info', context, {
+      catalog: {
+        'bpp/descriptor': { name: tenant.business_name || 'CottKart' },
+        'bpp/providers':  providers,
+      },
+    }, tenant);
+  } catch (err) {
+    logger.error('handleInfo failed:', err.message);
+  }
+};
+
 // ═══ IGM 2.0 HELPERS ════════════════════════════════════════════════════════════
 
 /** Enhance context for IGM 2.0: add location object + version field */
@@ -2610,6 +2651,7 @@ module.exports = {
   handleTrack,
   handleSupport,
   handleRating,
+  handleInfo,
   handleIssue,
   handleIssueStatus,
   handleRecon,
