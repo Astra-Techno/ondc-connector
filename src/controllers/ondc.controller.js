@@ -1156,7 +1156,8 @@ const handleUpdate = async (req, res) => {
           // Flow 4A: if a return was already triggered (via /trigger/merchant-return-update),
           // respond to BAP's payment/refund update with the full return sequence again
           const paymentReturnFl = cachedEntry.returnFulfillment;
-          if (paymentReturnFl) {
+          const lastReturnState = paymentReturnFl?.state?.descriptor?.code;
+          if (paymentReturnFl && lastReturnState !== 'Return_Rejected') {
             logger.info('handleUpdate payment: sending return sequence (Flow 4A refund)', { order_id: order.id });
             const delay = ms => new Promise(r => setTimeout(r, ms));
             for (const returnState of ['Return_Approved', 'Return_Picked', 'Return_Delivered']) {
