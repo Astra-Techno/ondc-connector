@@ -1262,7 +1262,7 @@ const triggerMerchantReturnUpdate = async (req, res) => {
     if (type === '4a') {
       steps = ['Return_Approved', 'Return_Picked', 'Return_Delivered'];
     } else if (type === '4b') {
-      steps = ['Return_Rejected'];
+      steps = ['Return_Initiated', 'Return_Rejected'];
     } else if (state) {
       steps = [state];
     } else {
