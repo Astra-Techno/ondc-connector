@@ -802,7 +802,7 @@ const handleConfirm = async (req, res) => {
       ;(async () => {
         try {
           const lsResult = await searchLogistics(order, context, tenant);
-          await startLogisticsFlow(order, context, tenant, lsResult);
+          await startLogisticsFlow(order, context, tenant, lsResult, vendor);
         } catch (e) {
           logger.warn('Logistics search failed (non-blocking):', e.message);
         }

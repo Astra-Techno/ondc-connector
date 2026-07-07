@@ -28,7 +28,7 @@ const getByLsTxn = (txnId) => {
 };
 
 // Called by handleConfirm after successful retail on_confirm + logistics /search
-const startLogisticsFlow = async (retailOrder, retailContext, tenant, lsSearchResult) => {
+const startLogisticsFlow = async (retailOrder, retailContext, tenant, lsSearchResult, vendor = null) => {
   const { txnId, lsContext } = lsSearchResult;
   const deliveryFl = (retailOrder.fulfillments || []).find(f => f.type === 'Delivery')
     || retailOrder.fulfillments?.[0] || null;
@@ -39,6 +39,7 @@ const startLogisticsFlow = async (retailOrder, retailContext, tenant, lsSearchRe
     retailContext,
     retailOrder,
     tenant,
+    vendor,
     retailDeliveryFl: deliveryFl,
     lspProvider:      null,
     lsOrder:          null,
@@ -175,6 +176,47 @@ const LS_TO_RETAIL_STATE = {
 
 const TERMINAL_STATES = new Set(['Order-delivered', 'Cancelled', 'RTO-Delivered']);
 
+// Build a logistics-relayed fulfillment with all required ONDC fields
+const buildLogisticsRelayFulfillment = (f, vendor, retailState, now) => {
+  const t1h  = new Date(new Date(now).getTime() +  1 * 3600 * 1000).toISOString();
+  const t2h  = new Date(new Date(now).getTime() +  2 * 3600 * 1000).toISOString();
+  const t24h = new Date(new Date(now).getTime() + 24 * 3600 * 1000).toISOString();
+  const t48h = new Date(new Date(now).getTime() + 48 * 3600 * 1000).toISOString();
+  const phone = (vendor?.phone || '9999999999').replace(/^\+91/, '');
+  const gps   = vendor?.gps || '12.914082,77.638980';
+
+  return {
+    ...f,
+    id:       f.id   || 'f1',
+    type:     f.type || 'Delivery',
+    state:    { descriptor: { code: retailState } },
+    tracking: true,
+    '@ondc/org/tracking':      true,
+    '@ondc/org/provider_name': vendor?.business_name || vendor?.name || 'Store',
+    '@ondc/org/category':      f['@ondc/org/category'] || 'Grocery',
+    '@ondc/org/TAT':           f['@ondc/org/TAT']      || 'PT24H',
+    start: f.start || {
+      location: {
+        id:  'l1',
+        gps,
+        descriptor: { name: vendor?.business_name || vendor?.name || 'Store' },
+        address: {
+          locality:  vendor?.address || vendor?.city || 'Location',
+          city:      vendor?.city    || 'Bengaluru',
+          area_code: vendor?.pincode || '560001',
+          state:     vendor?.state   || 'Karnataka',
+        },
+      },
+      time:    { range: { start: t1h, end: t2h }, timestamp: t1h },
+      contact: { phone, email: vendor?.email || process.env.SUPPORT_EMAIL || 'support@store.in' },
+    },
+    end: {
+      ...(f.end || {}),
+      time: f.end?.time || { range: { start: t24h, end: t48h }, timestamp: t48h },
+    },
+  };
+};
+
 /**
  * on_status from LSP — relay as retail on_status to BAP
  */
@@ -190,7 +232,7 @@ const handleLogisticsOnStatus = async (body) => {
   }
   const { orderId, entry } = found;
 
-  const lsOrder      = message?.order;
+  const lsOrder       = message?.order;
   const lsFulfillment = lsOrder?.fulfillments?.[0];
   const lsState       = lsFulfillment?.state?.descriptor?.code || 'Order-delivered';
 
@@ -199,6 +241,7 @@ const handleLogisticsOnStatus = async (body) => {
 
   const now = new Date().toISOString();
   const retailOrder = entry.retailOrder;
+  const vendor = entry.vendor;
 
   // Build retail on_status payload — map logistics fulfillment state to retail
   const statusPayload = {
@@ -209,12 +252,7 @@ const handleLogisticsOnStatus = async (body) => {
     billing:   retailOrder.billing,
     fulfillments: (retailOrder.fulfillments || [{ id: 'f1', type: 'Delivery' }])
       .filter(f => f.type !== 'Cancel')
-      .map(f => ({
-        ...f,
-        state:                { descriptor: { code: retailState } },
-        tracking:             true,
-        '@ondc/org/tracking': true,
-      })),
+      .map(f => buildLogisticsRelayFulfillment(f, vendor, retailState, now)),
     quote:      retailOrder.quote,
     payment:    retailOrder.payment,
     created_at: retailOrder.created_at || now,

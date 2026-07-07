@@ -84,6 +84,10 @@ const searchLogistics = async (retailOrder, retailContext, tenant) => {
       intent: {
         fulfillment: {
           type: 'Delivery',
+          '@ondc/org/linked_order': {
+            id:          retailOrder.id,
+            provider_id: retailOrder.provider?.id || '',
+          },
           start: {
             location: {
               gps:     pickup.location?.gps || '12.914082,77.638980',
@@ -110,6 +114,15 @@ const searchLogistics = async (retailOrder, retailContext, tenant) => {
           },
         },
         payment: { type: 'ON-FULFILLMENT' },
+        tags: [
+          {
+            code: 'linked_order',
+            list: [
+              { code: 'id',          value: retailOrder.id           || '' },
+              { code: 'provider_id', value: retailOrder.provider?.id || '' },
+            ],
+          },
+        ],
         '@ondc/org/payload_details': {
           weight:     { unit: 'Gram', value: weightGrams },
           dimensions: {
