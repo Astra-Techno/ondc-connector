@@ -1,0 +1,268 @@
+// On-Network Logistics — inbound callback handlers (from LSP/Pramaan mock)
+// These arrive at our existing routes (on_search, on_init, on_confirm, on_status, on_track)
+// Differentiated from retail by context.domain === 'nic2004:60232'
+
+const { v4: uuidv4 } = require('uuid');
+const logger = require('../utils/logger');
+const { sendCallback } = require('../services/ondc/order.service');
+const {
+  LOGISTICS_DOMAIN,
+  initLogistics,
+  confirmLogistics,
+  trackLogistics,
+  statusLogistics,
+} = require('../services/logistics/lsp.service');
+
+// ─── In-memory state ──────────────────────────────────────────────────────────
+// retail_order_id → { lsTransactionId, lsContext, retailContext, retailOrder,
+//                     tenant, retailDeliveryFl, lspProvider, lsOrder,
+//                     logisticsOrderId, logisticsConfirmed }
+const logisticsOrderCache = new Map();
+
+// Lookup by logistics transaction_id (used in callbacks which carry ls txn_id)
+const getByLsTxn = (txnId) => {
+  for (const [orderId, entry] of logisticsOrderCache) {
+    if (entry.lsTransactionId === txnId) return { orderId, entry };
+  }
+  return null;
+};
+
+// Called by handleConfirm after successful retail on_confirm + logistics /search
+const startLogisticsFlow = async (retailOrder, retailContext, tenant, lsSearchResult) => {
+  const { txnId, lsContext } = lsSearchResult;
+  const deliveryFl = (retailOrder.fulfillments || []).find(f => f.type === 'Delivery')
+    || retailOrder.fulfillments?.[0] || null;
+
+  logisticsOrderCache.set(retailOrder.id, {
+    lsTransactionId:  txnId,
+    lsContext,
+    retailContext,
+    retailOrder,
+    tenant,
+    retailDeliveryFl: deliveryFl,
+    lspProvider:      null,
+    lsOrder:          null,
+    logisticsOrderId: null,
+    logisticsConfirmed: false,
+  });
+
+  logger.info('Logistics flow started', {
+    retailOrderId: retailOrder.id,
+    lsTxnId: txnId,
+  });
+};
+
+// ─── Inbound callback handlers ────────────────────────────────────────────────
+
+/**
+ * on_search from LSP — pick first provider/item, send /init
+ */
+const handleLogisticsOnSearch = async (body) => {
+  const { context, message } = body;
+  const txnId = context?.transaction_id;
+  logger.info('Logistics on_search received', { txnId, bpp_id: context?.bpp_id });
+
+  const found = getByLsTxn(txnId);
+  if (!found) {
+    logger.warn('Logistics on_search: no cached retail order for ls txn', { txnId });
+    return;
+  }
+  const { orderId, entry } = found;
+
+  // catalog format: bpp/providers or providers
+  const catalog    = message?.catalog;
+  const providers  = catalog?.['bpp/providers'] || catalog?.providers || [];
+  if (!providers.length) {
+    logger.warn('Logistics on_search: empty catalog — no providers', { txnId });
+    return;
+  }
+
+  const provider  = providers[0];
+  const items     = provider?.items || [];
+  const item      = items[0];
+  if (!item) {
+    logger.warn('Logistics on_search: provider has no items', { txnId, providerId: provider.id });
+    return;
+  }
+
+  const fulfillments = provider?.fulfillments || [];
+  const fulfillment  = fulfillments.find(f => f.type === 'Delivery') || fulfillments[0] || {};
+
+  // Update lsContext with LSP's bpp_id/bpp_uri so subsequent calls go to correct LSP
+  const lsContext = {
+    ...entry.lsContext,
+    bpp_id:  context.bpp_id,
+    bpp_uri: context.bpp_uri,
+  };
+  entry.lsContext    = lsContext;
+  entry.lspProvider  = { id: provider.id, item, fulfillment };
+
+  logger.info('Logistics on_search: selected provider', {
+    orderId, providerId: provider.id, itemId: item.id,
+  });
+
+  await initLogistics(
+    { providerId: provider.id, item, fulfillment },
+    lsContext,
+    entry.retailOrder,
+    entry.tenant
+  );
+};
+
+/**
+ * on_init from LSP — save order, send /confirm
+ */
+const handleLogisticsOnInit = async (body) => {
+  const { context, message } = body;
+  const txnId = context?.transaction_id;
+  logger.info('Logistics on_init received', { txnId });
+
+  const found = getByLsTxn(txnId);
+  if (!found) {
+    logger.warn('Logistics on_init: no cached entry for ls txn', { txnId });
+    return;
+  }
+  const { orderId, entry } = found;
+
+  const lsOrder = message?.order;
+  if (!lsOrder) {
+    logger.warn('Logistics on_init: no order in message', { txnId });
+    return;
+  }
+
+  entry.lsOrder = lsOrder;
+  logger.info('Logistics on_init: sending /confirm', { orderId, lsOrderId: lsOrder.id });
+  await confirmLogistics(lsOrder, entry.lsContext, entry.tenant);
+};
+
+/**
+ * on_confirm from LSP — store logistics order id, logistics flow complete
+ */
+const handleLogisticsOnConfirm = async (body) => {
+  const { context, message } = body;
+  const txnId = context?.transaction_id;
+  logger.info('Logistics on_confirm received', { txnId });
+
+  const found = getByLsTxn(txnId);
+  if (!found) {
+    logger.warn('Logistics on_confirm: no cached entry for ls txn', { txnId });
+    return;
+  }
+  const { orderId, entry } = found;
+
+  const lsOrder = message?.order;
+  entry.logisticsOrderId  = lsOrder?.id || entry.lsOrder?.id;
+  entry.logisticsConfirmed = true;
+
+  logger.info('Logistics order confirmed by LSP', {
+    retailOrderId:    orderId,
+    logisticsOrderId: entry.logisticsOrderId,
+    lsTxnId:          txnId,
+  });
+};
+
+// Map logistics fulfillment state → retail fulfillment state
+const LS_TO_RETAIL_STATE = {
+  'Pending':            'Packed',
+  'Agent-assigned':     'Agent-assigned',
+  'Order-picked-up':    'Order-picked-up',
+  'Out-for-delivery':   'Out-for-delivery',
+  'Order-delivered':    'Order-delivered',
+  'RTO-Initiated':      'RTO-Initiated',
+  'RTO-Delivered':      'RTO-Delivered',
+  'Cancelled':          'Cancelled',
+};
+
+const TERMINAL_STATES = new Set(['Order-delivered', 'Cancelled', 'RTO-Delivered']);
+
+/**
+ * on_status from LSP — relay as retail on_status to BAP
+ */
+const handleLogisticsOnStatus = async (body) => {
+  const { context, message } = body;
+  const txnId = context?.transaction_id;
+  logger.info('Logistics on_status received', { txnId });
+
+  const found = getByLsTxn(txnId);
+  if (!found) {
+    logger.warn('Logistics on_status: no cached entry for ls txn', { txnId });
+    return;
+  }
+  const { orderId, entry } = found;
+
+  const lsOrder      = message?.order;
+  const lsFulfillment = lsOrder?.fulfillments?.[0];
+  const lsState       = lsFulfillment?.state?.descriptor?.code || 'Order-delivered';
+
+  const retailState = LS_TO_RETAIL_STATE[lsState] || lsState;
+  const orderState  = TERMINAL_STATES.has(retailState) ? 'Completed' : 'In-progress';
+
+  const now = new Date().toISOString();
+  const retailOrder = entry.retailOrder;
+
+  // Build retail on_status payload — map logistics fulfillment state to retail
+  const statusPayload = {
+    id:    orderId,
+    state: orderState,
+    provider:  retailOrder.provider,
+    items:     retailOrder.items,
+    billing:   retailOrder.billing,
+    fulfillments: (retailOrder.fulfillments || [{ id: 'f1', type: 'Delivery' }])
+      .filter(f => f.type !== 'Cancel')
+      .map(f => ({
+        ...f,
+        state:                { descriptor: { code: retailState } },
+        tracking:             true,
+        '@ondc/org/tracking': true,
+      })),
+    quote:      retailOrder.quote,
+    payment:    retailOrder.payment,
+    created_at: retailOrder.created_at || now,
+    updated_at: now,
+  };
+
+  const retailCtx = { ...entry.retailContext, message_id: uuidv4() };
+  await sendCallback(retailCtx.bap_uri, 'on_status', retailCtx, { order: statusPayload }, entry.tenant);
+  logger.info('Retail on_status relayed from logistics', { orderId, retailState, orderState });
+};
+
+/**
+ * on_track from LSP — log, relay tracking URL to retail if present
+ */
+const handleLogisticsOnTrack = async (body) => {
+  const { context, message } = body;
+  const txnId = context?.transaction_id;
+  logger.info('Logistics on_track received', { txnId, url: message?.tracking?.url });
+  // Tracking URL can be surfaced to retail BAP via on_track if needed
+};
+
+/**
+ * Called when retail /track is received — relay /track to logistics LSP
+ */
+const relayTrackToLogistics = async (retailOrderId, retailContext) => {
+  const entry = logisticsOrderCache.get(retailOrderId);
+  if (!entry?.logisticsConfirmed) return;
+  await trackLogistics(entry.logisticsOrderId, entry.lsContext, entry.tenant);
+};
+
+/**
+ * Called when retail /status is received — relay /status to logistics LSP
+ */
+const relayStatusToLogistics = async (retailOrderId) => {
+  const entry = logisticsOrderCache.get(retailOrderId);
+  if (!entry?.logisticsConfirmed) return;
+  await statusLogistics(entry.logisticsOrderId, entry.lsContext, entry.tenant);
+};
+
+module.exports = {
+  LOGISTICS_DOMAIN,
+  logisticsOrderCache,
+  startLogisticsFlow,
+  handleLogisticsOnSearch,
+  handleLogisticsOnInit,
+  handleLogisticsOnConfirm,
+  handleLogisticsOnStatus,
+  handleLogisticsOnTrack,
+  relayTrackToLogistics,
+  relayStatusToLogistics,
+};

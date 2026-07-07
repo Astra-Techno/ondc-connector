@@ -36,6 +36,16 @@ const {
   triggerSetOutOfStock,
   triggerClearOutOfStock,
 } = require('./src/controllers/ondc.controller');
+const {
+  LOGISTICS_DOMAIN,
+  handleLogisticsOnSearch,
+  handleLogisticsOnInit,
+  handleLogisticsOnConfirm,
+  handleLogisticsOnStatus,
+  handleLogisticsOnTrack,
+  relayTrackToLogistics,
+  relayStatusToLogistics,
+} = require('./src/controllers/logistics.controller');
 
 const app  = express();
 const PORT = process.env.PORT || 4000;
@@ -242,14 +252,33 @@ app.post('/catalog_rejection', (req, res) => {
   res.json(buildAckBody(context, 'ACK'));
 });
 
-// Callbacks we may receive from BAP (just ACK)
-app.post('/on_search',       handleACK('on_search'));
+// ─── Logistics-aware callback dispatcher ──────────────────────────────────────
+// When context.domain is logistics, dispatch to logistics handler then ACK.
+// Otherwise fall through to retail handleACK.
+const withLogistics = (action, logisticsHandler, retailHandler) => async (req, res, next) => {
+  const domain = req.body?.context?.domain;
+  if (domain === LOGISTICS_DOMAIN && logisticsHandler) {
+    // ACK immediately, process async
+    const ackBody = buildAckBody(req.body?.context);
+    res.json(ackBody);
+    setImmediate(() =>
+      logisticsHandler(req.body).catch(e =>
+        logger.error(`Logistics ${action} handler failed:`, e.message)
+      )
+    );
+  } else {
+    return retailHandler(req, res, next);
+  }
+};
+
+// Callbacks we may receive from BAP or LSP
+app.post('/on_search',       withLogistics('on_search',  handleLogisticsOnSearch,  handleACK('on_search')));
 app.post('/on_select',       handleACK('on_select'));
-app.post('/on_init',         handleACK('on_init'));
-app.post('/on_confirm',      handleACK('on_confirm'));
-app.post('/on_status',       handleACK('on_status'));
+app.post('/on_init',         withLogistics('on_init',    handleLogisticsOnInit,    handleACK('on_init')));
+app.post('/on_confirm',      withLogistics('on_confirm', handleLogisticsOnConfirm, handleACK('on_confirm')));
+app.post('/on_status',       withLogistics('on_status',  handleLogisticsOnStatus,  handleACK('on_status')));
 app.post('/on_cancel',       handleACK('on_cancel'));
-app.post('/on_track',        handleACK('on_track'));
+app.post('/on_track',        withLogistics('on_track',   handleLogisticsOnTrack,   handleACK('on_track')));
 app.post('/on_update',       handleACK('on_update'));
 app.post('/on_support',      handleACK('on_support'));
 app.post('/on_rating',       handleACK('on_rating'));

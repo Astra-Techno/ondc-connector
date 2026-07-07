@@ -16,6 +16,8 @@ const cottKartOrder = require('../services/cloudkart/order.service');
 const { ack, nack, buildAckBody } = require('../utils/response');
 const { pushTxnLog } = require('../services/ondc/logPublisher.service');
 const { createAuthHeader } = require('../utils/crypto');
+const { searchLogistics } = require('../services/logistics/lsp.service');
+const { startLogisticsFlow, relayTrackToLogistics, relayStatusToLogistics } = require('./logistics.controller');
 
 // In-memory cache: order_id → { order, context } (for on_status/on_update/on_cancel callbacks)
 const confirmedOrderCache = new Map();
@@ -796,6 +798,16 @@ const handleConfirm = async (req, res) => {
       const cached = confirmedOrderCache.get(order.id);
       if (cached) cached.confirmTimestamp = confirmUpdatedAt;
 
+      // Trigger On-Network Logistics search (Flow A1) — fire-and-forget
+      ;(async () => {
+        try {
+          const lsResult = await searchLogistics(order, context, tenant);
+          await startLogisticsFlow(order, context, tenant, lsResult);
+        } catch (e) {
+          logger.warn('Logistics search failed (non-blocking):', e.message);
+        }
+      })();
+
       // Auto-trigger on_status sequence after on_confirm (for Pramaan certification)
       // Sends: Packed → Agent-assigned → Order-picked-up → Out-for-delivery → Order-delivered
       // with 2s delay between each. Flows that send /cancel (3B) will interrupt naturally.
@@ -939,6 +951,9 @@ const handleStatus = async (req, res) => {
       await sendCallback(context.bap_uri, 'on_status', context, {
         order: orderPayload,
       }, tenant);
+
+      // Relay /status to logistics LSP (Flow A1) — fire-and-forget
+      relayStatusToLogistics(ondcOrderId).catch(() => {});
     } catch (err) {
       logger.error('handleStatus processing failed:', err.message);
     }
@@ -1709,6 +1724,9 @@ const handleTrack = async (req, res) => {
           tags: ORDER_TAGS,
         },
       }, tenant);
+
+      // Relay /track to logistics LSP (Flow A1) — fire-and-forget
+      relayTrackToLogistics(order_id, context).catch(() => {});
     } catch (err) {
       logger.error('handleTrack processing failed:', err.message);
     }
