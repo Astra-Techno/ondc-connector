@@ -255,8 +255,9 @@ const handleLogisticsOnStatus = async (body) => {
       .map(f => buildLogisticsRelayFulfillment(f, vendor, retailState, now)),
     quote:      retailOrder.quote,
     payment:    retailOrder.payment,
+    tags:       retailOrder.tags || [],
     created_at: retailOrder.created_at || now,
-    updated_at: now,
+    updated_at: retailOrder.updated_at || now,
   };
 
   const retailCtx = { ...entry.retailContext, message_id: uuidv4() };
