@@ -1153,46 +1153,64 @@ const handleUpdate = async (req, res) => {
 
         // payment = Flow 3A settlement OR Flow 4A refund response; fulfillment/item = Flow 4A/4B return sequence
         if (update_target === 'payment') {
-          // Flow 4A: if a return was already triggered (via /trigger/merchant-return-update),
-          // respond to BAP's payment/refund update with the full return sequence again
+          // Determine which return sequence to send based on last return state
+          // Flow 4A:           last=Return_Delivered → resend Return_Approved+Picked+Delivered
+          // Flow 4B instance1: last=Return_Rejected  → send Return_Approved+Picked+Delivered
+          // Flow 4B instance2: last=Return_Picked    → send Return_Delivered ONLY (no re-send)
+          // Flow 3A:           no returnFulfillment  → ACK only
           const paymentReturnFl = cachedEntry.returnFulfillment;
-          if (paymentReturnFl) {
-            logger.info('handleUpdate payment: sending return sequence (Flow 4A/4B refund)', { order_id: order.id });
+          const lastReturnState = paymentReturnFl?.state?.descriptor?.code;
+
+          const buildPaymentReturnPayload = (returnState) => {
+            const returnFl = { ...paymentReturnFl, state: { descriptor: { code: returnState } } };
+            const nowR = new Date().toISOString();
+            const deliveryFls = (confirmedOrder.fulfillments || [{ id: 'f1', type: 'Delivery' }])
+              .filter(f => f.type !== 'Return' && f.type !== 'Cancel')
+              .map(f => buildFulfillmentWithLocation(f, vendor, 'Order-delivered', nowR));
+            return {
+              id:       fullOrder.id,
+              state:    'Completed',
+              provider: fullOrder.provider,
+              items:    fullOrder.items,
+              billing:  fullOrder.billing,
+              fulfillments: [...deliveryFls, returnFl],
+              quote:    fullOrder.quote,
+              payment:  { ...(fullOrder.payment || {}), status: 'PAID' },
+              tags:     ORDER_TAGS,
+              created_at: fullOrder.created_at || new Date().toISOString(),
+              updated_at: confirmTimestamp || fullOrder.updated_at || new Date().toISOString(),
+            };
+          };
+
+          if (paymentReturnFl && (lastReturnState === 'Return_Rejected' || lastReturnState === 'Return_Delivered')) {
+            // Flow 4B instance1 (rejected) or Flow 4A: send Return_Approved → Picked → Delivered
+            logger.info(`handleUpdate payment: sending full return sequence (last=${lastReturnState})`, { order_id: order.id });
             const delay = ms => new Promise(r => setTimeout(r, ms));
             for (const returnState of ['Return_Approved', 'Return_Picked', 'Return_Delivered']) {
-              const nowR = new Date().toISOString();
-              const returnFl = { ...paymentReturnFl, state: { descriptor: { code: returnState } } };
-              const deliveryFls = (confirmedOrder.fulfillments || [{ id: 'f1', type: 'Delivery' }])
-                .filter(f => f.type !== 'Return' && f.type !== 'Cancel')
-                .map(f => buildFulfillmentWithLocation(f, vendor, 'Order-delivered', nowR));
-              const rPayload = {
-                id:       fullOrder.id,
-                state:    'Completed',
-                provider: fullOrder.provider,
-                items:    fullOrder.items,
-                billing:  fullOrder.billing,
-                fulfillments: [...deliveryFls, returnFl],
-                quote:    fullOrder.quote,
-                payment:  { ...(fullOrder.payment || {}), status: 'PAID' },
-                tags:     ORDER_TAGS,
-                created_at: fullOrder.created_at || nowR,
-                updated_at: confirmTimestamp || fullOrder.updated_at || nowR,
-              };
               const msgId = uuidv4();
-              await sendCallback(fullContext.bap_uri, 'on_update', { ...fullContext, message_id: msgId }, { order: rPayload }, tenant);
+              await sendCallback(fullContext.bap_uri, 'on_update', { ...fullContext, message_id: msgId }, { order: buildPaymentReturnPayload(returnState) }, tenant);
               logger.info('on_update (payment return seq) sent', { order_id: order.id, returnState });
-              cachedEntry.returnFulfillment = returnFl;
+              cachedEntry.returnFulfillment = { ...paymentReturnFl, state: { descriptor: { code: returnState } } };
               await delay(2000);
             }
+          } else if (paymentReturnFl && lastReturnState === 'Return_Picked') {
+            // Flow 4B instance2 (approved path): send Return_Delivered ONLY after /update(payment)
+            logger.info('handleUpdate payment: sending Return_Delivered only (Flow 4B approved path)', { order_id: order.id });
+            const msgId = uuidv4();
+            await sendCallback(fullContext.bap_uri, 'on_update', { ...fullContext, message_id: msgId }, { order: buildPaymentReturnPayload('Return_Delivered') }, tenant);
+            logger.info('on_update (Return_Delivered) sent', { order_id: order.id });
+            cachedEntry.returnFulfillment = { ...paymentReturnFl, state: { descriptor: { code: 'Return_Delivered' } } };
           } else {
-            logger.info('handleUpdate payment: ACK only (Flow 3A settlement)', { order_id: order.id });
+            logger.info('handleUpdate payment: ACK only (Flow 3A settlement or no pending return)', { order_id: order.id });
           }
 
         } else if (update_target === 'fulfillment' || update_target === 'item') {
-          // Return request from BAP — send ONLY Return_Initiated; remaining states via /trigger/merchant-return-update
+          // Return request from BAP (Flow 4B instance2 approved path):
+          // BAP sends /update(fulfillment=Return) → BPP sends Return_Initiated, then proactively
+          // sends Return_Approved → Return_Picked. Return_Delivered sent on /update(payment).
           const bapReturnFl = bapReturnFulfillments[0] || null;
 
-          // Store return fulfillment in cache for triggerMerchantReturnUpdate
+          // Store return fulfillment in cache
           const cached = confirmedOrderCache.get(fullOrder.id);
           if (cached) {
             cached.returnFulfillment = buildReturnFulfillment('Return_Initiated', bapReturnFl);
@@ -1200,9 +1218,25 @@ const handleUpdate = async (req, res) => {
           }
 
           const payload = buildReturnPayload('Return_Initiated', bapReturnFl);
-          // Use incoming message_id for the direct Return_Initiated response
           await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: payload }, tenant);
           logger.info('on_update (Return_Initiated) sent OK', { order_id: fullOrder.id });
+
+          // Auto-send Return_Approved → Return_Picked proactively (seller approves the return)
+          // Return_Delivered will be sent when BAP sends /update(payment)
+          ;(async () => {
+            const delay = ms => new Promise(r => setTimeout(r, ms));
+            const cachedRef = confirmedOrderCache.get(fullOrder.id);
+            for (const returnState of ['Return_Approved', 'Return_Picked']) {
+              await delay(2000);
+              const statePayload = buildReturnPayload(returnState, bapReturnFl);
+              const msgId = uuidv4();
+              await sendCallback(fullContext.bap_uri, 'on_update', { ...fullContext, message_id: msgId }, { order: statePayload }, tenant);
+              logger.info(`on_update (${returnState}) auto-sent after fulfillment update`, { order_id: fullOrder.id });
+              if (cachedRef?.returnFulfillment) {
+                cachedRef.returnFulfillment = { ...cachedRef.returnFulfillment, state: { descriptor: { code: returnState } } };
+              }
+            }
+          })();
         }
 
         logger.info('handleUpdate complete', { order_id: fullOrder.id, update_target });
