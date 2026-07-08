@@ -869,9 +869,10 @@ const handleConfirm = async (req, res) => {
             continue;
           }
 
-          // For confirmed logistics orders: skip Order-picked-up + Out-for-delivery (LSP relay sends these)
+          // For confirmed logistics orders: skip Order-picked-up, Out-for-delivery, Order-delivered
+          // (LSP relay sends these — relay is no longer suppressed for Order-delivered per Flow A2 requirement)
           const lsEntry = logisticsOrderCache.get(order.id);
-          if (lsEntry?.logisticsConfirmed && ['Order-picked-up', 'Out-for-delivery'].includes(step.fulfillmentState)) {
+          if (lsEntry?.logisticsConfirmed && ['Order-picked-up', 'Out-for-delivery', 'Order-delivered'].includes(step.fulfillmentState)) {
             await delay(step.delayAfter);
             continue;
           }

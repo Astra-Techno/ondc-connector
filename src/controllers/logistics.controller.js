@@ -243,12 +243,10 @@ const handleLogisticsOnStatus = async (body) => {
   const retailState = LS_TO_RETAIL_STATE[lsState] || lsState;
   const orderState  = TERMINAL_STATES.has(retailState) ? 'Completed' : 'In-progress';
 
-  // Suppress Order-delivered relay from LSP — auto-status sequence handles this
-  // after the 45s Out-for-delivery window (which is the Flow A2 cancel window).
+  // Track that LSP has delivered (used to skip auto-status Order-delivered for logistics orders)
   if (retailState === 'Order-delivered') {
     entry.logisticsDelivered = true;
-    logger.info('Logistics Order-delivered suppressed (auto-status will relay after 45s window)', { orderId });
-    return;
+    logger.info('Logistics Order-delivered received — relaying to BAP (Pramaan Flow A2 requires it before cancel)', { orderId });
   }
 
   // If merchant already cancelled, skip non-RTO states (RTO-Initiated/RTO-Delivered still relay)
