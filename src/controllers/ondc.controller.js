@@ -2421,10 +2421,11 @@ const handleIssueStatus = async (req, res) => {
   try {
     const body     = req.body;
     const context  = body.context;
-    const issue_id = body.message?.issue_id;
-    logger.info('ONDC /issue_status received', { issue_id });
+    // Support both message.issue_id (standard) and message.issue.id (some versions)
+    const issue_id = body.message?.issue_id || body.message?.issue?.id;
+    logger.info('ONDC /issue_status received', { issue_id, txn: context?.transaction_id });
 
-    ack(res, context);
+    await ack(res, context);
 
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
@@ -2451,8 +2452,8 @@ const handleIssueStatus = async (req, res) => {
 
     // Get original issue from cache for IGM 2.0 echo fields
     const cached    = issue_id ? issueCache.get(issue_id) : null;
-    const origIssue = cached?.issue    || { id: issue_id, actions: [], actors: [], refs: [] };
-    const origCtx   = cached?.context  || context;
+    const origIssue = cached?.issue || { id: issue_id, actions: [], actors: [], refs: [] };
+    const origCtx   = cached?.context || context;
 
     // Use cache stage (>=5 = Resolution Provided sent) as fallback for DB-resolved check
     const isResolved = dbStatus === 'RESOLVED' || (cached?.stage || 0) >= 5;
@@ -2489,12 +2490,87 @@ const handleIssueStatus = async (req, res) => {
       },
     } : {};
 
+    // Build response context: merge origCtx (for issue-level fields) with current request context
+    // Prefer current /issue_status context for routing (bap_uri, transaction_id) so Pramaan
+    // can match on_issue_status (II) to the /issue_status test step (Flow A3).
+    const responseCtx = buildIgmContext({
+      ...origCtx,
+      bap_uri:        context.bap_uri        || origCtx.bap_uri,
+      transaction_id: context.transaction_id || origCtx.transaction_id,
+    });
+
+    const callbackUri = context.bap_uri || origCtx.bap_uri;
+
+    logger.info('Sending on_issue_status', { issue_id, isResolved, callbackUri, txn: responseCtx.transaction_id });
+
     await sendCallback(
-      origCtx.bap_uri || context.bap_uri, 'on_issue_status',
-      { ...buildIgmContext(origCtx || context), message_id: uuidv4() },
+      callbackUri, 'on_issue_status',
+      { ...responseCtx, message_id: uuidv4() },
       buildIgmMessage(origIssue, origCtx || context, tenant.subscriber_id, allBppActions, isResolved ? 'CLOSED' : 'OPEN', extraFields),
       tenant
     );
+
+    logger.info('on_issue_status sent', { issue_id, status: isResolved ? 'CLOSED' : 'OPEN' });
+
+    // For auto-resolved flows (Pramaan A3): if not yet resolved when /issue_status arrived,
+    // send a follow-up CLOSED once auto-chain completes (~12s from now).
+    // This ensures on_issue_status (II) is always sent as CLOSED even if BAP asks early.
+    if (!isResolved) {
+      setTimeout(async () => {
+        try {
+          const latestCached = issue_id ? issueCache.get(issue_id) : null;
+          let latestDbResolved = false;
+          try {
+            const [latestRows] = await pool.query(
+              `SELECT status FROM issue_grievances WHERE issue_id = ? AND tenant_id = ?`,
+              [issue_id, tenant.id]
+            );
+            latestDbResolved = latestRows.length && (latestRows[0].status || '').toUpperCase() === 'RESOLVED';
+          } catch (e) {}
+
+          if (!latestDbResolved && (latestCached?.stage || 0) < 5) {
+            logger.info('on_issue_status deferred follow-up: still not resolved, skipping', { issue_id });
+            return;
+          }
+
+          const followUpAction = makeBppIgmAction('RESOLVED', 'Issue resolved and closed', updatedBy, new Date().toISOString());
+          const followUpActions = [...(latestCached?.bppActions || allBppActions), followUpAction];
+          const followUpRemarks = resolution || 'Issue has been resolved';
+          const followUpExtra = {
+            resolution: {
+              network_issue_id:   issue_id,
+              short_desc:         followUpRemarks,
+              long_desc:          followUpRemarks,
+              resolution_remarks: followUpRemarks,
+              resolution_action:  'RESOLVE',
+              action_triggered:   latestCached?.resolveAction || cached?.resolveAction || 'REFUND',
+              refund_amount:      '0.00',
+            },
+            resolution_provider: {
+              respondent_info: {
+                type:         'TRANSACTION-COUNTERPARTY-NP',
+                organization: updatedBy,
+                resolution_support: {
+                  respondentEmail: process.env.SUPPORT_EMAIL || '',
+                  contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+                  gros: [],
+                  chat_link: '',
+                },
+              },
+            },
+          };
+          await sendCallback(
+            callbackUri, 'on_issue_status',
+            { ...responseCtx, message_id: uuidv4() },
+            buildIgmMessage(origIssue, origCtx || context, tenant.subscriber_id, followUpActions, 'CLOSED', followUpExtra),
+            tenant
+          );
+          logger.info('on_issue_status deferred CLOSED sent (A3 follow-up)', { issue_id });
+        } catch (e) {
+          logger.warn('on_issue_status deferred follow-up failed:', e.message);
+        }
+      }, 12000);
+    }
   } catch (err) {
     logger.error('handleIssueStatus failed:', err.message);
   }
