@@ -1593,14 +1593,14 @@ const triggerMerchantStatus = async (req, res) => {
 // Helper: build an on_status payload for a given fulfillment state + order state
 const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendor) => {
   const now = new Date().toISOString();
-  const isRto = fulfillmentState === 'RTO-Delivered';
+  // RTO states: Delivery stays at Out-for-delivery + separate RTO fulfillment
+  const isRto = fulfillmentState === 'RTO-Delivered' || fulfillmentState === 'RTO-Initiated';
 
-  // For RTO-Delivered: Delivery stays at Out-for-delivery + RTO fulfillment with RTO-Delivered
   const deliveryFulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
     buildFulfillmentWithLocation(f, vendor, isRto ? 'Out-for-delivery' : fulfillmentState, now)
   );
   const fulfillments = isRto
-    ? [...deliveryFulfillments, buildRtoFulfillment('RTO-Delivered', '011')]
+    ? [...deliveryFulfillments, buildRtoFulfillment(fulfillmentState, '011')]
     : deliveryFulfillments;
 
   return {
@@ -1660,13 +1660,21 @@ const triggerMerchantStatusSequence = async (req, res) => {
         { fulfillmentState: 'Order-picked-up',  orderState: 'In-progress' },
         { fulfillmentState: 'Out-for-delivery', orderState: 'In-progress' },
       ],
+      'rto_initiated': [
+        { fulfillmentState: 'RTO-Initiated', orderState: 'Cancelled' },
+      ],
       'rto_delivered': [
+        { fulfillmentState: 'RTO-Delivered', orderState: 'Cancelled' },
+      ],
+      // Flow A2: RTO sequence after on_cancel (Initiated → Delivered)
+      'a2': [
+        { fulfillmentState: 'RTO-Initiated', orderState: 'Cancelled' },
         { fulfillmentState: 'RTO-Delivered', orderState: 'Cancelled' },
       ],
     };
 
     const steps = sequences[type];
-    if (!steps) return res.status(400).json({ error: `Unknown type: ${type}. Use 3a, 3b, or rto_delivered` });
+    if (!steps) return res.status(400).json({ error: `Unknown type: ${type}. Use 3a, 3b, rto_initiated, rto_delivered, or a2` });
 
     // Respond immediately, send callbacks in background
     res.json({ success: true, message: `on_status sequence (${type}) started`, steps: steps.length, order_id });
