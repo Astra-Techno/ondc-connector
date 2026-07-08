@@ -2072,13 +2072,16 @@ const handleIssue = async (req, res) => {
       issueCache.set(issueId, { ...closeCached, stage: 5, bppActions: bppActClose });
 
       const igmCtxClose = buildIgmContext(closeCached.context || context);
+      const closeRemarks = 'Issue has been closed and resolution confirmed';
       await sendCallback(
         (closeCached.context || context).bap_uri, 'on_issue',
         { ...igmCtxClose, message_id: uuidv4() },
         buildIgmMessage(closeCached.issue || issue, closeCached.context || context, tenant.subscriber_id, bppActClose, 'CLOSED', {
           resolution: {
             network_issue_id:   issueId,
-            resolution_remarks: 'Issue has been closed and resolution confirmed',
+            short_desc:         closeRemarks,
+            long_desc:          closeRemarks,
+            resolution_remarks: closeRemarks,
             resolution_action:  'RESOLVE',
             action_triggered:   closeCached.resolveAction || 'REFUND',
             refund_amount:      '0.00',
@@ -2087,6 +2090,37 @@ const handleIssue = async (req, res) => {
         tenant
       );
       logger.info('on_issue (CLOSED — Resolution Provided) sent for Flow 6F', { issue_id: issueId });
+
+      // Also send on_issue_status(CLOSED) — required by Pramaan A3 as "(II)"
+      await sendCallback(
+        (closeCached.context || context).bap_uri, 'on_issue_status',
+        { ...igmCtxClose, message_id: uuidv4() },
+        buildIgmMessage(closeCached.issue || issue, closeCached.context || context, tenant.subscriber_id, bppActClose, 'CLOSED', {
+          resolution: {
+            network_issue_id:   issueId,
+            short_desc:         closeRemarks,
+            long_desc:          closeRemarks,
+            resolution_remarks: closeRemarks,
+            resolution_action:  'RESOLVE',
+            action_triggered:   closeCached.resolveAction || 'REFUND',
+            refund_amount:      '0.00',
+          },
+          resolution_provider: {
+            respondent_info: {
+              type:         'TRANSACTION-COUNTERPARTY-NP',
+              organization: closeUpdatedBy,
+              resolution_support: {
+                respondentEmail: process.env.SUPPORT_EMAIL || '',
+                contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+                gros: [],
+                chat_link: '',
+              },
+            },
+          },
+        }),
+        tenant
+      );
+      logger.info('on_issue_status (CLOSED) sent after BAP closure — Flow A3 (II)', { issue_id: issueId });
       return;
     }
 
