@@ -808,6 +808,25 @@ const handleConfirm = async (req, res) => {
       // Trigger On-Network Logistics search (Flow A1) — fire-and-forget
       ;(async () => {
         try {
+          const lsDelay = ms => new Promise(r => setTimeout(r, ms));
+          // Send Packed + Agent-assigned immediately (before LSP mock relay fires at ~5s)
+          // Auto-status skips these for logistics orders (lsEntry exists in cache after startLogisticsFlow)
+          const lsCtx1 = { ...context, message_id: uuidv4() };
+          const packedPayload = buildStatusPayload(order.id, order, 'Packed', 'In-progress', vendor);
+          await sendCallback(context.bap_uri, 'on_status', lsCtx1, { order: packedPayload }, tenant);
+          const ce1 = confirmedOrderCache.get(order.id);
+          if (ce1) ce1.currentFulfillmentState = 'Packed';
+          logger.info('Logistics: Packed on_status sent', { order_id: order.id });
+          await lsDelay(2000);
+
+          const lsCtx2 = { ...context, message_id: uuidv4() };
+          const agentPayload = buildStatusPayload(order.id, order, 'Agent-assigned', 'In-progress', vendor);
+          await sendCallback(context.bap_uri, 'on_status', lsCtx2, { order: agentPayload }, tenant);
+          const ce2 = confirmedOrderCache.get(order.id);
+          if (ce2) ce2.currentFulfillmentState = 'Agent-assigned';
+          logger.info('Logistics: Agent-assigned on_status sent', { order_id: order.id });
+          await lsDelay(1000);
+
           const lsResult = await searchLogistics(order, context, tenant);
           await startLogisticsFlow(order, context, tenant, lsResult, vendor);
         } catch (e) {
@@ -838,10 +857,21 @@ const handleConfirm = async (req, res) => {
         for (const step of steps) {
           if (isCancelled()) { logger.info('Auto on_status aborted (order cancelled)', { order_id: order.id }); return; }
 
-          // For logistics orders: skip intermediate states (logistics relay sends them).
-          // This preserves the 45s Out-for-delivery wait as the cancel window for Flow A2.
+          // Skip states already sent early by logistics block (Packed, Agent-assigned at T=0s)
+          // Works for both retail and logistics orders.
+          const DELIVERY_ORDER = ['Packed', 'Agent-assigned', 'Order-picked-up', 'Out-for-delivery', 'Order-delivered'];
+          const currentEntry2 = confirmedOrderCache.get(order.id);
+          const lastSentIdx = DELIVERY_ORDER.indexOf(currentEntry2?.currentFulfillmentState || '');
+          const stepIdx = DELIVERY_ORDER.indexOf(step.fulfillmentState);
+          if (stepIdx !== -1 && stepIdx <= lastSentIdx) {
+            logger.info('Auto on_status: skipping already-sent state', { order_id: order.id, state: step.fulfillmentState });
+            await delay(step.delayAfter);
+            continue;
+          }
+
+          // For confirmed logistics orders: skip Order-picked-up + Out-for-delivery (LSP relay sends these)
           const lsEntry = logisticsOrderCache.get(order.id);
-          if (lsEntry && step.fulfillmentState !== 'Order-delivered') {
+          if (lsEntry?.logisticsConfirmed && ['Order-picked-up', 'Out-for-delivery'].includes(step.fulfillmentState)) {
             await delay(step.delayAfter);
             continue;
           }
@@ -906,7 +936,10 @@ const handleStatus = async (req, res) => {
       let currentStatus = dbOrder?.status || 'Accepted';
       logger.info('handleStatus order lookup', { ondcOrderId, found: !!dbOrder, status: currentStatus });
 
-      if (dbOrder?.cottkart_order_id) {
+      // If order was cancelled in-memory (triggerMerchantCancel), DB may lag — override immediately
+      if (cancelledOrders.has(ondcOrderId)) {
+        currentStatus = 'Cancelled';
+      } else if (dbOrder?.cottkart_order_id) {
         try {
           const ckStatus = await cottKartOrder.fetchOrderStatus(dbOrder.cottkart_order_id);
           if (ckStatus?.status && ckStatus.status !== currentStatus) {
@@ -918,6 +951,23 @@ const handleStatus = async (req, res) => {
         }
       }
 
+      // Build full order object — use cached confirm order if available
+      const cachedEntry = confirmedOrderCache.get(ondcOrderId) || null;
+
+      // For cancelled orders: use buildStatusPayload with last known fulfillment state
+      // (handles RTO fulfillment structure correctly)
+      if (currentStatus === 'Cancelled') {
+        const lastState = cachedEntry?.currentFulfillmentState || 'Cancelled';
+        // RTO states need special dual-fulfillment structure
+        const isRtoState = ['RTO-Initiated', 'RTO-Delivered'].includes(lastState);
+        const cancelFulfillmentState = isRtoState ? lastState : 'Cancelled';
+        const statusPayload = buildStatusPayload(ondcOrderId, cachedEntry?.order || dbOrder, cancelFulfillmentState, 'Cancelled', cachedEntry?.vendor || null);
+        await sendCallback(context.bap_uri, 'on_status', context, { order: statusPayload }, tenant);
+        relayStatusToLogistics(ondcOrderId).catch(() => {});
+        logger.info('handleStatus: cancelled order response', { ondcOrderId, lastState: cancelFulfillmentState });
+        return;
+      }
+
       // Map order state → valid ONDC fulfillment state code
       const fulfillmentStateMap = {
         'Created':     'Pending',
@@ -927,9 +977,6 @@ const handleStatus = async (req, res) => {
         'Cancelled':   'Cancelled',
       };
       const fulfillmentCode = fulfillmentStateMap[currentStatus] || 'Pending';
-
-      // Build full order object — use cached confirm order if available
-      const cachedEntry = confirmedOrderCache.get(ondcOrderId) || null;
       const cachedOrder = cachedEntry?.order || null;
       const cachedVendor = cachedEntry?.vendor || null;
       const vendor = cachedVendor || (tenant.id
@@ -1493,6 +1540,8 @@ const triggerMerchantCancel = async (req, res) => {
 
     // Signal auto-sequence to stop for this order (same as handleCancel)
     cancelledOrders.add(order_id);
+    // Persist Cancelled to DB so handleStatus returns correct state after server restart
+    updateOrderStatus(order_id, 'Cancelled').catch(e => logger.warn('DB cancel update failed (non-blocking):', e.message));
     // For Flow A2 (logistics RTO): suppress logistics Order-delivered relay + cancel LSP order
     markRetailOrderCancelled(order_id);
     cancelLogisticsOrder(order_id).catch(e => logger.warn("Logistics cancel failed (non-blocking):", e.message));
@@ -1684,6 +1733,9 @@ const triggerMerchantStatusSequence = async (req, res) => {
     for (const step of steps) {
       const payload = buildStatusPayload(order_id, order, step.fulfillmentState, step.orderState, vendor);
       await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: payload }, tenant);
+      // Track last sent state so handleStatus can return correct state on /status
+      const seqEntry = confirmedOrderCache.get(order_id);
+      if (seqEntry) seqEntry.currentFulfillmentState = step.fulfillmentState;
       logger.info('on_status sequence step sent', { order_id, ...step });
       await delay(2000);
     }
