@@ -1593,6 +1593,31 @@ const triggerMerchantCancel = async (req, res) => {
     await sendCallback(context.bap_uri, 'on_cancel', { ...context, message_id: uuidv4() }, { order: cancelPayload }, tenant);
     logger.info('Merchant on_cancel sent', { order_id, reason_id, rto });
     res.json({ success: true, message: 'on_cancel sent', order_id });
+
+    // For RTO flows: auto-send on_status RTO-Initiated → RTO-Delivered after on_cancel
+    // (avoids need for manual trigger/merchant-status-sequence a2 call)
+    if (rto) {
+      const rtoDelay = ms => new Promise(r => setTimeout(r, ms));
+      setImmediate(async () => {
+        try {
+          await rtoDelay(1000);
+          const rtoInitPayload = buildStatusPayload(order_id, order, 'RTO-Initiated', 'Cancelled', cachedVendor);
+          await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: rtoInitPayload }, tenant);
+          const e1 = confirmedOrderCache.get(order_id);
+          if (e1) e1.currentFulfillmentState = 'RTO-Initiated';
+          logger.info('Auto RTO-Initiated on_status sent', { order_id });
+
+          await rtoDelay(2000);
+          const rtoDelvPayload = buildStatusPayload(order_id, order, 'RTO-Delivered', 'Cancelled', cachedVendor);
+          await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: rtoDelvPayload }, tenant);
+          const e2 = confirmedOrderCache.get(order_id);
+          if (e2) e2.currentFulfillmentState = 'RTO-Delivered';
+          logger.info('Auto RTO-Delivered on_status sent', { order_id });
+        } catch (e) {
+          logger.warn('Auto RTO on_status failed (non-blocking):', e.message);
+        }
+      });
+    }
   } catch (err) {
     logger.error('triggerMerchantCancel failed:', err.message);
     res.status(500).json({ error: err.message });
