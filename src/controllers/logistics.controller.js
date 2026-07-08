@@ -9,6 +9,7 @@ const {
   LOGISTICS_DOMAIN,
   initLogistics,
   confirmLogistics,
+  cancelLogistics,
   trackLogistics,
   statusLogistics,
 } = require('../services/logistics/lsp.service');
@@ -16,7 +17,8 @@ const {
 // ─── In-memory state ──────────────────────────────────────────────────────────
 // retail_order_id → { lsTransactionId, lsContext, retailContext, retailOrder,
 //                     tenant, retailDeliveryFl, lspProvider, lsOrder,
-//                     logisticsOrderId, logisticsConfirmed }
+//                     logisticsOrderId, logisticsConfirmed,
+//                     logisticsDelivered, retailCancelled }
 const logisticsOrderCache = new Map();
 
 // Lookup by logistics transaction_id (used in callbacks which carry ls txn_id)
@@ -41,10 +43,12 @@ const startLogisticsFlow = async (retailOrder, retailContext, tenant, lsSearchRe
     tenant,
     vendor,
     retailDeliveryFl: deliveryFl,
-    lspProvider:      null,
-    lsOrder:          null,
-    logisticsOrderId: null,
+    lspProvider:        null,
+    lsOrder:            null,
+    logisticsOrderId:   null,
     logisticsConfirmed: false,
+    logisticsDelivered: false,
+    retailCancelled:    false,
   });
 
   logger.info('Logistics flow started', {
@@ -239,6 +243,20 @@ const handleLogisticsOnStatus = async (body) => {
   const retailState = LS_TO_RETAIL_STATE[lsState] || lsState;
   const orderState  = TERMINAL_STATES.has(retailState) ? 'Completed' : 'In-progress';
 
+  // Suppress Order-delivered relay from LSP — auto-status sequence handles this
+  // after the 45s Out-for-delivery window (which is the Flow A2 cancel window).
+  if (retailState === 'Order-delivered') {
+    entry.logisticsDelivered = true;
+    logger.info('Logistics Order-delivered suppressed (auto-status will relay after 45s window)', { orderId });
+    return;
+  }
+
+  // If merchant already cancelled, skip non-RTO states (RTO-Initiated/RTO-Delivered still relay)
+  if (entry.retailCancelled && !retailState.startsWith('RTO-')) {
+    logger.info('Logistics on_status skipped — retail order cancelled', { orderId, retailState });
+    return;
+  }
+
   const now = new Date().toISOString();
   const retailOrder = entry.retailOrder;
   const vendor = entry.vendor;
@@ -276,6 +294,28 @@ const handleLogisticsOnTrack = async (body) => {
 };
 
 /**
+ * Mark retail order as cancelled so logistics relay suppresses further status updates.
+ * Called from triggerMerchantCancel in ondc.controller.
+ */
+const markRetailOrderCancelled = (retailOrderId) => {
+  const entry = logisticsOrderCache.get(retailOrderId);
+  if (entry) {
+    entry.retailCancelled = true;
+    logger.info('Logistics relay: retail order marked cancelled', { retailOrderId });
+  }
+};
+
+/**
+ * Send /cancel to LSP for an active logistics order (Flow A2 RTO).
+ * Called from triggerMerchantCancel.
+ */
+const cancelLogisticsOrder = async (retailOrderId) => {
+  const entry = logisticsOrderCache.get(retailOrderId);
+  if (!entry?.logisticsConfirmed) return;
+  await cancelLogistics(entry.logisticsOrderId, entry.lsContext, entry.tenant);
+};
+
+/**
  * Called when retail /track is received — relay /track to logistics LSP
  */
 const relayTrackToLogistics = async (retailOrderId, retailContext) => {
@@ -304,4 +344,6 @@ module.exports = {
   handleLogisticsOnTrack,
   relayTrackToLogistics,
   relayStatusToLogistics,
+  markRetailOrderCancelled,
+  cancelLogisticsOrder,
 };

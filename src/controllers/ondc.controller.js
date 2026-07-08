@@ -17,7 +17,14 @@ const { ack, nack, buildAckBody } = require('../utils/response');
 const { pushTxnLog } = require('../services/ondc/logPublisher.service');
 const { createAuthHeader } = require('../utils/crypto');
 const { searchLogistics } = require('../services/logistics/lsp.service');
-const { startLogisticsFlow, relayTrackToLogistics, relayStatusToLogistics } = require('./logistics.controller');
+const {
+  logisticsOrderCache,
+  startLogisticsFlow,
+  relayTrackToLogistics,
+  relayStatusToLogistics,
+  markRetailOrderCancelled,
+  cancelLogisticsOrder,
+} = require('./logistics.controller');
 
 // In-memory cache: order_id → { order, context } (for on_status/on_update/on_cancel callbacks)
 const confirmedOrderCache = new Map();
@@ -830,6 +837,15 @@ const handleConfirm = async (req, res) => {
 
         for (const step of steps) {
           if (isCancelled()) { logger.info('Auto on_status aborted (order cancelled)', { order_id: order.id }); return; }
+
+          // For logistics orders: skip intermediate states (logistics relay sends them).
+          // This preserves the 45s Out-for-delivery wait as the cancel window for Flow A2.
+          const lsEntry = logisticsOrderCache.get(order.id);
+          if (lsEntry && step.fulfillmentState !== 'Order-delivered') {
+            await delay(step.delayAfter);
+            continue;
+          }
+
           // Skip if this state was already sent proactively (e.g. by triggerMerchantReturnUpdate for Flow 4B)
           const currentEntry = confirmedOrderCache.get(order.id);
           if (step.fulfillmentState === 'Order-delivered' && currentEntry?.currentFulfillmentState === 'Order-delivered') {
@@ -1477,6 +1493,9 @@ const triggerMerchantCancel = async (req, res) => {
 
     // Signal auto-sequence to stop for this order (same as handleCancel)
     cancelledOrders.add(order_id);
+    // For Flow A2 (logistics RTO): suppress logistics Order-delivered relay + cancel LSP order
+    markRetailOrderCancelled(order_id);
+    cancelLogisticsOrder(order_id).catch(e => logger.warn("Logistics cancel failed (non-blocking):", e.message));
 
     const now = new Date().toISOString();
     const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';

@@ -240,7 +240,32 @@ const trackLogistics = async (logisticsOrderId, lsContext, tenant) => {
 };
 
 /**
- * 5. statusLogistics — send /status to LSP
+ * 5. cancelLogistics — send /cancel to LSP (for merchant-side RTO, Flow A2)
+ */
+const cancelLogistics = async (logisticsOrderId, lsContext, tenant) => {
+  const msgId = uuidv4();
+  const ctx   = { ...lsContext, action: 'cancel', message_id: msgId, timestamp: new Date().toISOString() };
+
+  const payload = {
+    context: ctx,
+    message: {
+      order_id:               logisticsOrderId,
+      cancellation_reason_id: '013',
+    },
+  };
+
+  const url = `${(lsContext.bpp_uri || '').replace(/\/+$/, '')}/cancel`;
+  logger.info('Logistics /cancel → LSP', { logisticsOrderId, url });
+  try {
+    await postWithAuth(url, payload, tenant);
+  } catch (e) {
+    logger.warn('Logistics /cancel failed:', e.response?.status, e.message);
+  }
+  return { msgId };
+};
+
+/**
+ * 6. statusLogistics — send /status to LSP
  */
 const statusLogistics = async (logisticsOrderId, lsContext, tenant) => {
   const msgId = uuidv4();
@@ -266,6 +291,7 @@ module.exports = {
   searchLogistics,
   initLogistics,
   confirmLogistics,
+  cancelLogistics,
   trackLogistics,
   statusLogistics,
 };
