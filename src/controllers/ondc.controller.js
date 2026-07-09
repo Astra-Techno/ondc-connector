@@ -1079,9 +1079,10 @@ const handleCancel = async (req, res) => {
       if (cachedEntry) cachedEntry.currentFulfillmentState = 'Cancelled';
       const cachedOrder = cachedEntry?.order || null;
       const cachedVendor = cachedEntry?.vendor || null;
-      // updated_at must be >= context.timestamp (Pramaan on_cancel validation)
+      // updated_at must be >= on_cancel context.timestamp (sendCallback sets it slightly after now)
+      // Also must be >= /cancel request context.timestamp (Pramaan cancelDate check)
       const cancelTime = context?.timestamp ? new Date(context.timestamp).getTime() : 0;
-      const now = new Date(Math.max(Date.now(), cancelTime + 1)).toISOString();
+      const now = new Date(Math.max(Date.now() + 1, cancelTime + 1)).toISOString();
 
       const cancelFulfillmentTags = [{ code: 'cancellation_terms', list: [{ code: 'reason_required', value: 'false' }] }];
 
