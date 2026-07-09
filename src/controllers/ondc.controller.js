@@ -825,8 +825,12 @@ const handleConfirm = async (req, res) => {
           const ce2 = confirmedOrderCache.get(order.id);
           if (ce2) ce2.currentFulfillmentState = 'Agent-assigned';
           logger.info('Logistics: Agent-assigned on_status sent', { order_id: order.id });
-          await lsDelay(1000);
+          await lsDelay(30000);  // Allow buyer cancellation window before triggering logistics
 
+          if (cancelledOrders.has(order.id)) {
+            logger.info('Logistics search skipped — order cancelled during window', { order_id: order.id });
+            return;
+          }
           const lsResult = await searchLogistics(order, context, tenant);
           await startLogisticsFlow(order, context, tenant, lsResult, vendor);
         } catch (e) {
@@ -1033,12 +1037,19 @@ const handleCancel = async (req, res) => {
     const { order_id, cancellation_reason_id } = body.message || {};
     logger.info('ONDC /cancel received', { order_id });
 
-    // Flow 7 (Non Cancellable): BPP NACKs all BAP-initiated /cancel requests.
-    // All BPP-initiated cancellations (Flow 3B RTO, Flow 3C) go through trigger endpoints.
-    logger.info('ONDC /cancel NACK — cancellation not permitted by BPP', { order_id });
-    return nack(res, context, 'Order cannot be cancelled');
+    // Flow 7 (Non Cancellable): NACK if order already delivered/cancelled.
+    // Flow 2 (Buyer Cancel): ACK if order is still in-progress and can be cancelled.
+    const cachedEntry = confirmedOrderCache.get(order_id);
+    const currentState = cachedEntry?.currentFulfillmentState || '';
+    const NON_CANCELLABLE = new Set(['Order-delivered', 'Cancelled', 'RTO-Initiated', 'RTO-Delivered']);
+    if (NON_CANCELLABLE.has(currentState)) {
+      logger.info('ONDC /cancel NACK — order not cancellable in current state', { order_id, currentState });
+      return nack(res, context, 'Order cannot be cancelled');
+    }
+    cancelledOrders.add(order_id);  // Stop auto-status sequence
+    await ack(res, context);
 
-    const tenant = await getTenantByBppId(context?.bpp_id);
+    const tenant = await resolveTenant(context?.bpp_id);
     if (!tenant) return;
 
     try {
@@ -1064,7 +1075,8 @@ const handleCancel = async (req, res) => {
         );
       }
 
-      const cachedEntry = confirmedOrderCache.get(order_id) || null;
+      // Mark cache as Cancelled so any subsequent /cancel gets NACK
+      if (cachedEntry) cachedEntry.currentFulfillmentState = 'Cancelled';
       const cachedOrder = cachedEntry?.order || null;
       const cachedVendor = cachedEntry?.vendor || null;
       // updated_at must be >= context.timestamp (Pramaan on_cancel validation)
