@@ -1285,13 +1285,18 @@ const handleUpdate = async (req, res) => {
               cachedEntry.returnFulfillment = { ...paymentReturnFl, state: { descriptor: { code: returnState } } };
               await delay(2000);
             }
-          } else if (paymentReturnFl && lastReturnState === 'Return_Picked') {
+          } else if (paymentReturnFl && ['Return_Initiated', 'Return_Approved', 'Return_Picked'].includes(lastReturnState)) {
             // Flow 4B instance2 (approved path): send Return_Delivered ONLY after /update(payment)
-            logger.info('handleUpdate payment: sending Return_Delivered only (Flow 4B approved path)', { order_id: order.id });
+            // If /update(payment) arrived early (before Return_Picked stored), await auto-send loop first
+            logger.info(`handleUpdate payment: Return_Delivered (Flow 4B approved path, last=${lastReturnState})`, { order_id: order.id });
+            if (cachedEntry.returnSequencePromise) {
+              await cachedEntry.returnSequencePromise;
+            }
+            const currentReturnFl = cachedEntry.returnFulfillment || paymentReturnFl;
             const msgId = uuidv4();
             await sendCallback(fullContext.bap_uri, 'on_update', { ...fullContext, message_id: msgId }, { order: buildPaymentReturnPayload('Return_Delivered') }, tenant);
             logger.info('on_update (Return_Delivered) sent', { order_id: order.id });
-            cachedEntry.returnFulfillment = { ...paymentReturnFl, state: { descriptor: { code: 'Return_Delivered' } } };
+            cachedEntry.returnFulfillment = { ...currentReturnFl, state: { descriptor: { code: 'Return_Delivered' } } };
           } else {
             logger.info('handleUpdate payment: ACK only (Flow 3A settlement or no pending return)', { order_id: order.id });
           }
@@ -1315,7 +1320,8 @@ const handleUpdate = async (req, res) => {
 
           // Auto-send Return_Approved → Return_Picked proactively (seller approves the return)
           // Return_Delivered will be sent when BAP sends /update(payment)
-          ;(async () => {
+          // Store the Promise so payment handler can await it if /update(payment) arrives early
+          const autoSendPromise = (async () => {
             const delay = ms => new Promise(r => setTimeout(r, ms));
             const cachedRef = confirmedOrderCache.get(fullOrder.id);
             for (const returnState of ['Return_Approved', 'Return_Picked']) {
@@ -1329,6 +1335,7 @@ const handleUpdate = async (req, res) => {
               }
             }
           })();
+          if (cached) cached.returnSequencePromise = autoSendPromise;
         }
 
         logger.info('handleUpdate complete', { order_id: fullOrder.id, update_target });
