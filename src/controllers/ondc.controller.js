@@ -1302,40 +1302,59 @@ const handleUpdate = async (req, res) => {
           }
 
         } else if (update_target === 'fulfillment' || update_target === 'item') {
-          // Return request from BAP (Flow 4B instance2 approved path):
-          // BAP sends /update(fulfillment=Return) → BPP sends Return_Initiated, then proactively
-          // sends Return_Approved → Return_Picked. Return_Delivered sent on /update(payment).
+          // Return request from BAP — two paths:
+          //   Rejection (Flow 4B inst1): pendingReturnRejection flag set → send Return_Initiated → Return_Rejected
+          //   Approval  (Flow 4B inst2): no flag → send Return_Initiated, then auto Return_Approved → Return_Picked
           const bapReturnFl = bapReturnFulfillments[0] || null;
-
-          // Store return fulfillment in cache
           const cached = confirmedOrderCache.get(fullOrder.id);
-          if (cached) {
+
+          if (cached?.pendingReturnRejection) {
+            // Flow 4B instance1 — BAP requested return, BPP rejects it
+            cached.pendingReturnRejection = false;
             cached.returnFulfillment = buildReturnFulfillment('Return_Initiated', bapReturnFl);
             cached.returnContext = { ...fullContext };
-          }
 
-          const payload = buildReturnPayload('Return_Initiated', bapReturnFl);
-          await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: payload }, tenant);
-          logger.info('on_update (Return_Initiated) sent OK', { order_id: fullOrder.id });
+            const initiatedPayload = buildReturnPayload('Return_Initiated', bapReturnFl);
+            await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: initiatedPayload }, tenant);
+            logger.info('on_update (Return_Initiated) sent for rejection flow', { order_id: fullOrder.id });
 
-          // Auto-send Return_Approved → Return_Picked proactively (seller approves the return)
-          // Return_Delivered will be sent when BAP sends /update(payment)
-          // Store the Promise so payment handler can await it if /update(payment) arrives early
-          const autoSendPromise = (async () => {
-            const delay = ms => new Promise(r => setTimeout(r, ms));
-            const cachedRef = confirmedOrderCache.get(fullOrder.id);
-            for (const returnState of ['Return_Approved', 'Return_Picked']) {
-              await delay(2000);
-              const statePayload = buildReturnPayload(returnState, bapReturnFl);
-              const msgId = uuidv4();
-              await sendCallback(fullContext.bap_uri, 'on_update', { ...fullContext, message_id: msgId }, { order: statePayload }, tenant);
-              logger.info(`on_update (${returnState}) auto-sent after fulfillment update`, { order_id: fullOrder.id });
-              if (cachedRef?.returnFulfillment) {
-                cachedRef.returnFulfillment = { ...cachedRef.returnFulfillment, state: { descriptor: { code: returnState } } };
-              }
+            await new Promise(r => setTimeout(r, 2000));
+
+            const rejectedPayload = buildReturnPayload('Return_Rejected', bapReturnFl);
+            const rejMsgId = uuidv4();
+            await sendCallback(fullContext.bap_uri, 'on_update', { ...fullContext, message_id: rejMsgId }, { order: rejectedPayload }, tenant);
+            logger.info('on_update (Return_Rejected) sent', { order_id: fullOrder.id });
+            if (cached) cached.returnFulfillment = { ...cached.returnFulfillment, state: { descriptor: { code: 'Return_Rejected' } } };
+
+          } else {
+            // Flow 4B instance2 (approved path): Return_Initiated, then auto Return_Approved → Return_Picked
+            // Return_Delivered will be sent when BAP sends /update(payment)
+            if (cached) {
+              cached.returnFulfillment = buildReturnFulfillment('Return_Initiated', bapReturnFl);
+              cached.returnContext = { ...fullContext };
             }
-          })();
-          if (cached) cached.returnSequencePromise = autoSendPromise;
+
+            const payload = buildReturnPayload('Return_Initiated', bapReturnFl);
+            await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: payload }, tenant);
+            logger.info('on_update (Return_Initiated) sent OK', { order_id: fullOrder.id });
+
+            // Store the Promise so payment handler can await it if /update(payment) arrives early
+            const autoSendPromise = (async () => {
+              const delay = ms => new Promise(r => setTimeout(r, ms));
+              const cachedRef = confirmedOrderCache.get(fullOrder.id);
+              for (const returnState of ['Return_Approved', 'Return_Picked']) {
+                await delay(2000);
+                const statePayload = buildReturnPayload(returnState, bapReturnFl);
+                const msgId = uuidv4();
+                await sendCallback(fullContext.bap_uri, 'on_update', { ...fullContext, message_id: msgId }, { order: statePayload }, tenant);
+                logger.info(`on_update (${returnState}) auto-sent after fulfillment update`, { order_id: fullOrder.id });
+                if (cachedRef?.returnFulfillment) {
+                  cachedRef.returnFulfillment = { ...cachedRef.returnFulfillment, state: { descriptor: { code: returnState } } };
+                }
+              }
+            })();
+            if (cached) cached.returnSequencePromise = autoSendPromise;
+          }
         }
 
         logger.info('handleUpdate complete', { order_id: fullOrder.id, update_target });
@@ -1401,7 +1420,23 @@ const triggerMerchantReturnUpdate = async (req, res) => {
     if (type === '4a') {
       steps = ['Return_Approved', 'Return_Picked', 'Return_Delivered'];
     } else if (type === '4b') {
-      steps = ['Return_Initiated', 'Return_Rejected'];
+      // Flow 4B instance1 (rejected path): set a flag so the NEXT BAP /update(item) is rejected
+      // (rejection must happen IN RESPONSE to BAP's /update(item), not proactively)
+      cachedEntry.pendingReturnRejection = true;
+      logger.info('Flow 4B: rejection flag set — next BAP /update(item) will send Return_Initiated→Return_Rejected', { order_id });
+      res.json({ success: true, message: 'Flow 4B rejection flag set — run Pramaan Flow 4B session now', order_id });
+      // Still ensure Order-delivered is sent if not yet (needed before return request)
+      if (cachedEntry.currentFulfillmentState !== 'Order-delivered') {
+        try {
+          const deliveredPayload = buildStatusPayload(order_id, order, 'Order-delivered', 'Completed', vendor);
+          await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: deliveredPayload }, tenant);
+          if (cachedEntry) cachedEntry.currentFulfillmentState = 'Order-delivered';
+          logger.info('on_status (Order-delivered) sent before Flow 4B rejection session', { order_id });
+        } catch (e) {
+          logger.warn('Failed to send Order-delivered before Flow 4B rejection session:', e.message);
+        }
+      }
+      return;
     } else if (state) {
       steps = [state];
     } else {
@@ -1411,8 +1446,7 @@ const triggerMerchantReturnUpdate = async (req, res) => {
     // Respond immediately, send callbacks in background
     res.json({ success: true, message: `on_update return sequence started`, steps, order_id });
 
-    // For type 4b: if Order-delivered hasn't fired yet from the auto-sequence, send it now
-    // (user may trigger return before the 45s auto-delay elapses)
+    // For type 4b (legacy path only — now uses flag approach above)
     if (type === '4b' && cachedEntry.currentFulfillmentState !== 'Order-delivered') {
       try {
         const deliveredPayload = buildStatusPayload(order_id, order, 'Order-delivered', 'Completed', vendor);
