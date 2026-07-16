@@ -463,13 +463,21 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
       short_desc: 'ONDC Seller Platform',
       long_desc:  'Multi-vendor ONDC Seller Platform powered by CottKart',
       images:     ['https://ondc.cottkart.com/assets/logo.png'],
-      tags: [{
-        code: 'bpp_terms',
-        list: [
-          { code: 'np_type',         value: 'MSN' },
-          { code: 'accept_bap_terms', value: 'Y'  },
-        ],
-      }],
+      tags: [
+        {
+          code: 'bpp_terms',
+          list: [
+            { code: 'np_type',         value: 'MSN' },
+            { code: 'accept_bap_terms', value: 'Y'  },
+          ],
+        },
+        {
+          code: 'catalog_full',
+          list: [
+            { code: 'auto', value: 'false' },
+          ],
+        },
+      ],
     };
 
     return {
