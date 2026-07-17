@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { get } from '@/utils/api'
-import { RefreshCw, AlertCircle, ChevronLeft, ChevronRight } from 'lucide-vue-next'
+import { RefreshCw, AlertCircle, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Download } from 'lucide-vue-next'
 
 const loading = ref(true)
 const error = ref(null)
@@ -11,6 +11,7 @@ const typeFilter = ref('')
 const statusFilter = ref('')
 const page = ref(1)
 const perPage = 50
+const expanded = ref(null)
 let timer = null
 
 const typeOptions = [
@@ -24,14 +25,12 @@ const statusOptions = [
   { value: '', label: 'All Status' },
   { value: 'success', label: 'Success' },
   { value: 'failed', label: 'Failed' },
-  { value: 'pending', label: 'Pending' },
   { value: 'partial', label: 'Partial' },
 ]
 
 const statusBadge = {
   success: 'bg-green-100 text-green-700',
   failed:  'bg-red-100 text-red-700',
-  pending: 'bg-yellow-100 text-yellow-700',
   partial: 'bg-orange-100 text-orange-700',
 }
 
@@ -54,20 +53,44 @@ async function fetchLogs() {
   loading.value = true
   error.value = null
   const { data, error: err } = await get('/dashboard/sync-logs', {
-    type: typeFilter.value || undefined,
-    status: statusFilter.value || undefined,
-    page: page.value,
+    type:     typeFilter.value  || undefined,
+    status:   statusFilter.value || undefined,
+    page:     page.value,
     per_page: perPage,
   })
   if (err) { error.value = err }
   else {
-    logs.value = data?.logs || data?.data || []
+    logs.value  = data?.logs || data?.data || []
     total.value = data?.total || logs.value.length
   }
   loading.value = false
 }
 
 function onFilter() { page.value = 1; fetchLogs() }
+
+function toggleExpand(id) {
+  expanded.value = expanded.value === id ? null : id
+}
+
+function downloadLog(log) {
+  const content = JSON.stringify({
+    id:             log.id,
+    type:           log.sync_type,
+    status:         log.status,
+    records_synced: log.records_synced,
+    records_failed: log.records_failed,
+    details:        log.details,
+    started_at:     log.started_at,
+    completed_at:   log.completed_at,
+  }, null, 2)
+  const blob = new Blob([content], { type: 'application/json' })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href     = url
+  a.download = `sync-log-${log.id}-${log.sync_type}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 onMounted(() => {
   fetchLogs()
@@ -105,43 +128,69 @@ onUnmounted(() => clearInterval(timer))
             <tr>
               <th class="px-5 py-3 text-left font-medium">Type</th>
               <th class="px-5 py-3 text-left font-medium">Status</th>
-              <th class="px-5 py-3 text-right font-medium">Total</th>
               <th class="px-5 py-3 text-right font-medium">Synced</th>
               <th class="px-5 py-3 text-right font-medium">Failed</th>
               <th class="px-5 py-3 text-left font-medium">Started</th>
-              <th class="px-5 py-3 text-left font-medium">Completed</th>
               <th class="px-5 py-3 text-left font-medium">Duration</th>
+              <th class="px-5 py-3 text-left font-medium">Actions</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-gray-50">
             <template v-if="loading">
               <tr v-for="i in 8" :key="i">
-                <td v-for="j in 8" :key="j" class="px-5 py-3">
+                <td v-for="j in 7" :key="j" class="px-5 py-3">
                   <div class="h-4 w-16 animate-pulse rounded bg-gray-100" />
                 </td>
               </tr>
             </template>
             <template v-else-if="logs.length">
-              <tr
-                v-for="log in logs" :key="log.id"
-                :class="log.status === 'failed' ? 'bg-red-50/40' : 'hover:bg-gray-50/50'"
-              >
-                <td class="px-5 py-3 font-medium capitalize text-gray-800">{{ log.type }}</td>
-                <td class="px-5 py-3">
-                  <span :class="['rounded-full px-2 py-0.5 text-xs font-medium capitalize', statusBadge[log.status] || 'bg-gray-100 text-gray-500']">
-                    {{ log.status }}
-                  </span>
-                </td>
-                <td class="px-5 py-3 text-right text-gray-700">{{ log.total_items ?? '—' }}</td>
-                <td class="px-5 py-3 text-right text-green-700 font-medium">{{ log.synced ?? '—' }}</td>
-                <td class="px-5 py-3 text-right" :class="log.failed > 0 ? 'text-red-600 font-semibold' : 'text-gray-500'">{{ log.failed ?? '—' }}</td>
-                <td class="px-5 py-3 text-gray-500">{{ formatDate(log.started_at) }}</td>
-                <td class="px-5 py-3 text-gray-500">{{ formatDate(log.completed_at) }}</td>
-                <td class="px-5 py-3 font-mono text-xs text-gray-600">{{ duration(log.started_at, log.completed_at) }}</td>
-              </tr>
+              <template v-for="log in logs" :key="log.id">
+                <tr
+                  class="cursor-pointer"
+                  :class="log.status === 'failed' ? 'bg-red-50/40 hover:bg-red-50' : 'hover:bg-gray-50/50'"
+                  @click="toggleExpand(log.id)"
+                >
+                  <td class="px-5 py-3 font-medium capitalize text-gray-800">{{ log.sync_type }}</td>
+                  <td class="px-5 py-3">
+                    <span :class="['rounded-full px-2 py-0.5 text-xs font-medium capitalize', statusBadge[log.status] || 'bg-gray-100 text-gray-500']">
+                      {{ log.status }}
+                    </span>
+                  </td>
+                  <td class="px-5 py-3 text-right text-green-700 font-medium">{{ log.records_synced ?? '—' }}</td>
+                  <td class="px-5 py-3 text-right" :class="log.records_failed > 0 ? 'text-red-600 font-semibold' : 'text-gray-500'">{{ log.records_failed ?? '—' }}</td>
+                  <td class="px-5 py-3 text-gray-500">{{ formatDate(log.started_at) }}</td>
+                  <td class="px-5 py-3 font-mono text-xs text-gray-600">{{ duration(log.started_at, log.completed_at) }}</td>
+                  <td class="px-5 py-3">
+                    <div class="flex items-center gap-2">
+                      <button
+                        @click.stop="downloadLog(log)"
+                        class="flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
+                        title="Download log as JSON"
+                      >
+                        <Download class="h-3 w-3" /> Download
+                      </button>
+                      <component :is="expanded === log.id ? ChevronUp : ChevronDown" class="h-4 w-4 text-gray-400" />
+                    </div>
+                  </td>
+                </tr>
+
+                <!-- Expanded details row -->
+                <tr v-if="expanded === log.id" :class="log.status === 'failed' ? 'bg-red-50/60' : 'bg-gray-50/60'">
+                  <td colspan="7" class="px-5 py-4">
+                    <div class="text-xs text-gray-500 mb-1 font-medium uppercase tracking-wide">Details / Error</div>
+                    <pre v-if="log.details" class="whitespace-pre-wrap break-all rounded-lg bg-gray-900 p-4 text-xs text-green-300 font-mono max-h-64 overflow-y-auto">{{ log.details }}</pre>
+                    <p v-else class="text-sm text-gray-400 italic">No details recorded</p>
+                    <div class="mt-2 flex gap-6 text-xs text-gray-500">
+                      <span>Started: {{ formatDate(log.started_at) }}</span>
+                      <span>Completed: {{ formatDate(log.completed_at) }}</span>
+                      <span>Duration: {{ duration(log.started_at, log.completed_at) }}</span>
+                    </div>
+                  </td>
+                </tr>
+              </template>
             </template>
             <tr v-else>
-              <td colspan="8" class="px-5 py-16 text-center">
+              <td colspan="7" class="px-5 py-16 text-center">
                 <RefreshCw class="mx-auto mb-3 h-10 w-10 text-gray-200" />
                 <p class="text-sm text-gray-400">No sync logs found</p>
               </td>
