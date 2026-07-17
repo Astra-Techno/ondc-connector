@@ -22,11 +22,9 @@ const getSettlements = async (req, res) => {
     );
 
     const [settlements] = await pool.query(`
-      SELECT s.*, v.business_name as vendor_name,
-             o.buyer_name, o.buyer_email
+      SELECT s.*, v.business_name as vendor_name
       FROM settlements s
       LEFT JOIN vendors v     ON v.id = s.vendor_id
-      LEFT JOIN ondc_orders o ON o.id = s.order_id
       ${where}
       ORDER BY s.created_at DESC
       LIMIT ? OFFSET ?
@@ -42,12 +40,9 @@ const getSettlementById = async (req, res) => {
   try {
     const [rows] = await pool.query(`
       SELECT s.*, v.business_name as vendor_name,
-             v.bank_account, v.bank_ifsc,
-             o.buyer_name, o.buyer_email,
-             o.ondc_order_id, o.total_amount as order_total
+             v.bank_account, v.bank_ifsc
       FROM settlements s
-      LEFT JOIN vendors v     ON v.id = s.vendor_id
-      LEFT JOIN ondc_orders o ON o.id = s.order_id
+      LEFT JOIN vendors v ON v.id = s.vendor_id
       WHERE s.id = ? AND s.tenant_id = ?
     `, [req.params.id, req.tenant.id]);
 
