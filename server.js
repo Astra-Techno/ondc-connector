@@ -231,8 +231,8 @@ const logInboundToDB = async (req, res, next) => {
     );
     const tenantId = rows[0]?.id || null;
     await _dbPool.query(
-      `INSERT INTO ondc_transactions (tenant_id, action, direction, transaction_id, message_id, bap_id, payload, status)
-       VALUES (?, ?, 'in', ?, ?, ?, ?, 'success')`,
+      `INSERT INTO ondc_transactions (tenant_id, action, direction, transaction_id, message_id, bap_id, request_payload, status)
+       VALUES (?, ?, 'inbound', ?, ?, ?, ?, 'success')`,
       [tenantId, ctx.action, ctx.transaction_id, ctx.message_id, ctx.bap_id, JSON.stringify(req.body)]
     );
   } catch (_) {}

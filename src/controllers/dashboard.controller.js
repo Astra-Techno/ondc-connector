@@ -154,7 +154,8 @@ const getTransactions = async (req, res) => {
     );
 
     const [transactions] = await pool.query(
-      `SELECT id, action, direction, transaction_id, message_id, bap_id, status, payload, response, created_at
+      `SELECT id, action, direction, transaction_id, message_id, bap_id, status,
+              request_payload as payload, response_payload as response, error_message, created_at
        FROM ondc_transactions ${where}
        ORDER BY created_at DESC LIMIT ? OFFSET ?`,
       [...params, limit, offset]

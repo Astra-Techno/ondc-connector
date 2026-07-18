@@ -18,8 +18,8 @@ const actions = ['search','select','init','confirm','status','cancel','track','u
                  'on_search','on_select','on_init','on_confirm','on_status','on_cancel','on_track','on_update','on_issue','on_issue_status']
 
 const directionBadge = {
-  in:  'bg-blue-100 text-blue-700',
-  out: 'bg-purple-100 text-purple-700',
+  inbound:  'bg-blue-100 text-blue-700',
+  outbound: 'bg-purple-100 text-purple-700',
 }
 const statusBadge = {
   success: 'bg-green-100 text-green-700',
@@ -83,8 +83,8 @@ onUnmounted(() => clearInterval(timer))
       </select>
       <select v-model="filters.direction" @change="onFilter" class="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-green-500">
         <option value="">All Directions</option>
-        <option value="in">Inbound ↓</option>
-        <option value="out">Outbound ↑</option>
+        <option value="inbound">Inbound ↓</option>
+        <option value="outbound">Outbound ↑</option>
       </select>
       <select v-model="filters.status" @change="onFilter" class="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-green-500">
         <option value="">All Status</option>
@@ -134,16 +134,16 @@ onUnmounted(() => clearInterval(timer))
                   <td class="px-4 py-3">
                     <div class="flex items-center gap-1.5">
                       <component
-                        :is="t.direction === 'in' ? ArrowDownLeft : ArrowUpRight"
+                        :is="t.direction === 'inbound' ? ArrowDownLeft : ArrowUpRight"
                         class="h-3.5 w-3.5 shrink-0"
-                        :class="t.direction === 'in' ? 'text-blue-500' : 'text-purple-500'"
+                        :class="t.direction === 'inbound' ? 'text-blue-500' : 'text-purple-500'"
                       />
                       <span class="font-mono text-xs font-medium text-gray-800">{{ t.action }}</span>
                     </div>
                   </td>
                   <td class="px-4 py-3">
                     <span :class="['rounded-full px-2 py-0.5 text-xs font-medium', directionBadge[t.direction] || 'bg-gray-100 text-gray-600']">
-                      {{ t.direction === 'in' ? '↓ Inbound' : '↑ Outbound' }}
+                      {{ t.direction === 'inbound' ? '↓ Inbound' : '↑ Outbound' }}
                     </span>
                   </td>
                   <td class="px-4 py-3 font-mono text-xs text-gray-500 max-w-[160px] truncate" :title="t.transaction_id">
