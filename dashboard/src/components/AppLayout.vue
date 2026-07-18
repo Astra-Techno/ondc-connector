@@ -17,6 +17,7 @@ import {
   Zap,
   CreditCard,
   MessageSquare,
+  ArrowLeftRight,
 } from 'lucide-vue-next'
 
 const auth = useAuthStore()
@@ -29,8 +30,9 @@ const navItems = [
   { to: '/products',    label: 'Products',    icon: Package },
   { to: '/orders',      label: 'Orders',      icon: ShoppingCart },
   { to: '/settlements', label: 'Settlements', icon: CreditCard },
-  { to: '/igm',         label: 'IGM',         icon: MessageSquare },
-  { to: '/sync-logs',   label: 'Sync Logs',   icon: RefreshCw },
+  { to: '/igm',          label: 'IGM',          icon: MessageSquare },
+  { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
+  { to: '/sync-logs',    label: 'Sync Logs',    icon: RefreshCw },
   { to: '/webhooks',    label: 'Webhooks',    icon: Webhook },
   { to: '/settings',    label: 'Settings',    icon: Settings },
 ]

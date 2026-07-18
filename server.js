@@ -217,6 +217,29 @@ const pushInboundTxnLog = (req, res, next) => {
 app.use(ONDC_PATHS, ondcLogger);
 app.use(ONDC_PATHS, pushInboundTxnLog);
 
+// ─── Log inbound ONDC calls to DB (for dashboard Transactions page) ──────────
+const { pool: _dbPool } = require('./src/config/database');
+const logInboundToDB = async (req, res, next) => {
+  const ctx = req.body?.context;
+  if (!ctx?.action || !ctx?.bpp_id) return next();
+  try {
+    const [rows] = await _dbPool.query(
+      `SELECT t.id FROM tenants t
+       JOIN tenant_ondc_config c ON c.tenant_id = t.id
+       WHERE c.subscriber_id = ? AND c.is_active = 1 LIMIT 1`,
+      [ctx.bpp_id]
+    );
+    const tenantId = rows[0]?.id || null;
+    await _dbPool.query(
+      `INSERT INTO ondc_transactions (tenant_id, action, direction, transaction_id, message_id, bap_id, payload, status)
+       VALUES (?, ?, 'in', ?, ?, ?, ?, 'success')`,
+      [tenantId, ctx.action, ctx.transaction_id, ctx.message_id, ctx.bap_id, JSON.stringify(req.body)]
+    );
+  } catch (_) {}
+  next();
+};
+app.use(ONDC_PATHS, logInboundToDB);
+
 // ─── ONDC Gateway endpoints (root-level, no auth) ────────────────────────────
 app.post('/search',       handleSearch);
 app.post('/select',       handleSelect);

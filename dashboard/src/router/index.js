@@ -60,6 +60,12 @@ const routes = [
     meta: { requiresAuth: true, title: 'Issues & Grievances' },
   },
   {
+    path: '/transactions',
+    name: 'Transactions',
+    component: () => import('../views/Transactions.vue'),
+    meta: { requiresAuth: true, title: 'ONDC Transactions' },
+  },
+  {
     path: '/sync-logs',
     name: 'SyncLogs',
     component: () => import('../views/SyncLogs.vue'),

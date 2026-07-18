@@ -136,4 +136,34 @@ const getSyncLogs = async (req, res) => {
   }
 };
 
-module.exports = { getStats, getSyncLogs };
+const getTransactions = async (req, res) => {
+  try {
+    const { action, direction, status, page = 1, per_page = 50 } = req.query;
+    const limit  = parseInt(per_page);
+    const offset = (parseInt(page) - 1) * limit;
+
+    let where  = 'WHERE tenant_id = ?';
+    const params = [req.tenant.id];
+
+    if (action)    { where += ' AND action = ?';    params.push(action); }
+    if (direction) { where += ' AND direction = ?'; params.push(direction); }
+    if (status)    { where += ' AND status = ?';    params.push(status); }
+
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) as total FROM ondc_transactions ${where}`, params
+    );
+
+    const [transactions] = await pool.query(
+      `SELECT id, action, direction, transaction_id, message_id, bap_id, status, payload, response, created_at
+       FROM ondc_transactions ${where}
+       ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
+
+    return success(res, { transactions, total, page: parseInt(page) });
+  } catch (err) {
+    return error(res, err.message);
+  }
+};
+
+module.exports = { getStats, getSyncLogs, getTransactions };
