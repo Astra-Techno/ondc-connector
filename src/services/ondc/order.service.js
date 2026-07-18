@@ -186,8 +186,8 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
   try {
     await pool.query(
       `INSERT INTO ondc_transactions
-         (tenant_id, action, direction, transaction_id, message_id, bap_id, payload, status)
-       VALUES (?, ?, 'out', ?, ?, ?, ?, 'pending')`,
+         (tenant_id, action, direction, transaction_id, message_id, bap_id, request_payload, status)
+       VALUES (?, ?, 'outbound', ?, ?, ?, ?, 'pending')`,
       [
         config.tenant_id,
         action,
@@ -228,8 +228,8 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
       pushTxnLog(action, payload).catch(() => {});
 
       pool.query(
-        `UPDATE ondc_transactions SET status = 'success', response = ?
-         WHERE transaction_id = ? AND action = ? AND direction = 'out'`,
+        `UPDATE ondc_transactions SET status = 'success', response_payload = ?
+         WHERE transaction_id = ? AND action = ? AND direction = 'outbound'`,
         [JSON.stringify(response.data), context?.transaction_id, action]
       ).catch(() => {});
 
@@ -246,7 +246,7 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
         pushTxnLog(action, payload).catch(() => {});
         pool.query(
           `UPDATE ondc_transactions SET status = 'failed'
-           WHERE transaction_id = ? AND action = ? AND direction = 'out'`,
+           WHERE transaction_id = ? AND action = ? AND direction = 'outbound'`,
           [context?.transaction_id, action]
         ).catch(() => {});
       }
