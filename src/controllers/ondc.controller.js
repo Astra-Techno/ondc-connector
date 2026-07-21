@@ -413,10 +413,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
               frequency: 'PT4H',
               times:     ['0900', '1300', '1700', '2100'],
             },
-            range:     {
-              start: new Date(new Date().setHours(9,0,0,0)).toISOString(),
-              end:   new Date(new Date().setHours(21,0,0,0)).toISOString(),
-            },
+            range:     { start: '0900', end: '2100' },
           },
           circle: {
             gps:    gps6,
