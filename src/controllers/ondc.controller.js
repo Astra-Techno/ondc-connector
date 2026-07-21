@@ -390,9 +390,6 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         },
         ttl: 'P1D',
         '@ondc/org/fssai_license_no': vendor.fssai_number || '',
-        categories: [
-          { id: 'Snacks, Dry Fruits, Nuts', descriptor: { name: 'Snacks, Dry Fruits, Nuts' } },
-        ],
         locations: [{
           id:  'l1',
           gps: gps6,
