@@ -347,7 +347,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           available: { count: (p.stock > 0) ? '99' : '0' },
           maximum:   { count: String(Math.max(p.stock || 0, 0)) },
         },
-        category_id:    'Grocery',
+        category_id:    p.category || 'Snacks, Dry Fruits, Nuts',
         fulfillment_id: 'f1',
         location_id:    'l1',
         '@ondc/org/returnable':           Boolean(p.is_returnable),
@@ -391,7 +391,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         ttl: 'P1D',
         '@ondc/org/fssai_license_no': vendor.fssai_number || '',
         categories: [
-          { id: 'Grocery', descriptor: { name: 'Grocery' } },
+          { id: 'Snacks, Dry Fruits, Nuts', descriptor: { name: 'Snacks, Dry Fruits, Nuts' } },
         ],
         locations: [{
           id:  'l1',
