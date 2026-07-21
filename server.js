@@ -339,6 +339,13 @@ const runMigrations = async () => {
     if (!e.message.includes('Duplicate column')) logger.warn('std_city_code column:', e.message);
   }
 
+  // Add category column to products if not present
+  try {
+    await pool.query(`ALTER TABLE products ADD COLUMN category VARCHAR(100) DEFAULT NULL AFTER name`);
+  } catch (e) {
+    if (!e.message.includes('Duplicate column')) logger.warn('products.category column:', e.message);
+  }
+
   // Populate std_city_code from pincode for vendors that don't have it set
   try {
     await pool.query(`
