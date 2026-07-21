@@ -556,7 +556,7 @@ const handleSearch = async (req, res) => {
     if (!tenants.length) { logger.info('No active tenants for /search'); return; }
 
     // Detect incremental vs full catalog request
-    const intentTags  = req.body?.message?.intent?.tags || [];
+    const intentTags    = req.body?.message?.intent?.tags || [];
     const isIncremental = intentTags.some(t => t.code === 'catalog_inc');
 
     for (const tenant of tenants) {
@@ -567,6 +567,27 @@ const handleSearch = async (req, res) => {
       // For full catalog search: only send if we have providers to return
       if (isIncremental || catalog['bpp/providers']?.length) {
         await sendOnSearch(context, catalog, ondcConfig);
+      }
+    }
+
+    // Incremental push flow (Workbench): after the initial on_search (step 2),
+    // BPP must proactively push 2 more on_search callbacks (steps 3 & 4).
+    // Each proactive push uses a fresh message_id (unsolicited — not tied to any BAP request).
+    if (isIncremental) {
+      for (let i = 1; i <= 2; i++) {
+        setTimeout(async () => {
+          try {
+            for (const tenant of tenants) {
+              const ondcConfig = resolveOndcConfig(tenant);
+              const catalog    = await buildCatalog(tenant.id, ondcConfig, context?.city);
+              if (!catalog) continue;
+              await sendOnSearch({ ...context, message_id: uuidv4() }, catalog, ondcConfig);
+              logger.info(`Incremental on_search push #${i + 1} sent`, { txn: context?.transaction_id });
+            }
+          } catch (e) {
+            logger.warn(`Incremental on_search push #${i + 1} failed: ${e.message}`);
+          }
+        }, i * 4000); // 4s, 8s after first response
       }
     }
   } catch (err) {
@@ -2720,6 +2741,42 @@ const triggerIssueResolve = async (req, res) => {
 };
 
 // Flow 5: Force items out of stock for testing (without touching DB)
+// Manually push an on_search to a BAP (e.g. Workbench incremental push steps 3/4)
+// POST /trigger/push-on-search  body: { bap_uri, bap_id, transaction_id, message_id, city }
+const triggerPushOnSearch = async (req, res) => {
+  const { bap_uri, bap_id, transaction_id, message_id, city } = req.body || {};
+  if (!bap_uri) return res.status(400).json({ error: 'bap_uri is required' });
+
+  try {
+    const tenants = await getActiveTenants();
+    if (!tenants.length) return res.status(404).json({ error: 'No active tenants' });
+
+    const context = {
+      domain:       'ONDC:RET10',
+      country:      'IND',
+      city:         city || 'std:080',
+      core_version: '1.2.0',
+      bap_id:       bap_id || '',
+      bap_uri:      bap_uri,
+      transaction_id: transaction_id || uuidv4(),
+      message_id:   message_id || uuidv4(),
+    };
+
+    for (const tenant of tenants) {
+      const ondcConfig = resolveOndcConfig(tenant);
+      const catalog    = await buildCatalog(tenant.id, ondcConfig, context.city);
+      if (!catalog) continue;
+      await sendOnSearch({ ...context, message_id: uuidv4() }, catalog, ondcConfig);
+    }
+
+    logger.info('triggerPushOnSearch: on_search sent', { bap_uri });
+    res.json({ success: true, message: 'on_search pushed', bap_uri });
+  } catch (err) {
+    logger.error('triggerPushOnSearch failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 const triggerSetOutOfStock = (req, res) => {
   const { item_ids, item_id } = req.body || {};
   const ids = item_ids || (item_id ? [item_id] : []);
@@ -2989,4 +3046,5 @@ module.exports = {
   triggerMerchantStatusSequence,
   triggerSetOutOfStock,
   triggerClearOutOfStock,
+  triggerPushOnSearch,
 };

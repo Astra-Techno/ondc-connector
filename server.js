@@ -35,6 +35,7 @@ const {
   triggerSendReconReceiver,
   triggerSetOutOfStock,
   triggerClearOutOfStock,
+  triggerPushOnSearch,
 } = require('./src/controllers/ondc.controller');
 const {
   LOGISTICS_DOMAIN,
@@ -267,6 +268,7 @@ app.post('/trigger/send-recon/:order_id',               triggerSendRecon);
 app.post('/trigger/send-recon-receiver/:order_id',      triggerSendReconReceiver);
 app.post('/trigger/set-out-of-stock',                    triggerSetOutOfStock);
 app.post('/trigger/clear-out-of-stock',                  triggerClearOutOfStock);
+app.post('/trigger/push-on-search',                      triggerPushOnSearch);
 
 // GCR catalog validation feedback
 app.post('/catalog_rejection', (req, res) => {
