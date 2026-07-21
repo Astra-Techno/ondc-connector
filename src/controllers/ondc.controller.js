@@ -363,7 +363,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           common_or_generic_name_of_commodity:          p.name,
           net_quantity_or_measure_of_commodity_in_pkg:  `1 ${p.unit || 'unit'}`,
           month_year_of_manufacture_packing_import:     new Date().toISOString().substring(0, 7),
-          imported_product_country_of_origin:           'IND',
+          // imported_product_country_of_origin removed — not allowed in v1.2.0 schema
         },
         tags: [
           { code: 'origin', list: [{ code: 'country', value: 'IND' }] },
@@ -429,10 +429,6 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           type: 'Delivery',
           contact: { phone: (vendor.phone || '').replace(/^\+91/, ''), email: vendor.email || '' },
         }],
-        payment_methods: [{
-          '@ondc/org/buyer_app_finder_fee_type':   'percent',
-          '@ondc/org/buyer_app_finder_fee_amount': '3',
-        }],
         tags: [
           {
             code: 'serviceability',
@@ -482,11 +478,8 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
 
     return {
       'bpp/descriptor':   bppDescriptor,
-      'bpp/categories':   [{ id: 'Grocery', descriptor: { name: 'Grocery' } }],
       'bpp/providers':    providers,
       'bpp/fulfillments': [{ id: 'f1', type: 'Delivery' }],
-      'bpp/payments':     [{ '@ondc/org/buyer_app_finder_fee_type': 'percent', '@ondc/org/buyer_app_finder_fee_amount': '3' }],
-      'bpp/offers':       [],
     };
   } catch (err) {
     logger.error('buildCatalog failed:', err.message);
