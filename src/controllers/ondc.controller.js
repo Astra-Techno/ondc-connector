@@ -467,12 +467,6 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
             { code: 'accept_bap_terms', value: 'Y'  },
           ],
         },
-        {
-          code: 'catalog_full',
-          list: [
-            { code: 'auto', value: 'false' },
-          ],
-        },
       ],
     };
 
