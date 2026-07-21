@@ -344,7 +344,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         },
         quantity: {
           unitized: { measure: { unit: p.unit || 'unit', value: '1' } },
-          available: { count: String(Math.max(p.stock || 0, 0)) },
+          available: { count: (p.stock > 0) ? '99' : '0' },
           maximum:   { count: String(Math.max(p.stock || 0, 0)) },
         },
         category_id:    'Grocery',
