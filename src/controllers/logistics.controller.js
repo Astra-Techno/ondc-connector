@@ -194,8 +194,7 @@ const buildLogisticsRelayFulfillment = (f, vendor, retailState, now) => {
     id:       f.id   || 'f1',
     type:     f.type || 'Delivery',
     state:    { descriptor: { code: retailState } },
-    tracking: true,
-    '@ondc/org/tracking':      true,
+    tracking: false,
     '@ondc/org/provider_name': vendor?.business_name || vendor?.name || 'Store',
     '@ondc/org/category':      f['@ondc/org/category'] || 'Grocery',
     '@ondc/org/TAT':           f['@ondc/org/TAT']      || 'PT24H',
@@ -212,6 +211,13 @@ const buildLogisticsRelayFulfillment = (f, vendor, retailState, now) => {
         },
       },
       time:    { range: { start: t1h, end: t2h }, timestamp: t1h },
+      instructions: {
+        code: '1',
+        name: 'Ready for pickup',
+        short_desc: 'Order is ready for pickup',
+        long_desc: 'Order has been packed and is ready for pickup by logistics',
+        images: ['https://ondc.cottkart.com/pickup-instructions.png'],
+      },
       contact: { phone, email: vendor?.email || process.env.SUPPORT_EMAIL || 'support@store.in' },
     },
     end: {
