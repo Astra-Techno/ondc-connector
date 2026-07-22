@@ -628,6 +628,18 @@ const handleSelect = async (req, res) => {
         }
       }
 
+      // Mark forced OOS items as count:"0" in quote breakup (schema requires "99" or "0" only)
+      if (outOfStockItems.length > 0 && quote?.breakup) {
+        for (const b of quote.breakup) {
+          if (outOfStockItems.includes(String(b['@ondc/org/item_id']))) {
+            if (b.item?.quantity) {
+              b.item.quantity.available = { count: '0' };
+              b.item.quantity.maximum   = { count: '0' };
+            }
+          }
+        }
+      }
+
       let providerName = '';
       try {
         const providerId = order.provider?.id;

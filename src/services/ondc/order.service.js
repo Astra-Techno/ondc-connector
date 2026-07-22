@@ -73,8 +73,8 @@ const buildQuote = async (items, tenantId) => {
       price: { currency: 'INR', value: lineTotal.toFixed(2) },
       item: {
         quantity: {
-          available: { count: String(product.stock || qty) },
-          maximum:   { count: String(product.stock || qty) },
+          available: { count: product.stock > 0 ? '99' : '0' },
+          maximum:   { count: product.stock > 0 ? '99' : '0' },
         },
         price: { currency: 'INR', value: price.toFixed(2) },
       },
