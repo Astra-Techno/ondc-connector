@@ -95,8 +95,11 @@ const buildFulfillmentWithLocation = (f, vendor, stateCode, now) => {
   const phone = (vendor?.phone || '9999999999').replace(/^\+91/, '');
   const gps   = normalizeGps(vendor?.gps);
 
+  // Strip BAP-sent properties not allowed in BPP on_* responses
+  const { '@ondc/org/tracking': _tracking, ...fRest } = f;
+
   return {
-    ...f,
+    ...fRest,
     id:       f.id   || 'f1',
     type:     f.type || 'Delivery',
     state:    { descriptor: { code: stateCode } },
@@ -1896,7 +1899,6 @@ const handleTrack = async (req, res) => {
             updated_at: trackNow,
             time:       { timestamp: trackNow },
           },
-          tags: ORDER_TAGS,
         },
       }, tenant);
 
