@@ -43,14 +43,10 @@ let lastIssueId = null;
 const CANCELLATION_TERMS = [
   {
     fulfillment_state: { descriptor: { code: 'Pending',         short_desc: 'Pending'         } },
-    refund_eligible:   true,
-    reason_required:   false,
     cancellation_fee:  { percentage: '0',   amount: { currency: 'INR', value: '0.00'    } },
   },
   {
     fulfillment_state: { descriptor: { code: 'Order-picked-up', short_desc: 'Order-picked-up' } },
-    refund_eligible:   false,
-    reason_required:   true,
     cancellation_fee:  { percentage: '100', amount: { currency: 'INR', value: '0.00'    } },
   },
 ];
@@ -68,12 +64,10 @@ const ORDER_TAGS = [{
   ],
 }];
 
-// RSF 2.0 requires settlement_id, settlement_amount, settlement_timestamp per settlement
 const buildSettlementDetails = (settlementAmount = '0.00') => [{
   settlement_counterparty:    'buyer-app',
   settlement_phase:           'sale-amount',
   settlement_type:            'upi',
-  settlement_id:              uuidv4(),
   settlement_amount:          String(settlementAmount),
   settlement_timestamp:       new Date().toISOString(),
   beneficiary_name:           'CottKart Pvt Ltd',
