@@ -1627,7 +1627,7 @@ const triggerMerchantCancel = async (req, res) => {
     // For RTO: Delivery fulfillment keeps Out-for-delivery + RTO fulfillment (RTO-Initiated)
     // For non-RTO (3C): single Delivery fulfillment with state Cancelled
     const deliveryFulfillments = (order.fulfillments || []).map(f => ({
-      ...buildFulfillmentWithLocation(f, cachedVendor, rto ? 'Out-for-delivery' : 'Cancelled', now),
+      ...buildFulfillmentWithLocation(f, cachedVendor, 'Cancelled', now),
       tags: cancelFulfillmentTags,
     }));
 
@@ -1748,7 +1748,7 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
     buildFulfillmentWithLocation(f, vendor, isRto ? 'Out-for-delivery' : fulfillmentState, now)
   );
   const fulfillments = isRto
-    ? [...deliveryFulfillments, buildRtoFulfillment(fulfillmentState, '011')]
+    ? [...deliveryFulfillments, { id: 'rto1', type: 'RTO', state: { descriptor: { code: fulfillmentState } } }]
     : deliveryFulfillments;
 
   return {
