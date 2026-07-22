@@ -118,7 +118,7 @@ const buildFulfillmentWithLocation = (f, vendor, stateCode, now) => {
       },
       time:    { range: { start: t1h, end: t2h }, timestamp: t1h },
       instructions: {
-        code: 'ready_for_pickup',
+        code: '1',
         name: 'Ready for pickup',
         short_desc: 'Order is ready for pickup',
         long_desc: 'Order has been packed and is ready for pickup by logistics',
