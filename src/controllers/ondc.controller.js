@@ -672,7 +672,7 @@ const handleSelect = async (req, res) => {
         payload.error = {
           type: 'DOMAIN-ERROR',
           code: '40002',
-          message: `Items out of stock: ${outOfStockItems.join(', ')}`,
+          message: JSON.stringify(outOfStockItems.map(id => ({ item_id: String(id), error: '40002' }))),
         };
         logger.warn('Out of stock items in /select', { outOfStockItems });
       }
