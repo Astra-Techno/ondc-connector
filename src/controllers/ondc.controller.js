@@ -652,7 +652,7 @@ const handleSelect = async (req, res) => {
       const payload = {
         order: {
           provider: order.provider,
-          items: items.map(i => ({ ...i, fulfillment_id: i.fulfillment_id || 'f1' })),
+          items: items.map(i => ({ ...i, fulfillment_id: i.fulfillment_id || 'f1', location_id: i.location_id || 'l1' })),
           quote,
           fulfillments: (fulfillments.length > 0 ? fulfillments : [{ id: 'f1', type: 'Delivery' }]).map(f => ({
             ...f,

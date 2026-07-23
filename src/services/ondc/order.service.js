@@ -84,8 +84,16 @@ const buildQuote = async (items, tenantId) => {
   breakup.push({
     title: 'Delivery charges',
     '@ondc/org/item_id': 'f1',
+    '@ondc/org/item_quantity': { count: 1 },
     '@ondc/org/title_type': 'delivery',
     price: { currency: 'INR', value: String(DELIVERY_CHARGE) },
+    item: {
+      quantity: {
+        available: { count: '99' },
+        maximum:   { count: '99' },
+      },
+      price: { currency: 'INR', value: String(DELIVERY_CHARGE) },
+    },
   });
 
   const total = (itemTotal + DELIVERY_CHARGE).toFixed(2);
