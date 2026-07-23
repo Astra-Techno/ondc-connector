@@ -1056,11 +1056,16 @@ const handleCancel = async (req, res) => {
     const { order_id, cancellation_reason_id } = body.message || {};
     logger.info('ONDC /cancel received', { order_id });
 
-    // Flow 7 (Non Cancellable): NACK if order already delivered/cancelled.
+    // Flow 7 (Non Cancellable): NACK if order already delivered/in RTO.
     // Flow 2 (Buyer Cancel): ACK if order is still in-progress and can be cancelled.
     const cachedEntry = confirmedOrderCache.get(order_id);
     const currentState = cachedEntry?.currentFulfillmentState || '';
-    const NON_CANCELLABLE = new Set(['Order-delivered', 'Cancelled', 'RTO-Initiated', 'RTO-Delivered']);
+    // Already cancelled — ACK silently (idempotent retry, e.g. Workbench retries /cancel)
+    if (currentState === 'Cancelled') {
+      logger.info('ONDC /cancel idempotent ACK — order already cancelled', { order_id });
+      return ack(res, context);
+    }
+    const NON_CANCELLABLE = new Set(['Order-delivered', 'RTO-Initiated', 'RTO-Delivered']);
     if (NON_CANCELLABLE.has(currentState)) {
       logger.info('ONDC /cancel NACK — order not cancellable in current state', { order_id, currentState });
       return nack(res, context, 'Order cannot be cancelled');
