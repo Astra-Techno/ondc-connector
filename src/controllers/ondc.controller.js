@@ -307,6 +307,9 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
       if (!products.length) continue;
 
       const now = new Date().toISOString();
+      const todayStr = now.split('T')[0];
+      const storeOpenUTC  = new Date(`${todayStr}T09:00:00+05:30`).toISOString();
+      const storeCloseUTC = new Date(`${todayStr}T21:00:00+05:30`).toISOString();
       const defaultImg = 'https://ondc.cottkart.com/assets/placeholder.png';
       const itemImages = (p) => {
         try {
@@ -407,7 +410,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
               frequency: 'PT4H',
               times:     ['0900', '1300', '1700', '2100'],
             },
-            range:     { start: '0900', end: '2100' },
+            range:     { start: storeOpenUTC, end: storeCloseUTC },
           },
           circle: {
             gps:    gps6,
