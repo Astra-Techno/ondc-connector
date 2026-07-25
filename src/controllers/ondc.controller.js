@@ -417,7 +417,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
               frequency: 'PT4H',
               times:     ['0900', '1300', '1700', '2100'],
             },
-            range:     { start: storeOpenUTC, end: storeCloseUTC },
+            range:     { start: '0900', end: '2100' },
           },
           circle: {
             gps:    gps6,
@@ -426,6 +426,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         }],
         creds: [{
           id:  vendor.fssai_license_no || vendor.fssai_number || '12345678901234',
+          url: 'https://www.fssai.gov.in',
           descriptor: {
             name: 'FSSAI License',
             code: 'FSSAI',
