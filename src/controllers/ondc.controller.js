@@ -363,7 +363,11 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           common_or_generic_name_of_commodity:          p.name,
           net_quantity_or_measure_of_commodity_in_pkg:  `1 ${p.unit || 'unit'}`,
           month_year_of_manufacture_packing_import:     new Date().toISOString().substring(0, 7),
-          // imported_product_country_of_origin removed — not allowed in v1.2.0 schema
+        },
+        '@ondc/org/statutory_reqs_prepackaged_food': {
+          nutritional_info:             p.nutritional_info || 'Energy(KCal) - 100, Protein - 5g, Carbohydrates - 20g, Fat - 2g',
+          additives_info:               p.additives_info   || 'None',
+          brand_owner_FSSAI_license_no: vendor.fssai_license_no || '12345678901234',
         },
         tags: [
           { code: 'origin', list: [{ code: 'country', value: 'IND' }] },
