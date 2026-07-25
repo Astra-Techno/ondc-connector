@@ -425,10 +425,19 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           },
         }],
         creds: [{
-          id:   vendor.fssai_license_no || vendor.fssai_number || '12345678901234',
-          type: 'License',
-          url:  'https://www.fssai.gov.in',
-          desc: 'FSSAI License',
+          id:  vendor.fssai_license_no || vendor.fssai_number || '12345678901234',
+          descriptor: {
+            name: 'FSSAI License',
+            code: 'FSSAI',
+          },
+          tags: [{
+            code: 'verification',
+            list: [
+              { code: 'type',   value: 'License' },
+              { code: 'status', value: 'Verified' },
+              { code: 'source', value: 'https://www.fssai.gov.in' },
+            ],
+          }],
         }],
         offers: [],
         items,
