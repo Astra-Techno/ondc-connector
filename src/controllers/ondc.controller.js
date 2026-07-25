@@ -367,7 +367,10 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         '@ondc/org/statutory_reqs_prepackaged_food': {
           nutritional_info:             p.nutritional_info || 'Energy(KCal) - 100, Protein - 5g, Carbohydrates - 20g, Fat - 2g',
           additives_info:               p.additives_info   || 'None',
-          brand_owner_FSSAI_license_no: vendor.fssai_license_no || '12345678901234',
+          brand_owner_FSSAI_license_no: vendor.fssai_license_no || vendor.fssai_number || '12345678901234',
+          other_FSSAI_license_no:       vendor.fssai_license_no || vendor.fssai_number || '12345678901234',
+          importer_FSSAI_license_no:    vendor.fssai_license_no || vendor.fssai_number || '12345678901234',
+          ingredients_info:             p.ingredients_info || 'Natural ingredients',
         },
         tags: [
           { code: 'origin', list: [{ code: 'country', value: 'IND' }] },
@@ -421,6 +424,13 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
             radius: { unit: 'km', value: '10' },
           },
         }],
+        creds: [{
+          id:   vendor.fssai_license_no || vendor.fssai_number || '12345678901234',
+          type: 'License',
+          url:  'https://www.fssai.gov.in',
+          desc: 'FSSAI License',
+        }],
+        offers: [],
         items,
         fulfillments: [{
           id:   'f1',
