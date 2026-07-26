@@ -417,7 +417,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
               frequency: 'PT4H',
               times:     ['0900', '1300', '1700', '2100'],
             },
-            range:     { start: '0900', end: '2100' },
+            range:     { start: storeOpenUTC, end: storeCloseUTC },
           },
           circle: {
             gps:    gps6,
