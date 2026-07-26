@@ -13,13 +13,19 @@ const error = (res, message = 'Error', code = 500, errors = null) => {
 const PRAMAAN_SYNC_ACTIONS = new Set(['select', 'init', 'confirm']);
 
 // Build ONDC-compliant sync ACK body
+// Always overwrite bpp_id/bpp_uri with OUR subscriber identity.
+// Workbench/Pramaan may send wrong bpp_id (e.g. workbench.ondc.tech) in inbound
+// context — echoing it fails: "bpp_id should be same as received in first on_search".
 const buildAckBody = (context = null, status = 'ACK') => {
   if (!context) return { message: { ack: { status } } };
 
+  const ourBppId  = process.env.ONDC_SUBSCRIBER_ID  || context.bpp_id;
+  const ourBppUri = process.env.ONDC_SUBSCRIBER_URL || context.bpp_uri;
+
   const enrichedContext = {
     ...context,
-    bpp_id:  context.bpp_id  || process.env.ONDC_SUBSCRIBER_ID,
-    bpp_uri: context.bpp_uri || process.env.ONDC_SUBSCRIBER_URL,
+    bpp_id:  ourBppId,
+    bpp_uri: ourBppUri,
     timestamp: new Date().toISOString(),
   };
 

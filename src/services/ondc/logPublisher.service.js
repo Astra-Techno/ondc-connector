@@ -66,8 +66,9 @@ const enrichLogData = (data) => {
     ...data,
     context: {
       ...data.context,
-      bpp_id:  data.context.bpp_id  || process.env.ONDC_SUBSCRIBER_ID,
-      bpp_uri: data.context.bpp_uri || process.env.ONDC_SUBSCRIBER_URL,
+      // Always our BPP identity — never echo inbound mock/workbench bpp_id
+      bpp_id:  process.env.ONDC_SUBSCRIBER_ID  || data.context.bpp_id,
+      bpp_uri: process.env.ONDC_SUBSCRIBER_URL || data.context.bpp_uri,
     },
   };
 };
