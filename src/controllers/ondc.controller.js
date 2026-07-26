@@ -409,9 +409,10 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
             country:   'IND',
             area_code: vendor.pincode || '600001',
           },
-          // No time.range here — for label "enable", HHmm range is deprecated in 1.2
-          // and Pramaan validates range as RFC3339 (close-semantics). Store hours come
-          // from provider.tags timing + schedule below.
+          // range in HHmm (0900/2100): Workbench hard-NACKs without it
+          // (RANGE_START_AND_END regex ^([01]\d|2[0-3])[0-5]\d$).
+          // Pramaan's RFC3339 check on this field is OPTIONAL (non-blocking warning),
+          // so HHmm wins to keep the flow ACKed.
           time: {
             label:     'enable',
             timestamp: now,
@@ -421,6 +422,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
               frequency: 'PT4H',
               times:     ['0900', '1300', '1700', '2100'],
             },
+            range:     { start: '0900', end: '2100' },
           },
           circle: {
             gps:    gps6,
