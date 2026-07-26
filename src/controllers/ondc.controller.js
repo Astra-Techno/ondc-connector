@@ -345,7 +345,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         quantity: {
           unitized: { measure: { unit: p.unit || 'unit', value: '1' } },
           available: { count: (p.stock > 0 && !forcedOutOfStockItems.has(String(p.external_product_id))) ? '99' : '0' },
-          maximum:   { count: forcedOutOfStockItems.has(String(p.external_product_id)) ? '0' : String(Math.max(p.stock || 0, 0)) },
+          maximum:   { count: (p.stock > 0 && !forcedOutOfStockItems.has(String(p.external_product_id))) ? '99' : '0' },
         },
         category_id:    p.category || 'Snacks, Dry Fruits, Nuts',
         fulfillment_id: 'f1',
@@ -461,10 +461,23 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           {
             code: 'timing',
             list: [
-              { code: 'day_from',  value: '1'    },
-              { code: 'day_to',    value: '7'    },
-              { code: 'time_from', value: '0900' },
-              { code: 'time_to',   value: '2100' },
+              { code: 'type',      value: 'Order'   },
+              { code: 'location',  value: 'l1'      },
+              { code: 'day_from',  value: '1'       },
+              { code: 'day_to',    value: '7'       },
+              { code: 'time_from', value: '0900'    },
+              { code: 'time_to',   value: '2100'    },
+            ],
+          },
+          {
+            code: 'timing',
+            list: [
+              { code: 'type',      value: 'Delivery' },
+              { code: 'location',  value: 'l1'       },
+              { code: 'day_from',  value: '1'        },
+              { code: 'day_to',    value: '7'        },
+              { code: 'time_from', value: '0900'     },
+              { code: 'time_to',   value: '2100'     },
             ],
           },
         ],
@@ -483,6 +496,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           list: [
             { code: 'np_type',         value: 'MSN' },
             { code: 'accept_bap_terms', value: 'Y'  },
+            { code: 'collect_payment',  value: 'Y'  },
           ],
         },
       ],
