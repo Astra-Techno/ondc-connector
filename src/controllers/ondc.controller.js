@@ -65,7 +65,7 @@ const ORDER_TAGS = [{
 }];
 
 const buildSettlementDetails = (settlementAmount = '0.00') => [{
-  settlement_counterparty:    'buyer-app',
+  settlement_counterparty:    'seller-app',
   settlement_phase:           'sale-amount',
   settlement_type:            'upi',
   settlement_amount:          String(settlementAmount),
@@ -356,7 +356,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         '@ondc/org/seller_pickup_return': false,
         '@ondc/org/time_to_ship':         p.time_to_ship  || 'PT45M',
         '@ondc/org/available_on_cod':     Boolean(p.available_on_cod),
-        '@ondc/org/contact_details_consumer_care': `phone:${(vendor.phone || '').replace(/^\+91/, '')},email:${vendor.email || ''}`,
+        '@ondc/org/contact_details_consumer_care': `${vendor.business_name || 'Store'},${vendor.email || 'support@store.in'},${(vendor.phone || '9999999999').replace(/^\+91/, '')}`,
         '@ondc/org/statutory_reqs_packaged_commodities': {
           manufacturer_or_packer_name:                  vendor.business_name,
           manufacturer_or_packer_address:               [vendor.address, vendor.city].filter(Boolean).join(', ') || vendor.city || 'India',
@@ -374,6 +374,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         },
         tags: [
           { code: 'origin', list: [{ code: 'country', value: 'IND' }] },
+          { code: 'veg_nonveg', list: [{ code: 'veg', value: p.is_veg === false ? 'no' : 'yes' }] },
         ],
       };});
 
@@ -428,15 +429,16 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           id:  vendor.fssai_license_no || vendor.fssai_number || '12345678901234',
           url: 'https://www.fssai.gov.in',
           descriptor: {
+            code: vendor.fssai_license_no || vendor.fssai_number || '12345678901234',
+            short_desc: `${vendor.fssai_license_no || vendor.fssai_number || '12345678901234'}-FF`,
             name: 'FSSAI License',
-            code: 'FSSAI',
           },
           tags: [{
             code: 'verification',
             list: [
-              { code: 'type',   value: 'License' },
-              { code: 'status', value: 'Verified' },
-              { code: 'source', value: 'https://www.fssai.gov.in' },
+              { code: 'verify_url', value: 'https://www.fssai.gov.in' },
+              { code: 'valid_from', value: '2024-01-01T00:00:00.000Z' },
+              { code: 'valid_to',   value: '2027-12-31T23:59:59.999Z' },
             ],
           }],
         }],
@@ -692,7 +694,10 @@ const handleSelect = async (req, res) => {
 
       const payload = {
         order: {
-          provider: order.provider,
+          provider: {
+            ...order.provider,
+            locations: order.provider?.locations || [{ id: 'l1' }],
+          },
           items: items.map(i => ({ ...i, fulfillment_id: i.fulfillment_id || 'f1', location_id: i.location_id || 'l1' })),
           quote,
           fulfillments: (fulfillments.length > 0 ? fulfillments : [{ id: 'f1', type: 'Delivery' }]).map(f => ({
@@ -1149,7 +1154,24 @@ const handleCancel = async (req, res) => {
       const cancelTime = context?.timestamp ? new Date(context.timestamp).getTime() : 0;
       const now = new Date(Math.max(Date.now() + 1, cancelTime + 1)).toISOString();
 
-      const cancelFulfillmentTags = [{ code: 'cancellation_terms', list: [{ code: 'reason_required', value: 'false' }] }];
+      // Spec: on_cancel fulfillments need cancel_request + precancel_state tags
+      const preCancelState = cachedEntry?.currentFulfillmentState || 'Pending';
+      const cancelFulfillmentTags = [
+        {
+          code: 'cancel_request',
+          list: [
+            { code: 'reason_id',    value: cancellation_reason_id || '001' },
+            { code: 'initiated_by', value: context.bap_id || 'buyerNP.com' },
+          ],
+        },
+        {
+          code: 'precancel_state',
+          list: [
+            { code: 'fulfillment_state', value: preCancelState },
+            { code: 'updated_at',        value: cachedOrder?.updated_at || now },
+          ],
+        },
+      ];
 
       const cancelPayload = cachedOrder ? {
         id:    order_id,
@@ -1169,7 +1191,7 @@ const handleCancel = async (req, res) => {
           status: 'PAID',
         },
         cancellation: {
-          cancelled_by: 'CONSUMER',
+          cancelled_by: context.bap_id || 'buyerNP.com',
           reason: { id: cancellation_reason_id || '001' },
         },
         fulfillments: (cachedOrder.fulfillments || []).map(f => ({
@@ -1182,7 +1204,7 @@ const handleCancel = async (req, res) => {
         id:    order_id,
         state: 'Cancelled',
         cancellation: {
-          cancelled_by: 'CONSUMER',
+          cancelled_by: context.bap_id || 'buyerNP.com',
           reason: { id: cancellation_reason_id || '001' },
         },
         fulfillments: [{ id: 'f1', state: { descriptor: { code: 'Cancelled' } }, tags: cancelFulfillmentTags }],
@@ -1668,13 +1690,29 @@ const triggerMerchantCancel = async (req, res) => {
 
     const now = new Date().toISOString();
     const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';
-    const cancelFulfillmentTags = [{ code: 'cancellation_terms', list: [{ code: 'reason_required', value: 'false' }] }];
+    const merchantPreCancelState = cachedEntry?.currentFulfillmentState || 'Pending';
+    const merchantCancelFulfillmentTags = [
+      {
+        code: 'cancel_request',
+        list: [
+          { code: 'reason_id',    value: reason_id || '011' },
+          { code: 'initiated_by', value: subscriberId },
+        ],
+      },
+      {
+        code: 'precancel_state',
+        list: [
+          { code: 'fulfillment_state', value: merchantPreCancelState },
+          { code: 'updated_at',        value: order.updated_at || now },
+        ],
+      },
+    ];
 
     // For RTO: Delivery fulfillment keeps Out-for-delivery + RTO fulfillment (RTO-Initiated)
     // For non-RTO (3C): single Delivery fulfillment with state Cancelled
     const deliveryFulfillments = (order.fulfillments || []).map(f => ({
       ...buildFulfillmentWithLocation(f, cachedVendor, 'Cancelled', now),
-      tags: cancelFulfillmentTags,
+      tags: merchantCancelFulfillmentTags,
     }));
 
     const fulfillments = rto
@@ -1699,7 +1737,7 @@ const triggerMerchantCancel = async (req, res) => {
         status: 'PAID',
       },
       cancellation: {
-        cancelled_by: rto ? subscriberId : (context?.bap_id || 'SELLER'),
+        cancelled_by: rto ? subscriberId : subscriberId,
         reason: { id: reason_id },
       },
       fulfillments,
