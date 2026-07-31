@@ -1177,31 +1177,68 @@ const handleCancel = async (req, res) => {
         },
       ];
 
+      // Build Cancel fulfillment with quote_trail tags (SDK spec: separate Cancel-type fulfillment)
+      const cancelFulfillmentId = `cancel_${order_id}`;
+      let cancelledQuote = cachedOrder?.quote ? JSON.parse(JSON.stringify(cachedOrder.quote)) : null;
+      const quoteTrailTags = [];
+      if (cancelledQuote?.breakup) {
+        for (const item of cancelledQuote.breakup) {
+          const price = parseFloat(item.price?.value || '0');
+          if (price === 0) continue;
+          quoteTrailTags.push({
+            code: 'quote_trail',
+            list: [
+              { code: 'type',     value: item['@ondc/org/title_type'] || 'item' },
+              { code: 'id',       value: item['@ondc/org/item_id'] || '' },
+              { code: 'currency', value: 'INR' },
+              { code: 'value',    value: `${-1 * price}` },
+            ],
+          });
+          item.price.value = '0';
+          if (item['@ondc/org/item_quantity']) item['@ondc/org/item_quantity'].count = 0;
+        }
+        cancelledQuote.price.value = '0';
+      }
+
+      // Items: original items with count=0 + copies pointing to Cancel fulfillment
+      const originalItems = (cachedOrder?.items || []);
+      const cancelItems = [];
+      for (const item of originalItems) {
+        cancelItems.push({ ...item, quantity: { count: 0 } });
+        cancelItems.push({ id: item.id, quantity: { count: item.quantity?.count || 1 }, fulfillment_id: cancelFulfillmentId });
+      }
+
+      const cancelTypeFulfillment = {
+        id:    cancelFulfillmentId,
+        type:  'Cancel',
+        state: { descriptor: { code: 'Cancelled' } },
+        tags:  quoteTrailTags,
+      };
+
       const cancelPayload = cachedOrder ? {
         id:    order_id,
         state: 'Cancelled',
         provider:  cachedOrder.provider,
-        items:     cachedOrder.items,
+        items:     cancelItems,
         billing:   cachedOrder.billing,
-        quote:     cachedOrder.quote,
+        quote:     cancelledQuote || cachedOrder.quote,
         payment: {
           ...(cachedOrder.payment || {}),
           '@ondc/org/buyer_app_finder_fee_type':   'percent',
           '@ondc/org/buyer_app_finder_fee_amount': '3',
-          '@ondc/org/settlement_basis':             'return_window_expiry',
-          '@ondc/org/settlement_window':            'P1D',
-          '@ondc/org/withholding_amount':           '10.00',
           '@ondc/org/settlement_details':           buildSettlementDetails(),
           status: 'PAID',
         },
         cancellation: {
           cancelled_by: context.bap_id || 'buyerNP.com',
-          reason: { id: cancellation_reason_id || '001' },
         },
-        fulfillments: (cachedOrder.fulfillments || []).map(f => ({
-          ...buildFulfillmentWithLocation(f, cachedVendor, 'Cancelled', now),
-          tags: cancelFulfillmentTags,
-        })),
+        fulfillments: [
+          ...(cachedOrder.fulfillments || []).map(f => ({
+            ...buildFulfillmentWithLocation(f, cachedVendor, 'Cancelled', now),
+            tags: cancelFulfillmentTags,
+          })),
+          cancelTypeFulfillment,
+        ],
         created_at:  cachedOrder.created_at || now,
         updated_at:  now,
       } : {
@@ -1209,9 +1246,11 @@ const handleCancel = async (req, res) => {
         state: 'Cancelled',
         cancellation: {
           cancelled_by: context.bap_id || 'buyerNP.com',
-          reason: { id: cancellation_reason_id || '001' },
         },
-        fulfillments: [{ id: 'f1', state: { descriptor: { code: 'Cancelled' } }, tags: cancelFulfillmentTags }],
+        fulfillments: [
+          { id: 'f1', state: { descriptor: { code: 'Cancelled' } }, tags: cancelFulfillmentTags },
+          cancelTypeFulfillment,
+        ],
         updated_at: now,
       };
 
@@ -1649,20 +1688,53 @@ const triggerMerchantReturnUpdate = async (req, res) => {
 };
 
 // Build RTO fulfillment object (type "RTO") for Flow 3B
-const buildRtoFulfillment = (rtoState, reasonId) => {
-  const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';
+// SDK spec: RTO fulfillment has quote_trail tags (negative values per breakup item) + start/end locations
+const buildRtoFulfillment = (rtoState, reasonId, order, deliveryFulfillment) => {
+  const quote = order?.quote || {};
+  const breakup = quote.breakup || [];
+
+  // Build quote_trail tags from breakup items with non-zero prices
+  const quoteTrailTags = breakup
+    .map(item => {
+      const price = parseFloat(item.price?.value || '0');
+      if (price === 0) return null;
+      return {
+        code: 'quote_trail',
+        list: [
+          { code: 'type',     value: item['@ondc/org/title_type'] || 'item' },
+          { code: 'id',       value: item['@ondc/org/item_id'] || '' },
+          { code: 'currency', value: 'INR' },
+          { code: 'value',    value: `${-1 * price}` },
+        ],
+      };
+    })
+    .filter(Boolean);
+
+  // RTO start = delivery end (buyer), RTO end = delivery start (seller)
+  const rtoStart = deliveryFulfillment?.end ? {
+    ...(deliveryFulfillment.end.location ? { location: deliveryFulfillment.end.location } : {}),
+    ...(deliveryFulfillment.end.contact ? { contact: deliveryFulfillment.end.contact } : {}),
+    time: { timestamp: new Date().toISOString() },
+  } : { time: { timestamp: new Date().toISOString() } };
+
+  const rtoEnd = deliveryFulfillment?.start ? {
+    ...(deliveryFulfillment.start.location ? { location: deliveryFulfillment.start.location } : {}),
+    ...(deliveryFulfillment.start.contact ? { contact: deliveryFulfillment.start.contact } : {}),
+  } : {};
+
   return {
     id:   'rto1',
     type: 'RTO',
     state: { descriptor: { code: rtoState } },
-    tags: [{
-      code: 'rto_event',
+    start: rtoStart,
+    end:   rtoEnd,
+    tags:  quoteTrailTags.length > 0 ? quoteTrailTags : [{
+      code: 'quote_trail',
       list: [
-        { code: 'retry_count',            value: '0' },
-        { code: 'rto_id',                 value: 'rto1' },
-        { code: 'cancellation_reason_id', value: reasonId || '011' },
-        { code: 'cancelled_by',           value: subscriberId },
-        { code: 'sub_reason_id',          value: '' },
+        { code: 'type',     value: 'item' },
+        { code: 'id',       value: '' },
+        { code: 'currency', value: 'INR' },
+        { code: 'value',    value: '0' },
       ],
     }],
   };
@@ -1695,14 +1767,21 @@ const triggerMerchantCancel = async (req, res) => {
     const now = new Date().toISOString();
     const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';
     const merchantPreCancelState = cachedEntry?.currentFulfillmentState || 'Pending';
-    const merchantCancelFulfillmentTags = [
-      {
-        code: 'cancel_request',
-        list: [
+    // For RTO: Delivery cancel_request needs retry_count + rto_id per SDK spec
+    const merchantCancelRequestList = rto
+      ? [
+          { code: 'retry_count',  value: '3' },
+          { code: 'rto_id',       value: 'rto1' },
+          { code: 'reason_id',    value: reason_id || '013' },
+          { code: 'initiated_by', value: subscriberId },
+        ]
+      : [
           { code: 'reason_id',    value: reason_id || '011' },
           { code: 'initiated_by', value: subscriberId },
-        ],
-      },
+        ];
+
+    const merchantCancelFulfillmentTags = [
+      { code: 'cancel_request', list: merchantCancelRequestList },
       {
         code: 'precancel_state',
         list: [
@@ -1712,36 +1791,64 @@ const triggerMerchantCancel = async (req, res) => {
       },
     ];
 
-    // For RTO: Delivery fulfillment keeps Out-for-delivery + RTO fulfillment (RTO-Initiated)
+    // For RTO: Delivery fulfillment state = Cancelled + RTO fulfillment (RTO-Initiated)
     // For non-RTO (3C): single Delivery fulfillment with state Cancelled
-    const deliveryFulfillments = (order.fulfillments || []).map(f => ({
-      ...buildFulfillmentWithLocation(f, cachedVendor, 'Cancelled', now),
+    const builtDeliveryFulfillments = (order.fulfillments || []).map(f =>
+      buildFulfillmentWithLocation(f, cachedVendor, 'Cancelled', now)
+    );
+    const deliveryFulfillments = builtDeliveryFulfillments.map(f => ({
+      ...f,
       tags: merchantCancelFulfillmentTags,
     }));
 
+    const deliveryF = builtDeliveryFulfillments[0] || null;
     const fulfillments = rto
-      ? [...deliveryFulfillments, buildRtoFulfillment('RTO-Initiated', reason_id)]
+      ? [...deliveryFulfillments, buildRtoFulfillment('RTO-Initiated', reason_id, order, deliveryF)]
       : deliveryFulfillments;
+
+    // For RTO cancel: zero out all quote breakup prices and item quantities per SDK spec
+    // (13_on_cancel_rto/generator.js lines 81-93: quote.price.value = "0.00", breakup prices zeroed)
+    const cancelQuote = JSON.parse(JSON.stringify(order.quote || { price: { currency: 'INR', value: '0' }, breakup: [], ttl: 'P1D' }));
+    if (rto) {
+      if (cancelQuote.price) cancelQuote.price.value = '0.00';
+      (cancelQuote.breakup || []).forEach(item => {
+        if (item.price) item.price.value = '0.00';
+        if (item['@ondc/org/item_quantity']) item['@ondc/org/item_quantity'].count = 0;
+      });
+    }
+
+    // For RTO cancel: duplicate items — originals with count=0 on Delivery, copies with original count on RTO
+    let cancelItems = order.items || [];
+    if (rto) {
+      const rtoItems = cancelItems
+        .filter(item => (item.quantity?.count || 0) > 0)
+        .map(item => ({
+          id: item.id,
+          quantity: { count: item.quantity.count },
+          fulfillment_id: 'rto1',
+        }));
+      cancelItems = [
+        ...cancelItems.map(item => ({ ...item, quantity: { count: 0 } })),
+        ...rtoItems,
+      ];
+    }
 
     const cancelPayload = {
       id:    order_id,
       state: 'Cancelled',
       provider:  order.provider,
-      items:     order.items,
+      items:     cancelItems,
       billing:   order.billing,
-      quote:     order.quote,
+      quote:     cancelQuote,
       payment: {
         ...(order.payment || {}),
         '@ondc/org/buyer_app_finder_fee_type':   'percent',
         '@ondc/org/buyer_app_finder_fee_amount': '3',
-        '@ondc/org/settlement_basis':             'return_window_expiry',
-        '@ondc/org/settlement_window':            'P1D',
-        '@ondc/org/withholding_amount':           '10.00',
         '@ondc/org/settlement_details':           buildSettlementDetails(),
         status: 'PAID',
       },
       cancellation: {
-        cancelled_by: rto ? subscriberId : subscriberId,
+        cancelled_by: subscriberId,
         reason: { id: reason_id },
       },
       fulfillments,
@@ -1829,15 +1936,28 @@ const triggerMerchantStatus = async (req, res) => {
 // Helper: build an on_status payload for a given fulfillment state + order state
 const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendor) => {
   const now = new Date().toISOString();
-  // RTO states: Delivery stays at Out-for-delivery + separate RTO fulfillment
+  // RTO states: Delivery state = Cancelled + separate RTO fulfillment with locations/tags
   const isRto = fulfillmentState === 'RTO-Delivered' || fulfillmentState === 'RTO-Initiated';
 
   const deliveryFulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
-    buildFulfillmentWithLocation(f, vendor, isRto ? 'Out-for-delivery' : fulfillmentState, now)
+    buildFulfillmentWithLocation(f, vendor, isRto ? 'Cancelled' : fulfillmentState, now)
   );
+
+  const deliveryF = deliveryFulfillments[0] || null;
   const fulfillments = isRto
-    ? [...deliveryFulfillments, { id: 'rto1', type: 'RTO', state: { descriptor: { code: fulfillmentState } } }]
+    ? [...deliveryFulfillments, buildRtoFulfillment(fulfillmentState, '013', order, deliveryF)]
     : deliveryFulfillments;
+
+  // For RTO on_status: zero out quote (same as on_cancel)
+  let statusQuote = order.quote;
+  if (isRto) {
+    statusQuote = JSON.parse(JSON.stringify(order.quote || { price: { currency: 'INR', value: '0' }, breakup: [], ttl: 'P1D' }));
+    if (statusQuote.price) statusQuote.price.value = '0.00';
+    (statusQuote.breakup || []).forEach(item => {
+      if (item.price) item.price.value = '0.00';
+      if (item['@ondc/org/item_quantity']) item['@ondc/org/item_quantity'].count = 0;
+    });
+  }
 
   return {
     id:       order_id,
@@ -1846,7 +1966,7 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
     items:    order.items,
     billing:  order.billing,
     fulfillments,
-    quote:     order.quote,
+    quote:     statusQuote,
     payment: {
       ...order.payment,
       '@ondc/org/settlement_details': buildSettlementDetails(),
