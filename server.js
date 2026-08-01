@@ -128,6 +128,36 @@ app.get('/debug/logs', async (req, res) => {
   }
 });
 
+// Workbench debug logs — list recent exchanges or view a specific one
+app.get('/debug/workbench', (req, res) => {
+  try {
+    const files = _fs.readdirSync(workbenchLogDir)
+      .filter(f => f.endsWith('.json'))
+      .sort()
+      .reverse()
+      .slice(0, parseInt(req.query.limit) || 50);
+    if (req.query.file) {
+      const safe = _path.basename(req.query.file);
+      const content = _fs.readFileSync(_path.join(workbenchLogDir, safe), 'utf8');
+      return res.type('json').send(content);
+    }
+    return res.json({ count: files.length, files });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Clear workbench logs
+app.delete('/debug/workbench', (req, res) => {
+  try {
+    const files = _fs.readdirSync(workbenchLogDir).filter(f => f.endsWith('.json'));
+    files.forEach(f => _fs.unlinkSync(_path.join(workbenchLogDir, f)));
+    return res.json({ deleted: files.length });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ONDC subscription challenge-response
 // Registry calls this with an encrypted challenge; we decrypt and return the answer
 app.get('/on_subscribe', (req, res) => {
@@ -240,6 +270,38 @@ const logInboundToDB = async (req, res, next) => {
   next();
 };
 app.use(ONDC_PATHS, logInboundToDB);
+
+// ─── Workbench debug logger — writes each request/response pair to logs/workbench/ ──
+const _fs   = require('fs');
+const _path = require('path');
+const workbenchLogDir = _path.join(__dirname, 'logs', 'workbench');
+_fs.mkdirSync(workbenchLogDir, { recursive: true });
+
+const logWorkbenchExchange = (req, res, next) => {
+  const ctx = req.body?.context;
+  if (!ctx?.action) return next();
+
+  // Capture the response body by intercepting res.json
+  const originalJson = res.json.bind(res);
+  res.json = (body) => {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const action = ctx.action;
+    const txnShort = (ctx.transaction_id || 'no-txn').slice(0, 8);
+    const filename = `${ts}_${action}_${txnShort}.json`;
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      direction: 'inbound',
+      url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+      method: req.method,
+      request: req.body,
+      response: body,
+    };
+    _fs.writeFile(_path.join(workbenchLogDir, filename), JSON.stringify(logEntry, null, 2), () => {});
+    return originalJson(body);
+  };
+  next();
+};
+app.use(ONDC_PATHS, logWorkbenchExchange);
 
 // ─── ONDC Gateway endpoints (root-level, no auth) ────────────────────────────
 app.post('/search',       handleSearch);

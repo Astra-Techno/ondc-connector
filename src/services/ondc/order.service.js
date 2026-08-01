@@ -1,9 +1,30 @@
 const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
+const fs   = require('fs');
+const path = require('path');
 const { pool } = require('../../config/database');
 const logger = require('../../utils/logger');
 const { createAuthHeader } = require('../../utils/crypto');
 const { pushTxnLog } = require('./logPublisher.service');
+
+// Workbench debug logger for outbound callbacks
+const wbLogDir = path.join(__dirname, '..', '..', 'logs', 'workbench');
+fs.mkdirSync(wbLogDir, { recursive: true });
+const logWorkbenchOutbound = (callbackUrl, action, payload, responseData, error) => {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const txnShort = (payload?.context?.transaction_id || 'no-txn').slice(0, 8);
+  const filename = `${ts}_${action}_OUT_${txnShort}.json`;
+  const entry = {
+    timestamp: new Date().toISOString(),
+    direction: 'outbound',
+    url: callbackUrl,
+    method: 'POST',
+    request: payload,
+    response: responseData || null,
+    error: error || null,
+  };
+  fs.writeFile(path.join(wbLogDir, filename), JSON.stringify(entry, null, 2), () => {});
+};
 
 const DELIVERY_CHARGE = 30;
 
@@ -224,6 +245,7 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
         hasOrder: !!payload.message?.order,
         response: response.data,
       });
+      logWorkbenchOutbound(callbackUrl, action, payload, response.data, null);
 
       pushTxnLog(action, payload).catch(() => {});
 
@@ -242,6 +264,7 @@ const sendCallback = async (bapUri, action, context, message, ondcConfig, retrie
         await new Promise(r => setTimeout(r, 1000 * attempt));
       } else {
         logger.error(`${action} callback failed after ${retries} attempts → ${callbackUrl} [${status || 'no-response'}]: ${detail}`);
+        logWorkbenchOutbound(callbackUrl, action, payload, err.response?.data, detail);
         // Push to N.O. even on HTTP failure — Pramaan may verify via N.O. logs
         pushTxnLog(action, payload).catch(() => {});
         pool.query(
