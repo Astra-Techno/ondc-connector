@@ -541,22 +541,22 @@ const resolveTenant = async (bppId) => {
 const sendOnSearch = async (context, catalog, ondcConfig) => {
   const config = resolveOndcConfig(ondcConfig);
   const callbackUrl = buildCallbackUrl(context.bap_uri, 'on_search');
+  if (!callbackUrl) { logger.warn('on_search: no bap_uri in context'); return; }
+
+  const payload = {
+    context: {
+      ...context,
+      action:    'on_search',
+      bpp_id:    config.subscriber_id,
+      bpp_uri:   config.subscriber_url,
+      timestamp: new Date().toISOString(),
+      ttl:       'PT30S',
+    },
+    message: { catalog },
+  };
+
   try {
     const { createAuthHeader } = require('../utils/crypto');
-    if (!callbackUrl) { logger.warn('on_search: no bap_uri in context'); return; }
-    const payload = {
-      context: {
-        ...context,
-        action:    'on_search',
-        bpp_id:    config.subscriber_id,
-        bpp_uri:   config.subscriber_url,
-        timestamp: new Date().toISOString(),
-        // message_id must match the search request's message_id (Beckn protocol)
-        ttl:       'PT30S',
-      },
-      message: { catalog },
-    };
-
     const headers = { 'Content-Type': 'application/json' };
     if (config.signing_private_key) {
       try {

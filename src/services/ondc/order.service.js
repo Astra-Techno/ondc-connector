@@ -25,7 +25,9 @@ const logWorkbenchOutbound = (callbackUrl, action, payload, responseData, error)
     response: responseData || null,
     error: error || null,
   };
-  fs.writeFile(path.join(wbLogDir, filename), JSON.stringify(entry, null, 2), () => {});
+  fs.writeFile(path.join(wbLogDir, filename), JSON.stringify(entry, null, 2), (err) => {
+    if (err) logger.warn(`Workbench log write failed: ${err.message}`);
+  });
 };
 
 const DELIVERY_CHARGE = 30;
