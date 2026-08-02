@@ -300,4 +300,5 @@ module.exports = {
   updateOrderStatus,
   resolveOndcConfig,
   buildCallbackUrl,
+  logWorkbenchOutbound,
 };

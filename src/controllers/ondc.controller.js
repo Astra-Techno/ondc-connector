@@ -11,6 +11,7 @@ const {
   updateOrderStatus,
   resolveOndcConfig,
   buildCallbackUrl,
+  logWorkbenchOutbound,
 } = require('../services/ondc/order.service');
 const cottKartOrder = require('../services/cloudkart/order.service');
 const { ack, nack, buildAckBody } = require('../utils/response');
@@ -573,10 +574,12 @@ const sendOnSearch = async (context, catalog, ondcConfig) => {
     logger.info(`Sending on_search → ${callbackUrl}`);
     const response = await axios.post(callbackUrl, payload, { headers, timeout: 10000 });
     logger.info(`on_search sent to ${callbackUrl}: ${response.status}`);
+    logWorkbenchOutbound(callbackUrl, 'on_search', payload, response.data, null);
     pushTxnLog('on_search', payload).catch(() => {});
   } catch (err) {
     const status = err.response?.status;
     const detail = err.response?.data ? JSON.stringify(err.response.data).slice(0, 300) : err.message;
+    logWorkbenchOutbound(callbackUrl, 'on_search', payload, err.response?.data, detail);
     logger.error(`on_search callback failed to ${callbackUrl} [${status || err.code || 'no-response'}]: ${detail}`);
   }
 };
