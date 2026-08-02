@@ -7,10 +7,12 @@ const logger = require('../../utils/logger');
 const { createAuthHeader } = require('../../utils/crypto');
 const { pushTxnLog } = require('./logPublisher.service');
 
-// Workbench debug logger for outbound callbacks
+// Workbench debug logger for outbound callbacks — only logs to workbench BAP
 const wbLogDir = path.join(__dirname, '..', '..', 'logs', 'workbench');
 fs.mkdirSync(wbLogDir, { recursive: true });
+const WORKBENCH_BAP_ID = process.env.WORKBENCH_BAP_ID || 'workbench.ondc.tech';
 const logWorkbenchOutbound = (callbackUrl, action, payload, responseData, error) => {
+  if (payload?.context?.bap_id !== WORKBENCH_BAP_ID) return;
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const txnShort = (payload?.context?.transaction_id || 'no-txn').slice(0, 8);
   const filename = `${ts}_${action}_OUT_${txnShort}.json`;

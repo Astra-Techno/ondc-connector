@@ -277,9 +277,10 @@ const _path = require('path');
 const workbenchLogDir = _path.join(__dirname, 'logs', 'workbench');
 _fs.mkdirSync(workbenchLogDir, { recursive: true });
 
+const WORKBENCH_BAP_ID = process.env.WORKBENCH_BAP_ID || 'workbench.ondc.tech';
 const logWorkbenchExchange = (req, res, next) => {
   const ctx = req.body?.context;
-  if (!ctx?.action) return next();
+  if (!ctx?.action || ctx?.bap_id !== WORKBENCH_BAP_ID) return next();
 
   // Capture the response body by intercepting res.json
   const originalJson = res.json.bind(res);
