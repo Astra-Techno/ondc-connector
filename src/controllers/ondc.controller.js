@@ -3,6 +3,8 @@ const { saveONDCOrder } = require('./order.controller');
 const logger = require('../utils/logger');
 const axios  = require('axios');
 const { v4: uuidv4 } = require('uuid');
+const _fs   = require('fs');
+const _path = require('path');
 const {
   buildQuote,
   buildOrderObject,
@@ -11,8 +13,24 @@ const {
   updateOrderStatus,
   resolveOndcConfig,
   buildCallbackUrl,
-  logWorkbenchOutbound,
 } = require('../services/ondc/order.service');
+
+// Workbench debug logger — write outbound payloads to logs/workbench/
+const _wbLogDir = _path.join(__dirname, '..', 'logs', 'workbench');
+_fs.mkdirSync(_wbLogDir, { recursive: true });
+const _WB_BAP = process.env.WORKBENCH_BAP_ID || 'workbench.ondc.tech';
+const _logWbOut = (url, action, payload, resp, error) => {
+  try {
+    if (payload?.context?.bap_id !== _WB_BAP) return;
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const txn = (payload?.context?.transaction_id || 'no-txn').slice(0, 8);
+    const file = _path.join(_wbLogDir, `${ts}_${action}_OUT_${txn}.json`);
+    _fs.writeFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), direction: 'outbound', url, method: 'POST', request: payload, response: resp || null, error: error || null }, null, 2));
+    logger.info(`Workbench log written: ${_path.basename(file)}`);
+  } catch (e) {
+    logger.warn(`Workbench log write failed: ${e.message}`);
+  }
+};
 const cottKartOrder = require('../services/cloudkart/order.service');
 const { ack, nack, buildAckBody } = require('../utils/response');
 const { pushTxnLog } = require('../services/ondc/logPublisher.service');
@@ -574,12 +592,12 @@ const sendOnSearch = async (context, catalog, ondcConfig) => {
     logger.info(`Sending on_search → ${callbackUrl}`);
     const response = await axios.post(callbackUrl, payload, { headers, timeout: 10000 });
     logger.info(`on_search sent to ${callbackUrl}: ${response.status}`);
-    logWorkbenchOutbound(callbackUrl, 'on_search', payload, response.data, null);
+    _logWbOut(callbackUrl, 'on_search', payload, response.data, null);
     pushTxnLog('on_search', payload).catch(() => {});
   } catch (err) {
     const status = err.response?.status;
     const detail = err.response?.data ? JSON.stringify(err.response.data).slice(0, 300) : err.message;
-    logWorkbenchOutbound(callbackUrl, 'on_search', payload, err.response?.data, detail);
+    _logWbOut(callbackUrl, 'on_search', payload, err.response?.data, detail);
     logger.error(`on_search callback failed to ${callbackUrl} [${status || err.code || 'no-response'}]: ${detail}`);
   }
 };
