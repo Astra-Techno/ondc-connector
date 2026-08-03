@@ -128,31 +128,21 @@ app.get('/debug/logs', async (req, res) => {
   }
 });
 
-// Workbench debug logs — list recent exchanges or view a specific one
+// Workbench debug log — view or clear
 app.get('/debug/workbench', (req, res) => {
   try {
-    const files = _fs.readdirSync(workbenchLogDir)
-      .filter(f => f.endsWith('.json'))
-      .sort()
-      .reverse()
-      .slice(0, parseInt(req.query.limit) || 50);
-    if (req.query.file) {
-      const safe = _path.basename(req.query.file);
-      const content = _fs.readFileSync(_path.join(workbenchLogDir, safe), 'utf8');
-      return res.type('json').send(content);
-    }
-    return res.json({ count: files.length, files });
+    const content = _fs.existsSync(wbLogFile) ? _fs.readFileSync(wbLogFile, 'utf8') : '';
+    const lines = content.trim().split('\n').filter(Boolean);
+    if (req.query.raw === '1') return res.type('text').send(content);
+    return res.json({ lines: lines.length, log: lines.slice(-(parseInt(req.query.limit) || 100)) });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 });
-
-// Clear workbench logs
 app.delete('/debug/workbench', (req, res) => {
   try {
-    const files = _fs.readdirSync(workbenchLogDir).filter(f => f.endsWith('.json'));
-    files.forEach(f => _fs.unlinkSync(_path.join(workbenchLogDir, f)));
-    return res.json({ deleted: files.length });
+    if (_fs.existsSync(wbLogFile)) _fs.writeFileSync(wbLogFile, '');
+    return res.json({ cleared: true });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -271,38 +261,48 @@ const logInboundToDB = async (req, res, next) => {
 };
 app.use(ONDC_PATHS, logInboundToDB);
 
-// ─── Workbench debug logger — writes each request/response pair to logs/workbench/ ──
+// ─── Workbench debug logger — appends all exchanges to a single log file ──
 const _fs   = require('fs');
 const _path = require('path');
-const workbenchLogDir = _path.join(__dirname, 'logs', 'workbench');
-_fs.mkdirSync(workbenchLogDir, { recursive: true });
-
+_fs.mkdirSync(_path.join(__dirname, 'logs'), { recursive: true });
+const wbLogFile = _path.join(__dirname, 'logs', 'workbench.log');
 const WORKBENCH_BAP_ID = process.env.WORKBENCH_BAP_ID || 'workbench.ondc.tech';
-const logWorkbenchExchange = (req, res, next) => {
+
+// Shared helper — append one log line (called from both middleware and controller)
+const logWorkbench = (direction, url, action, payload, response, error) => {
+  try {
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      dir: direction,
+      action,
+      url,
+      txn: payload?.context?.transaction_id,
+      msg_id: payload?.context?.message_id,
+      request: payload,
+      response: response || null,
+      error: error || null,
+    });
+    _fs.appendFileSync(wbLogFile, line + '\n');
+  } catch (e) {
+    logger.warn('Workbench log write failed:', e.message);
+  }
+};
+// Export for use in controller
+app.locals.logWorkbench = logWorkbench;
+
+const logWorkbenchInbound = (req, res, next) => {
   const ctx = req.body?.context;
   if (!ctx?.action || ctx?.bap_id !== WORKBENCH_BAP_ID) return next();
-
-  // Capture the response body by intercepting res.json
+  const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+  // Capture response by intercepting res.json
   const originalJson = res.json.bind(res);
   res.json = (body) => {
-    const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    const action = ctx.action;
-    const txnShort = (ctx.transaction_id || 'no-txn').slice(0, 8);
-    const filename = `${ts}_${action}_${txnShort}.json`;
-    const logEntry = {
-      timestamp: new Date().toISOString(),
-      direction: 'inbound',
-      url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
-      method: req.method,
-      request: req.body,
-      response: body,
-    };
-    _fs.writeFile(_path.join(workbenchLogDir, filename), JSON.stringify(logEntry, null, 2), () => {});
+    logWorkbench('IN', url, ctx.action, req.body, body, null);
     return originalJson(body);
   };
   next();
 };
-app.use(ONDC_PATHS, logWorkbenchExchange);
+app.use(ONDC_PATHS, logWorkbenchInbound);
 
 // ─── ONDC Gateway endpoints (root-level, no auth) ────────────────────────────
 app.post('/search',       handleSearch);

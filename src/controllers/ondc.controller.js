@@ -15,18 +15,24 @@ const {
   buildCallbackUrl,
 } = require('../services/ondc/order.service');
 
-// Workbench debug logger — write outbound payloads to logs/workbench/
-const _wbLogDir = _path.join(__dirname, '..', 'logs', 'workbench');
-_fs.mkdirSync(_wbLogDir, { recursive: true });
+// Workbench outbound logger — appends to shared logs/workbench.log
+const _wbLogFile = _path.join(__dirname, '..', 'logs', 'workbench.log');
 const _WB_BAP = process.env.WORKBENCH_BAP_ID || 'workbench.ondc.tech';
 const _logWbOut = (url, action, payload, resp, error) => {
   try {
     if (payload?.context?.bap_id !== _WB_BAP) return;
-    const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    const txn = (payload?.context?.transaction_id || 'no-txn').slice(0, 8);
-    const file = _path.join(_wbLogDir, `${ts}_${action}_OUT_${txn}.json`);
-    _fs.writeFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), direction: 'outbound', url, method: 'POST', request: payload, response: resp || null, error: error || null }, null, 2));
-    logger.info(`Workbench log written: ${_path.basename(file)}`);
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      dir: 'OUT',
+      action,
+      url,
+      txn: payload?.context?.transaction_id,
+      msg_id: payload?.context?.message_id,
+      request: payload,
+      response: resp || null,
+      error: error || null,
+    });
+    _fs.appendFileSync(_wbLogFile, line + '\n');
   } catch (e) {
     logger.warn(`Workbench log write failed: ${e.message}`);
   }

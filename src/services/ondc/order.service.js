@@ -7,27 +7,27 @@ const logger = require('../../utils/logger');
 const { createAuthHeader } = require('../../utils/crypto');
 const { pushTxnLog } = require('./logPublisher.service');
 
-// Workbench debug logger for outbound callbacks — only logs to workbench BAP
-const wbLogDir = path.join(__dirname, '..', '..', 'logs', 'workbench');
-fs.mkdirSync(wbLogDir, { recursive: true });
+// Workbench debug logger for outbound callbacks — appends to logs/workbench.log
+const wbLogFile = path.join(__dirname, '..', '..', 'logs', 'workbench.log');
 const WORKBENCH_BAP_ID = process.env.WORKBENCH_BAP_ID || 'workbench.ondc.tech';
 const logWorkbenchOutbound = (callbackUrl, action, payload, responseData, error) => {
-  if (payload?.context?.bap_id !== WORKBENCH_BAP_ID) return;
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const txnShort = (payload?.context?.transaction_id || 'no-txn').slice(0, 8);
-  const filename = `${ts}_${action}_OUT_${txnShort}.json`;
-  const entry = {
-    timestamp: new Date().toISOString(),
-    direction: 'outbound',
-    url: callbackUrl,
-    method: 'POST',
-    request: payload,
-    response: responseData || null,
-    error: error || null,
-  };
-  fs.writeFile(path.join(wbLogDir, filename), JSON.stringify(entry, null, 2), (err) => {
-    if (err) logger.warn(`Workbench log write failed: ${err.message}`);
-  });
+  try {
+    if (payload?.context?.bap_id !== WORKBENCH_BAP_ID) return;
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      dir: 'OUT',
+      action,
+      url: callbackUrl,
+      txn: payload?.context?.transaction_id,
+      msg_id: payload?.context?.message_id,
+      request: payload,
+      response: responseData || null,
+      error: error || null,
+    });
+    fs.appendFileSync(wbLogFile, line + '\n');
+  } catch (e) {
+    logger.warn(`Workbench log write failed: ${e.message}`);
+  }
 };
 
 const DELIVERY_CHARGE = 30;
