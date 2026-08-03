@@ -21,18 +21,14 @@ const _WB_BAP = process.env.WORKBENCH_BAP_ID || 'workbench.ondc.tech';
 const _logWbOut = (url, action, payload, resp, error) => {
   try {
     if (payload?.context?.bap_id !== _WB_BAP) return;
-    const line = JSON.stringify({
-      ts: new Date().toISOString(),
-      dir: 'OUT',
-      action,
-      url,
-      txn: payload?.context?.transaction_id,
-      msg_id: payload?.context?.message_id,
-      request: payload,
-      response: resp || null,
-      error: error || null,
-    });
-    _fs.appendFileSync(_wbLogFile, line + '\n');
+    let entry = `\n${'='.repeat(80)}\n`;
+    entry += `[${new Date().toISOString()}] OUT — ${action}\n`;
+    entry += `${'='.repeat(80)}\n`;
+    entry += `request_url: ${url}\n`;
+    entry += `request_payload:\n${JSON.stringify(payload, null, 2)}\n`;
+    entry += `request_response:\n${JSON.stringify(resp || null, null, 2)}\n`;
+    if (error) entry += `error: ${error}\n`;
+    _fs.appendFileSync(_wbLogFile, entry);
   } catch (e) {
     logger.warn(`Workbench log write failed: ${e.message}`);
   }
