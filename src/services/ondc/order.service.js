@@ -8,7 +8,7 @@ const { createAuthHeader } = require('../../utils/crypto');
 const { pushTxnLog } = require('./logPublisher.service');
 
 // Workbench debug logger for outbound callbacks — appends to logs/workbench.log
-const wbLogFile = path.join(__dirname, '..', '..', 'logs', 'workbench.log');
+const wbLogFile = path.join(__dirname, '..', '..', '..', 'logs', 'workbench.log');
 const WORKBENCH_BAP_ID = process.env.WORKBENCH_BAP_ID || 'workbench.ondc.tech';
 const logWorkbenchOutbound = (callbackUrl, action, payload, responseData, error) => {
   try {

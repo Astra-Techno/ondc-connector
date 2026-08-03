@@ -16,7 +16,7 @@ const {
 } = require('../services/ondc/order.service');
 
 // Workbench outbound logger — appends to shared logs/workbench.log
-const _wbLogFile = _path.join(__dirname, '..', 'logs', 'workbench.log');
+const _wbLogFile = _path.join(__dirname, '..', '..', 'logs', 'workbench.log');
 const _WB_BAP = process.env.WORKBENCH_BAP_ID || 'workbench.ondc.tech';
 const _logWbOut = (url, action, payload, resp, error) => {
   try {
