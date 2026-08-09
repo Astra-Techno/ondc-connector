@@ -841,7 +841,6 @@ const handleInit = async (req, res) => {
           fulfillments: (orderObj.fulfillments || []).map(f => ({
             ...f,
             tracking: false,
-            tags: [{ code: 'rto_action', list: [{ code: 'return_to_origin', value: 'yes' }] }],
           })),
           payment: {
             ...order.payment,
