@@ -100,6 +100,13 @@ const buildQuote = async (items, tenantId) => {
         price: { currency: 'INR', value: price.toFixed(2) },
       },
     });
+    // Contract v1.2.0: item-level tax breakup required (even if 0)
+    breakup.push({
+      title: 'Tax',
+      '@ondc/org/item_id': String(item.id),
+      '@ondc/org/title_type': 'tax',
+      price: { currency: 'INR', value: '0.00' },
+    });
   }
 
   breakup.push({
@@ -109,7 +116,36 @@ const buildQuote = async (items, tenantId) => {
     price: { currency: 'INR', value: String(DELIVERY_CHARGE) },
   });
 
-  const total = (itemTotal + DELIVERY_CHARGE).toFixed(2);
+  // Contract v1.2.0: fulfillment-level tax on delivery charges (required if non-zero)
+  const deliveryTax = (DELIVERY_CHARGE * 0.18);
+  breakup.push({
+    title: 'Tax',
+    '@ondc/org/item_id': 'f1',
+    '@ondc/org/title_type': 'tax',
+    price: { currency: 'INR', value: deliveryTax.toFixed(2) },
+    item: {
+      tags: [{ code: 'quote', list: [{ code: 'type', value: 'fulfillment' }] }],
+    },
+  });
+
+  // Packing charges (contract shows this as a separate line)
+  const packingCharge = 25;
+  breakup.push({
+    title: 'Packing charges',
+    '@ondc/org/item_id': 'f1',
+    '@ondc/org/title_type': 'packing',
+    price: { currency: 'INR', value: packingCharge.toFixed(2) },
+  });
+
+  // Convenience fee (contract shows misc line)
+  breakup.push({
+    title: 'Convenience Fee',
+    '@ondc/org/item_id': 'f1',
+    '@ondc/org/title_type': 'misc',
+    price: { currency: 'INR', value: '0.00' },
+  });
+
+  const total = (itemTotal + DELIVERY_CHARGE + deliveryTax + packingCharge).toFixed(2);
   return {
     quote: { price: { currency: 'INR', value: total }, breakup, ttl: 'P1D' },
     outOfStockItems,

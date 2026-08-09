@@ -53,9 +53,13 @@ const ack = async (res, context = null, status = 'ACK') => {
   return res.status(200).json(body);
 };
 
-const nack = (res, context = null, errorMessage = 'Order cannot be cancelled at this stage') => {
+const nack = (res, context = null, errorOrMessage = 'Order cannot be cancelled at this stage') => {
   const body = buildAckBody(context, 'NACK');
-  body.message.error = { type: 'DOMAIN-ERROR', code: '40002', message: errorMessage };
+  if (typeof errorOrMessage === 'object' && errorOrMessage.code) {
+    body.message.error = { type: errorOrMessage.type, code: errorOrMessage.code, message: errorOrMessage.message };
+  } else {
+    body.message.error = { type: 'DOMAIN-ERROR', code: '30000', message: String(errorOrMessage) };
+  }
   return res.status(200).json(body);
 };
 

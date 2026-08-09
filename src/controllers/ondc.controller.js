@@ -35,6 +35,7 @@ const _logWbOut = (url, action, payload, resp, error) => {
 };
 const cottKartOrder = require('../services/cloudkart/order.service');
 const { ack, nack, buildAckBody } = require('../utils/response');
+const { SELLER, makeError } = require('../utils/ondcErrors');
 const { pushTxnLog } = require('../services/ondc/logPublisher.service');
 const { createAuthHeader } = require('../utils/crypto');
 const { searchLogistics } = require('../services/logistics/lsp.service');
@@ -61,29 +62,76 @@ let lastIssueId = null;
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
-const CANCELLATION_TERMS = [
+// Contract v1.2.0: 5 cancellation_terms entries.
+// short_desc = comma-separated reason codes applicable for that state.
+// on_init: both percentage + amount; on_confirm: amount only.
+const buildCancellationTerms = (orderValue) => {
+  const val = parseFloat(orderValue) || 0;
+  return [
+    {
+      fulfillment_state: { descriptor: { code: 'Pending', short_desc: '002' } },
+      cancellation_fee: { percentage: '0.00', amount: { currency: 'INR', value: '0.00' } },
+    },
+    {
+      fulfillment_state: { descriptor: { code: 'Packed', short_desc: '001,003' } },
+      cancellation_fee: { percentage: '10.00', amount: { currency: 'INR', value: (val * 0.10).toFixed(2) } },
+    },
+    {
+      fulfillment_state: { descriptor: { code: 'Order-picked-up', short_desc: '001,003' } },
+      cancellation_fee: { percentage: '10.00', amount: { currency: 'INR', value: (val * 0.10).toFixed(2) } },
+    },
+    {
+      fulfillment_state: { descriptor: { code: 'Out-for-delivery', short_desc: '009' } },
+      cancellation_fee: { percentage: '0.00', amount: { currency: 'INR', value: '0.00' } },
+    },
+    {
+      fulfillment_state: { descriptor: { code: 'Out-for-delivery', short_desc: '010,011,012,013,014,015' } },
+      cancellation_fee: { percentage: '20.00', amount: { currency: 'INR', value: (val * 0.20).toFixed(2) } },
+    },
+  ];
+};
+
+// on_init bpp_terms: NO np_type, NO accept_bap_terms (contract v1.2.0)
+const buildInitTags = (vendor) => [{
+  code: 'bpp_terms',
+  list: [
+    { code: 'max_liability',         value: '2'        },
+    { code: 'max_liability_cap',     value: '10000.00' },
+    { code: 'mandatory_arbitration', value: 'false'    },
+    { code: 'court_jurisdiction',    value: 'Bengaluru'},
+    { code: 'delay_interest',        value: '7.50'     },
+    { code: 'tax_number',            value: vendor?.gst_number || process.env.ONDC_GST_NUMBER || '07AAACN0000A1Z5' },
+    { code: 'provider_tax_number',   value: vendor?.pan_number || process.env.ONDC_PROVIDER_PAN || 'AAACN0000A' },
+  ],
+}];
+
+// on_confirm/on_status/on_update/on_cancel bpp_terms: ADD np_type + accept_bap_terms
+const buildConfirmTags = (vendor, bapContext) => [
   {
-    fulfillment_state: { descriptor: { code: 'Pending',         short_desc: 'Pending'         } },
-    cancellation_fee:  { percentage: '0',   amount: { currency: 'INR', value: '0.00'    } },
+    code: 'bpp_terms',
+    list: [
+      { code: 'max_liability',         value: '2'        },
+      { code: 'max_liability_cap',     value: '10000.00' },
+      { code: 'mandatory_arbitration', value: 'false'    },
+      { code: 'court_jurisdiction',    value: 'Bengaluru'},
+      { code: 'delay_interest',        value: '7.50'     },
+      { code: 'np_type',               value: 'MSN'      },
+      { code: 'tax_number',            value: vendor?.gst_number || process.env.ONDC_GST_NUMBER || '07AAACN0000A1Z5' },
+      { code: 'provider_tax_number',   value: vendor?.pan_number || process.env.ONDC_PROVIDER_PAN || 'AAACN0000A' },
+      { code: 'accept_bap_terms',      value: 'Y'        },
+    ],
   },
   {
-    fulfillment_state: { descriptor: { code: 'Order-picked-up', short_desc: 'Order-picked-up' } },
-    cancellation_fee:  { percentage: '100', amount: { currency: 'INR', value: '0.00'    } },
+    code: 'bap_terms',
+    list: [
+      { code: 'static_terms', value: bapContext?.bap_static_terms || 'https://github.com/ONDC-Official/protocol-network-extension/discussions/79' },
+      { code: 'tax_number',   value: bapContext?.bap_tax_number || process.env.BAP_GST_NUMBER || '06AABCT0000A1Z5' },
+    ],
   },
 ];
 
-const ORDER_TAGS = [{
-  code: 'bpp_terms',
-  list: [
-    { code: 'max_liability',           value: '2'        },
-    { code: 'max_liability_cap',       value: '10000.00' },
-    { code: 'mandatory_arbitration',   value: 'false'    },
-    { code: 'court_jurisdiction',      value: 'Bengaluru'},
-    { code: 'delay_interest',          value: '1000.00'  },
-    { code: 'np_type',                 value: 'MSN'      },
-    { code: 'accept_bap_terms',        value: 'Y'        },
-  ],
-}];
+// Legacy alias for on_status/on_update/on_cancel (where we don't need bap_terms refresh)
+const ORDER_TAGS = buildConfirmTags(null, null);
 
 const buildSettlementDetails = (settlementAmount = '0.00') => [{
   settlement_counterparty:    'seller-app',
@@ -740,13 +788,11 @@ const handleSelect = async (req, res) => {
         },
       };
 
-      // Only include error block when items are actually out of stock (ONDC spec DOMAIN-ERROR 40002)
+      // Only include error block when items are actually out of stock (ONDC spec 40002)
       if (outOfStockItems.length > 0) {
-        payload.error = {
-          type: 'DOMAIN-ERROR',
-          code: '40002',
-          message: JSON.stringify(outOfStockItems.map(id => ({ item_id: String(id), error: '40002' }))),
-        };
+        payload.error = makeError(SELLER.ITEM_QTY_UNAVAILABLE,
+          JSON.stringify(outOfStockItems.map(id => ({ item_id: String(id), error: '40002' }))),
+        );
         logger.warn('Out of stock items in /select', { outOfStockItems });
       }
 
@@ -755,7 +801,7 @@ const handleSelect = async (req, res) => {
       logger.error('handleSelect processing failed:', err.message);
       if (context?.bap_uri) {
         await sendCallback(context.bap_uri, 'on_select', context, {
-          error: { type: 'CORE-ERROR', code: '50000', message: err.message },
+          error: makeError(SELLER.INTERNAL_ERROR, err.message),
         }, tenant || envTenantFallback()).catch(e => logger.error('on_select error callback failed:', e.message));
       }
     }
@@ -784,10 +830,19 @@ const handleInit = async (req, res) => {
         : { quote: order.quote || { price: { currency: 'INR', value: '0' }, breakup: [], ttl: 'P1D' } };
       const orderObj = buildOrderObject(context, body.message, 'Created', quote, tenant);
 
+      // Fetch vendor for tags (tax_number, provider_tax_number)
+      const initVendor = tenantId
+        ? await fetchVendorForOrder(tenantId, order.provider?.id).catch(() => null)
+        : null;
+
       await sendCallback(context.bap_uri, 'on_init', context, {
         order: {
           ...orderObj,
-          fulfillments: (orderObj.fulfillments || []).map(f => ({ ...f, tracking: false })),
+          fulfillments: (orderObj.fulfillments || []).map(f => ({
+            ...f,
+            tracking: false,
+            tags: [{ code: 'rto_action', list: [{ code: 'return_to_origin', value: 'yes' }] }],
+          })),
           payment: {
             ...order.payment,
             '@ondc/org/buyer_app_finder_fee_type':   'percent',
@@ -799,15 +854,15 @@ const handleInit = async (req, res) => {
             type:   'ON-ORDER',
             status: 'NOT-PAID',
           },
-          cancellation_terms: CANCELLATION_TERMS,
-          tags: ORDER_TAGS,
+          cancellation_terms: buildCancellationTerms(quote?.price?.value),
+          tags: buildInitTags(initVendor),
         },
       }, tenant);
     } catch (err) {
       logger.error('handleInit processing failed:', err.message);
       if (context?.bap_uri) {
         await sendCallback(context.bap_uri, 'on_init', context, {
-          error: { type: 'CORE-ERROR', code: '50000', message: err.message },
+          error: makeError(SELLER.INTERNAL_ERROR, err.message),
         }, tenant || envTenantFallback()).catch(() => {});
       }
     }
@@ -864,6 +919,11 @@ const handleConfirm = async (req, res) => {
         ? await buildQuote(order.items || [], tenant.id).then(r => r.quote).catch(() => order.quote)
         : order.quote;
 
+      // Extract bap_terms from /confirm tags for echoing in on_confirm
+      const bapTermsTag = (order.tags || []).find(t => t.code === 'bap_terms');
+      const bapStaticTerms = bapTermsTag?.list?.find(l => l.code === 'static_terms')?.value;
+      const bapTaxNumber   = bapTermsTag?.list?.find(l => l.code === 'tax_number')?.value;
+
       await sendCallback(context.bap_uri, 'on_confirm', context, {
         order: {
           id:         order.id,
@@ -885,8 +945,11 @@ const handleConfirm = async (req, res) => {
             '@ondc/org/settlement_details':           buildSettlementDetails(quote?.price?.value || order.payment?.['@ondc/org/settlement_details']?.[0]?.settlement_amount || '0.00'),
             status: order.payment?.type === 'ON-FULFILLMENT' ? 'NOT-PAID' : 'PAID',
           },
-          cancellation_terms: CANCELLATION_TERMS,
-          tags:       ORDER_TAGS,
+          cancellation_terms: buildCancellationTerms(quote?.price?.value),
+          tags: buildConfirmTags(vendor, {
+            bap_static_terms: bapStaticTerms,
+            bap_tax_number: bapTaxNumber,
+          }),
           created_at: order.created_at || now,
           updated_at: order.updated_at || now,
         },
@@ -1000,7 +1063,7 @@ const handleConfirm = async (req, res) => {
       logger.error('handleConfirm processing failed:', err.message);
       if (context?.bap_uri) {
         await sendCallback(context.bap_uri, 'on_confirm', context, {
-          error: { type: 'CORE-ERROR', code: '50000', message: err.message },
+          error: makeError(SELLER.ORDER_CONFIRM_ERROR, err.message),
         }, tenant || envTenantFallback()).catch(() => {});
       }
     }
@@ -1141,7 +1204,7 @@ const handleCancel = async (req, res) => {
     const NON_CANCELLABLE = new Set(['Order-delivered', 'RTO-Initiated', 'RTO-Delivered']);
     if (NON_CANCELLABLE.has(currentState)) {
       logger.info('ONDC /cancel NACK — order not cancellable in current state', { order_id, currentState });
-      return nack(res, context, 'Order cannot be cancelled');
+      return nack(res, context, makeError(SELLER.CANCEL_NOT_POSSIBLE, 'Order cannot be cancelled in current state'));
     }
     cancelledOrders.add(order_id);  // Stop auto-status sequence
     await ack(res, context);
@@ -1202,25 +1265,36 @@ const handleCancel = async (req, res) => {
 
       // Build Cancel fulfillment with quote_trail tags (SDK spec: separate Cancel-type fulfillment)
       const cancelFulfillmentId = `cancel_${order_id}`;
+      // Contract v1.2.0: on full cancel, only zero out "item" breakup prices.
+      // Keep delivery/packing/tax/misc charges — updated quote = sum of non-item charges.
       let cancelledQuote = cachedOrder?.quote ? JSON.parse(JSON.stringify(cachedOrder.quote)) : null;
       const quoteTrailTags = [];
       if (cancelledQuote?.breakup) {
+        let nonItemTotal = 0;
         for (const item of cancelledQuote.breakup) {
           const price = parseFloat(item.price?.value || '0');
-          if (price === 0) continue;
-          quoteTrailTags.push({
-            code: 'quote_trail',
-            list: [
-              { code: 'type',     value: item['@ondc/org/title_type'] || 'item' },
-              { code: 'id',       value: item['@ondc/org/item_id'] || '' },
-              { code: 'currency', value: 'INR' },
-              { code: 'value',    value: `${-1 * price}` },
-            ],
-          });
-          item.price.value = '0';
-          if (item['@ondc/org/item_quantity']) item['@ondc/org/item_quantity'].count = 0;
+          const titleType = item['@ondc/org/title_type'] || '';
+          if (titleType === 'item') {
+            // Zero out item prices + quantities, add negative quote_trail
+            if (price !== 0) {
+              quoteTrailTags.push({
+                code: 'quote_trail',
+                list: [
+                  { code: 'type',     value: 'item' },
+                  { code: 'id',       value: item['@ondc/org/item_id'] || '' },
+                  { code: 'currency', value: 'INR' },
+                  { code: 'value',    value: `${-1 * price}` },
+                ],
+              });
+            }
+            item.price.value = '0.00';
+            if (item['@ondc/org/item_quantity']) item['@ondc/org/item_quantity'].count = 0;
+          } else {
+            // delivery, packing, tax, misc — keep as-is
+            nonItemTotal += price;
+          }
         }
-        cancelledQuote.price.value = '0';
+        cancelledQuote.price.value = nonItemTotal.toFixed(2);
       }
 
       // Items: original items with count=0 + copies pointing to Cancel fulfillment
@@ -1254,6 +1328,7 @@ const handleCancel = async (req, res) => {
         },
         cancellation: {
           cancelled_by: context.bap_id || 'buyerNP.com',
+          reason: { id: cancellation_reason_id || '001' },
         },
         fulfillments: [
           ...(cachedOrder.fulfillments || []).map(f => ({
@@ -1269,6 +1344,7 @@ const handleCancel = async (req, res) => {
         state: 'Cancelled',
         cancellation: {
           cancelled_by: context.bap_id || 'buyerNP.com',
+          reason: { id: cancellation_reason_id || '001' },
         },
         fulfillments: [
           { id: 'f1', state: { descriptor: { code: 'Cancelled' } }, tags: cancelFulfillmentTags },
