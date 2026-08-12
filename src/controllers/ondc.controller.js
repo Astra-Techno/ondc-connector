@@ -91,30 +91,21 @@ const buildCancellationTerms = (orderValue) => {
   ];
 };
 
-// on_init bpp_terms: NO np_type, NO accept_bap_terms (contract v1.2.0)
+// on_init bpp_terms: np_type + tax_number + provider_tax_number (automation spec)
 const buildInitTags = (vendor) => [{
   code: 'bpp_terms',
   list: [
-    { code: 'max_liability',         value: '2'        },
-    { code: 'max_liability_cap',     value: '10000.00' },
-    { code: 'mandatory_arbitration', value: 'false'    },
-    { code: 'court_jurisdiction',    value: 'Bengaluru'},
-    { code: 'delay_interest',        value: '7.50'     },
+    { code: 'np_type',               value: 'MSN'      },
     { code: 'tax_number',            value: vendor?.gst_number || process.env.ONDC_GST_NUMBER || '07AAACN0000A1Z5' },
     { code: 'provider_tax_number',   value: vendor?.pan_number || process.env.ONDC_PROVIDER_PAN || 'AAACN0000A' },
   ],
 }];
 
-// on_confirm/on_status/on_update/on_cancel bpp_terms: ADD np_type + accept_bap_terms
+// on_confirm/on_status/on_update/on_cancel bpp_terms: np_type + tax + accept_bap_terms (automation spec)
 const buildConfirmTags = (vendor, bapContext) => [
   {
     code: 'bpp_terms',
     list: [
-      { code: 'max_liability',         value: '2'        },
-      { code: 'max_liability_cap',     value: '10000.00' },
-      { code: 'mandatory_arbitration', value: 'false'    },
-      { code: 'court_jurisdiction',    value: 'Bengaluru'},
-      { code: 'delay_interest',        value: '7.50'     },
       { code: 'np_type',               value: 'MSN'      },
       { code: 'tax_number',            value: vendor?.gst_number || process.env.ONDC_GST_NUMBER || '07AAACN0000A1Z5' },
       { code: 'provider_tax_number',   value: vendor?.pan_number || process.env.ONDC_PROVIDER_PAN || 'AAACN0000A' },
@@ -133,19 +124,29 @@ const buildConfirmTags = (vendor, bapContext) => [
 // Legacy alias for on_status/on_update/on_cancel (where we don't need bap_terms refresh)
 const ORDER_TAGS = buildConfirmTags(null, null);
 
-const buildSettlementDetails = (settlementAmount = '0.00') => [{
+const buildSettlementDetails = () => [{
   settlement_counterparty:    'seller-app',
   settlement_phase:           'sale-amount',
-  settlement_type:            'upi',
-  settlement_amount:          String(settlementAmount),
-  settlement_timestamp:       new Date().toISOString(),
+  settlement_type:            'neft',
   beneficiary_name:           'CottKart Pvt Ltd',
   settlement_bank_account_no: '1234567890',
   settlement_ifsc_code:       'ICIC0001234',
   bank_name:                  'ICICI Bank',
   branch_name:                'MG Road',
-  upi_address:                'cottkart@upi',
 }];
+
+// Strip item.quantity from quote breakup (on_init/on_confirm spec omits it; on_select keeps it)
+const stripBreakupItemQuantity = (quote) => {
+  if (!quote?.breakup) return quote;
+  return {
+    ...quote,
+    breakup: quote.breakup.map(b => {
+      if (!b.item) return b;
+      const { quantity, ...itemRest } = b.item;
+      return { ...b, item: Object.keys(itemRest).length ? itemRest : b.item };
+    }),
+  };
+};
 
 // Normalize GPS to at least 6 decimal places
 const normalizeGps = (gps) => {
@@ -773,7 +774,7 @@ const handleSelect = async (req, res) => {
             ...order.provider,
             locations: order.provider?.locations || [{ id: 'l1' }],
           },
-          items: items.map(i => ({ ...i, fulfillment_id: i.fulfillment_id || 'f1', location_id: i.location_id || 'l1' })),
+          items: items.map(i => ({ id: i.id, fulfillment_id: i.fulfillment_id || 'f1' })),
           quote,
           fulfillments: (fulfillments.length > 0 ? fulfillments : [{ id: 'f1', type: 'Delivery' }]).map(f => ({
             ...f,
@@ -838,22 +839,17 @@ const handleInit = async (req, res) => {
       await sendCallback(context.bap_uri, 'on_init', context, {
         order: {
           ...orderObj,
+          quote: stripBreakupItemQuantity(orderObj.quote),
           fulfillments: (orderObj.fulfillments || []).map(f => ({
             ...f,
-            tracking: false,
+            tracking: true,
           })),
           payment: {
             ...order.payment,
             '@ondc/org/buyer_app_finder_fee_type':   'percent',
             '@ondc/org/buyer_app_finder_fee_amount': '3',
-            '@ondc/org/settlement_basis':             'return_window_expiry',
-            '@ondc/org/settlement_window':            'P1D',
-            '@ondc/org/withholding_amount':           '10.00',
             '@ondc/org/settlement_details':           buildSettlementDetails(),
-            type:   'ON-ORDER',
-            status: 'NOT-PAID',
           },
-          cancellation_terms: buildCancellationTerms(quote?.price?.value),
           tags: buildInitTags(initVendor),
         },
       }, tenant);
@@ -933,18 +929,14 @@ const handleConfirm = async (req, res) => {
           fulfillments: (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
             buildFulfillmentWithLocation(f, vendor, 'Pending', now)
           ),
-          quote,
+          quote: stripBreakupItemQuantity(quote),
           payment: {
             ...order.payment,
             '@ondc/org/buyer_app_finder_fee_type':   'percent',
-            '@ondc/org/buyer_app_finder_fee_amount': '3',
-            '@ondc/org/settlement_basis':             'return_window_expiry',
-            '@ondc/org/settlement_window':            'P1D',
-            '@ondc/org/withholding_amount':           '10.00',
-            '@ondc/org/settlement_details':           buildSettlementDetails(quote?.price?.value || order.payment?.['@ondc/org/settlement_details']?.[0]?.settlement_amount || '0.00'),
+            '@ondc/org/buyer_app_finder_fee_amount': '3.0',
+            '@ondc/org/settlement_details':           buildSettlementDetails(),
             status: order.payment?.type === 'ON-FULFILLMENT' ? 'NOT-PAID' : 'PAID',
           },
-          cancellation_terms: buildCancellationTerms(quote?.price?.value),
           tags: buildConfirmTags(vendor, {
             bap_static_terms: bapStaticTerms,
             bap_tax_number: bapTaxNumber,
@@ -3292,8 +3284,7 @@ const triggerSendRecon = async (req, res) => {
 
     const { order, context, tenant } = cached;
     const config = resolveOndcConfig(tenant);
-    const amount = order.quote?.price?.value || '0.00';
-    const settlementDetails = buildSettlementDetails(amount)[0];
+    const settlementDetails = buildSettlementDetails()[0];
 
     const cbCtx = {
       ...context,
