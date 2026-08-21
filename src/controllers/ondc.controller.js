@@ -955,8 +955,16 @@ const handleConfirm = async (req, res) => {
       ;(async () => {
         try {
           const lsDelay = ms => new Promise(r => setTimeout(r, ms));
-          // Send Packed + Agent-assigned immediately (before LSP mock relay fires at ~5s)
+          // Send Pending (Accepted) → Packed → Agent-assigned immediately (before LSP mock relay fires at ~5s)
           // Auto-status skips these for logistics orders (lsEntry exists in cache after startLogisticsFlow)
+          const lsCtx0 = { ...context, message_id: uuidv4() };
+          const pendingPayload = buildStatusPayload(order.id, order, 'Pending', 'In-progress', vendor);
+          await sendCallback(context.bap_uri, 'on_status', lsCtx0, { order: pendingPayload }, tenant);
+          const ce0 = confirmedOrderCache.get(order.id);
+          if (ce0) ce0.currentFulfillmentState = 'Pending';
+          logger.info('Logistics: Pending on_status sent', { order_id: order.id });
+          await lsDelay(2000);
+
           const lsCtx1 = { ...context, message_id: uuidv4() };
           const packedPayload = buildStatusPayload(order.id, order, 'Packed', 'In-progress', vendor);
           await sendCallback(context.bap_uri, 'on_status', lsCtx1, { order: packedPayload }, tenant);
@@ -994,11 +1002,12 @@ const handleConfirm = async (req, res) => {
         // Steps 1-4 fire rapidly (2s apart). Step 5 (Order-delivered) is delayed by 45s
         // to give Flow 3B/3C time to trigger cancel before Order-delivered fires.
         const steps = [
-          { fulfillmentState: 'Packed',            orderState: 'In-progress', delayAfter: 2000  },
-          { fulfillmentState: 'Agent-assigned',     orderState: 'In-progress', delayAfter: 2000  },
-          { fulfillmentState: 'Order-picked-up',    orderState: 'In-progress', delayAfter: 2000  },
-          { fulfillmentState: 'Out-for-delivery',   orderState: 'In-progress', delayAfter: 45000 },
-          { fulfillmentState: 'Order-delivered',    orderState: 'Completed',   delayAfter: 2000  },
+          { fulfillmentState: 'Pending',            orderState: 'In-progress', delayAfter: 2000  },
+          { fulfillmentState: 'Packed',              orderState: 'In-progress', delayAfter: 2000  },
+          { fulfillmentState: 'Agent-assigned',      orderState: 'In-progress', delayAfter: 2000  },
+          { fulfillmentState: 'Order-picked-up',     orderState: 'In-progress', delayAfter: 2000  },
+          { fulfillmentState: 'Out-for-delivery',    orderState: 'In-progress', delayAfter: 45000 },
+          { fulfillmentState: 'Order-delivered',     orderState: 'Completed',   delayAfter: 2000  },
         ];
 
         // Wait 15s after on_confirm for Pramaan to process /status first
@@ -1009,7 +1018,7 @@ const handleConfirm = async (req, res) => {
 
           // Skip states already sent early by logistics block (Packed, Agent-assigned at T=0s)
           // Works for both retail and logistics orders.
-          const DELIVERY_ORDER = ['Packed', 'Agent-assigned', 'Order-picked-up', 'Out-for-delivery', 'Order-delivered'];
+          const DELIVERY_ORDER = ['Pending', 'Packed', 'Agent-assigned', 'Order-picked-up', 'Out-for-delivery', 'Order-delivered'];
           const currentEntry2 = confirmedOrderCache.get(order.id);
           const lastSentIdx = DELIVERY_ORDER.indexOf(currentEntry2?.currentFulfillmentState || '');
           const stepIdx = DELIVERY_ORDER.indexOf(step.fulfillmentState);
@@ -2094,13 +2103,15 @@ const triggerMerchantStatusSequence = async (req, res) => {
     // Per Pramaan PDF: order state must be "In-progress" for transit states, "Completed" for delivered
     const sequences = {
       '3a': [
-        { fulfillmentState: 'Packed',           orderState: 'In-progress' },
+        { fulfillmentState: 'Pending',           orderState: 'In-progress' },
+        { fulfillmentState: 'Packed',            orderState: 'In-progress' },
         { fulfillmentState: 'Agent-assigned',    orderState: 'In-progress' },
         { fulfillmentState: 'Order-picked-up',   orderState: 'In-progress' },
         { fulfillmentState: 'Out-for-delivery',  orderState: 'In-progress' },
         { fulfillmentState: 'Order-delivered',   orderState: 'Completed' },
       ],
       '3b': [
+        { fulfillmentState: 'Pending',          orderState: 'In-progress' },
         { fulfillmentState: 'Packed',           orderState: 'In-progress' },
         { fulfillmentState: 'Agent-assigned',   orderState: 'In-progress' },
         { fulfillmentState: 'Order-picked-up',  orderState: 'In-progress' },
