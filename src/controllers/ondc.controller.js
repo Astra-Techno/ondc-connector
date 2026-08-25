@@ -135,6 +135,36 @@ const buildSettlementDetails = () => [{
   branch_name:                'MG Road',
 }];
 
+// Fallback quote when buildQuote isn't available (no tenant/DB) — uses item data from confirm request
+const buildFallbackQuote = (items) => {
+  const breakup = [];
+  let total = 0;
+  for (const item of items) {
+    const price = parseFloat(item.price?.value || '100');
+    const qty = item.quantity?.count || 1;
+    const lineTotal = price * qty;
+    total += lineTotal;
+    breakup.push({
+      '@ondc/org/item_id': item.id,
+      '@ondc/org/title_type': 'item',
+      title: item.descriptor?.name || `Item ${item.id}`,
+      price: { currency: 'INR', value: String(lineTotal.toFixed(2)) },
+      item: { price: { currency: 'INR', value: String(price.toFixed(2)) } },
+    });
+  }
+  breakup.push({
+    '@ondc/org/item_id': items[0]?.id || 'f1',
+    '@ondc/org/title_type': 'delivery',
+    title: 'Delivery charges',
+    price: { currency: 'INR', value: '0.00' },
+  });
+  return {
+    price: { currency: 'INR', value: String(total.toFixed(2)) },
+    breakup,
+    ttl: 'P1D',
+  };
+};
+
 // Strip item.quantity from quote breakup (on_init/on_confirm spec omits it; on_select keeps it)
 const stripBreakupItemQuantity = (quote) => {
   if (!quote?.breakup) return quote;
@@ -771,16 +801,15 @@ const handleSelect = async (req, res) => {
       const payload = {
         order: {
           provider: {
-            ...order.provider,
-            locations: order.provider?.locations || [{ id: 'l1' }],
+            id: order.provider?.id || 'P1',
+            locations: (order.provider?.locations || [{ id: 'l1' }]).map(l => ({ id: l.id })),
           },
           items: items.map(i => ({ id: i.id, fulfillment_id: i.fulfillment_id || 'f1' })),
           quote,
           fulfillments: (fulfillments.length > 0 ? fulfillments : [{ id: 'f1', type: 'Delivery' }]).map(f => ({
-            ...f,
             id: f.id || 'f1',
             type: f.type || 'Delivery',
-            state: f.state || { descriptor: { code: 'Serviceable' } },
+            state: { descriptor: { code: 'Serviceable' } },
             '@ondc/org/TAT': 'PT24H',
             '@ondc/org/category': f['@ondc/org/category'] || 'Grocery',
             '@ondc/org/provider_name': f['@ondc/org/provider_name'] || providerName,
@@ -912,7 +941,7 @@ const handleConfirm = async (req, res) => {
       const now   = new Date().toISOString();
       const quote = tenant.id
         ? await buildQuote(order.items || [], tenant.id).then(r => r.quote).catch(() => order.quote)
-        : order.quote;
+        : (order.quote || buildFallbackQuote(order.items || []));
 
       // Extract bap_terms from /confirm tags for echoing in on_confirm
       const bapTermsTag = (order.tags || []).find(t => t.code === 'bap_terms');
@@ -946,10 +975,15 @@ const handleConfirm = async (req, res) => {
         },
       }, tenant);
 
-      // Save the confirm updated_at so on_update can reuse it (Pramaan expects match)
+      // Save the computed quote + confirm updated_at back into cache so
+      // autoStatusSequence / buildStatusPayload can access order.quote
       const confirmUpdatedAt = order.updated_at || now;
       const cached = confirmedOrderCache.get(order.id);
-      if (cached) cached.confirmTimestamp = confirmUpdatedAt;
+      // Set directly on the closure-captured order object (used by autoStatusSequence)
+      order.quote = stripBreakupItemQuantity(quote);
+      if (cached) {
+        cached.confirmTimestamp = confirmUpdatedAt;
+      }
 
       // Trigger On-Network Logistics search (Flow A1) — fire-and-forget
       ;(async () => {
