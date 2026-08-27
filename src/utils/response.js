@@ -12,20 +12,18 @@ const error = (res, message = 'Error', code = 500, errors = null) => {
 // Actions Pramaan verifies via Network Observability
 const PRAMAAN_SYNC_ACTIONS = new Set(['select', 'init', 'confirm']);
 
-// Build ONDC-compliant sync ACK body
-// Always overwrite bpp_id/bpp_uri with OUR subscriber identity.
-// Workbench/Pramaan may send wrong bpp_id (e.g. workbench.ondc.tech) in inbound
-// context — echoing it fails: "bpp_id should be same as received in first on_search".
+// Build an ONDC-compliant synchronous ACK body.
+//
+// A synchronous ACK acknowledges *this* request, so its context must retain the
+// participant identities supplied by the caller.  Replacing bpp_id/bpp_uri here
+// makes Workbench associate the request with a different BPP than the one it
+// uses for the rest of the lifecycle.  Our identity is set only on asynchronous
+// on_* callbacks by sendCallback/sendOnSearch.
 const buildAckBody = (context = null, status = 'ACK') => {
   if (!context) return { message: { ack: { status } } };
 
-  const ourBppId  = process.env.ONDC_SUBSCRIBER_ID  || context.bpp_id;
-  const ourBppUri = process.env.ONDC_SUBSCRIBER_URL || context.bpp_uri;
-
   const enrichedContext = {
     ...context,
-    bpp_id:  ourBppId,
-    bpp_uri: ourBppUri,
     timestamp: new Date().toISOString(),
   };
 

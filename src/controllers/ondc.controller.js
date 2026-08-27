@@ -472,6 +472,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           importer_FSSAI_license_no:    vendor.fssai_license_no || vendor.fssai_number || '12345678901234',
           ingredients_info:             p.ingredients_info || 'Natural ingredients',
         },
+        parent_item_id: 'V1',
         tags: [
           { code: 'origin', list: [{ code: 'country', value: 'IND' }] },
           { code: 'veg_nonveg', list: [{ code: 'veg', value: p.is_veg === false ? 'no' : 'yes' }] },
@@ -547,6 +548,17 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           }],
         }],
         offers: [],
+        categories: [{
+          id: 'V1',
+          descriptor: { name: 'Variant Group' },
+          tags: [
+            { code: 'type', list: [{ code: 'type', value: 'variant_group' }] },
+            { code: 'attr', list: [
+              { code: 'name', value: 'item.quantity.unitized.measure' },
+              { code: 'seq',  value: '1' },
+            ]},
+          ],
+        }],
         items,
         fulfillments: [{
           id:   'f1',
@@ -804,7 +816,13 @@ const handleSelect = async (req, res) => {
             id: order.provider?.id || 'P1',
             locations: (order.provider?.locations || [{ id: 'l1' }]).map(l => ({ id: l.id })),
           },
-          items: items.map(i => ({ id: i.id, fulfillment_id: i.fulfillment_id || 'f1' })),
+          // location_id is mandatory in on_select.  It is present in the
+          // catalog item, but must also be carried into the selected order.
+          items: items.map(i => ({
+            id:             i.id,
+            fulfillment_id: i.fulfillment_id || 'f1',
+            location_id:    i.location_id || order.provider?.locations?.[0]?.id || 'l1',
+          })),
           quote,
           fulfillments: (fulfillments.length > 0 ? fulfillments : [{ id: 'f1', type: 'Delivery' }]).map(f => ({
             id: f.id || 'f1',
