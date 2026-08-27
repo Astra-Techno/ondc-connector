@@ -1058,7 +1058,7 @@ const handleConfirm = async (req, res) => {
           { fulfillmentState: 'Packed',              orderState: 'In-progress', delayAfter: 2000  },
           { fulfillmentState: 'Agent-assigned',      orderState: 'In-progress', delayAfter: 2000  },
           { fulfillmentState: 'Order-picked-up',     orderState: 'In-progress', delayAfter: 2000  },
-          { fulfillmentState: 'Out-for-delivery',    orderState: 'In-progress', delayAfter: 45000 },
+          { fulfillmentState: 'Out-for-delivery',    orderState: 'In-progress', delayAfter: 10000 },
           { fulfillmentState: 'Order-delivered',     orderState: 'Completed',   delayAfter: 2000  },
         ];
 
@@ -1080,10 +1080,13 @@ const handleConfirm = async (req, res) => {
             continue;
           }
 
-          // For confirmed logistics orders: skip Order-picked-up, Out-for-delivery, Order-delivered
-          // (LSP relay sends these — relay is no longer suppressed for Order-delivered per Flow A2 requirement)
+          // For confirmed logistics orders: skip Order-picked-up, Out-for-delivery
+          // (LSP relay sends these).  Order-delivered is NOT skipped here — the
+          // duplicate check below (line ~1093) prevents double-sending if the LSP
+          // relay already delivered it.  Skipping it caused Workbench Buyer Return
+          // flow to hang on step 12 when preprod LSPs confirmed the logistics order.
           const lsEntry = logisticsOrderCache.get(order.id);
-          if (lsEntry?.logisticsConfirmed && ['Order-picked-up', 'Out-for-delivery', 'Order-delivered'].includes(step.fulfillmentState)) {
+          if (lsEntry?.logisticsConfirmed && ['Order-picked-up', 'Out-for-delivery'].includes(step.fulfillmentState)) {
             await delay(step.delayAfter);
             continue;
           }
