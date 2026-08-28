@@ -363,6 +363,20 @@ const fetchVendorForOrder = async (tenantId, providerId) => {
   } catch (_) { return null; }
 };
 
+// ONDC uses location_id for items selected from the catalog.  Some legacy
+// Workbench payloads use location instead; accept it at the edge but never
+// propagate the non-contract key in callbacks or stored order state.
+const normalizeOrderItems = (items, provider) => {
+  const fallbackLocationId = provider?.locations?.[0]?.id || 'l1';
+  return (items || []).map(item => {
+    const { location, ...canonicalItem } = item || {};
+    return {
+      ...canonicalItem,
+      location_id: canonicalItem.location_id || location || fallbackLocationId,
+    };
+  });
+};
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 // Get all active tenants (used only by /search which is broadcast)
@@ -818,10 +832,10 @@ const handleSelect = async (req, res) => {
           },
           // location_id is mandatory in on_select.  It is present in the
           // catalog item, but must also be carried into the selected order.
-          items: items.map(i => ({
+          items: normalizeOrderItems(items, order.provider).map(i => ({
             id:             i.id,
             fulfillment_id: i.fulfillment_id || 'f1',
-            location_id:    i.location_id || order.provider?.locations?.[0]?.id || 'l1',
+            location_id:    i.location_id,
           })),
           quote,
           fulfillments: (fulfillments.length > 0 ? fulfillments : [{ id: 'f1', type: 'Delivery' }]).map(f => ({
@@ -869,14 +883,24 @@ const handleInit = async (req, res) => {
       tenant = await resolveTenant(context?.bpp_id);
       if (!tenant?.id && !process.env.ONDC_SIGNING_PRIVATE_KEY) return;
 
-      const order = body.message?.order || {};
-      const items = order.items         || [];
+      const incomingOrder = body.message?.order || {};
+      const order = {
+        ...incomingOrder,
+        items: normalizeOrderItems(incomingOrder.items, incomingOrder.provider),
+      };
+      const items = order.items;
 
       const tenantId = tenant.id || tenant.tenant_id;
       const { quote } = tenantId
         ? await buildQuote(items, tenantId)
         : { quote: order.quote || { price: { currency: 'INR', value: '0' }, breakup: [], ttl: 'P1D' } };
-      const orderObj = buildOrderObject(context, body.message, 'Created', quote, tenant);
+      const orderObj = buildOrderObject(
+        context,
+        { ...body.message, order },
+        'Created',
+        quote,
+        tenant
+      );
 
       // Fetch vendor for tags (tax_number, provider_tax_number)
       const initVendor = tenantId
@@ -926,7 +950,15 @@ const handleConfirm = async (req, res) => {
       if (!tenant?.id && !process.env.ONDC_SIGNING_PRIVATE_KEY) return;
 
       // Deep-clone order so async callbacks + cache always have full data even if req body is GC'd
-      const order = body.message?.order ? JSON.parse(JSON.stringify(body.message.order)) : {};
+      const incomingOrder = body.message?.order ? JSON.parse(JSON.stringify(body.message.order)) : {};
+      const order = {
+        ...incomingOrder,
+        items: normalizeOrderItems(incomingOrder.items, incomingOrder.provider),
+      };
+      const confirmedBody = {
+        ...body,
+        message: { ...body.message, order },
+      };
 
       const vendor = tenant.id
         ? await fetchVendorForOrder(tenant.id, order.provider?.id).catch(() => null)
@@ -939,11 +971,11 @@ const handleConfirm = async (req, res) => {
       }
 
       // 1. Save to DB
-      if (tenant.id) await saveONDCOrder(tenant.id, body, body);
+      if (tenant.id) await saveONDCOrder(tenant.id, confirmedBody, confirmedBody);
 
       // 2. Push to CottKart
       try {
-        const ckResult = await cottKartOrder.pushOrder(body);
+        const ckResult = await cottKartOrder.pushOrder(confirmedBody);
         const cottKartOrderId = ckResult?.id || ckResult?.order_id;
         if (cottKartOrderId) {
           await pool.query(

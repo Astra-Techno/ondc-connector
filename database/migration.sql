@@ -268,12 +268,13 @@ CREATE TABLE IF NOT EXISTS `ondc_transactions` (
   `id`             INT(11)      NOT NULL AUTO_INCREMENT,
   `tenant_id`      INT(11)      DEFAULT NULL,
   `action`         VARCHAR(50)  NOT NULL,
-  `direction`      ENUM('in','out') NOT NULL DEFAULT 'out',
+  `direction`      ENUM('inbound','outbound') NOT NULL DEFAULT 'outbound',
   `transaction_id` VARCHAR(200) DEFAULT NULL,
   `message_id`     VARCHAR(200) DEFAULT NULL,
   `bap_id`         VARCHAR(200) DEFAULT NULL,
-  `payload`        LONGTEXT     DEFAULT NULL,
-  `response`       TEXT         DEFAULT NULL,
+  `request_payload`  LONGTEXT     DEFAULT NULL,
+  `response_payload` LONGTEXT     DEFAULT NULL,
+  `error_message`    TEXT         DEFAULT NULL,
   `status`         ENUM('pending','success','failed') DEFAULT 'pending',
   `created_at`     DATETIME     DEFAULT CURRENT_TIMESTAMP,
   `updated_at`     DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -282,6 +283,12 @@ CREATE TABLE IF NOT EXISTS `ondc_transactions` (
   KEY `idx_tenant_action`  (`tenant_id`, `action`),
   KEY `idx_status`         (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Keep the schema aligned with the transaction publisher and dashboard.
+-- These are safe for databases created by earlier connector versions.
+CALL AddColIfNotExists('ondc_transactions', 'request_payload',  "LONGTEXT DEFAULT NULL");
+CALL AddColIfNotExists('ondc_transactions', 'response_payload', "LONGTEXT DEFAULT NULL");
+CALL AddColIfNotExists('ondc_transactions', 'error_message',    "TEXT DEFAULT NULL");
 
 -- ============================================================
 -- TABLE: issue_grievances  (NEW)

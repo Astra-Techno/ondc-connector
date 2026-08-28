@@ -393,6 +393,16 @@ app.use((err, req, res, next) => {
 const runMigrations = async () => {
   const { pool } = require('./src/config/database');
 
+  const addColumnIfMissing = async (table, column, definition) => {
+    try {
+      await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+    } catch (e) {
+      if (!e.message.includes('Duplicate column')) {
+        logger.warn(`${table}.${column} migration:`, e.message);
+      }
+    }
+  };
+
   // Add std_city_code column if not present (MySQL-compatible — ignore duplicate column error)
   try {
     await pool.query(`ALTER TABLE vendors ADD COLUMN std_city_code VARCHAR(20) NULL`);
@@ -405,6 +415,28 @@ const runMigrations = async () => {
     await pool.query(`ALTER TABLE products ADD COLUMN category VARCHAR(100) DEFAULT NULL AFTER name`);
   } catch (e) {
     if (!e.message.includes('Duplicate column')) logger.warn('products.category column:', e.message);
+  }
+
+  // Transaction logging uses these names and values throughout the backend and
+  // dashboard. Older schemas used payload/response plus in/out, which caused
+  // transaction inserts to fail silently.
+  await addColumnIfMissing('ondc_transactions', 'request_payload', 'LONGTEXT NULL');
+  await addColumnIfMissing('ondc_transactions', 'response_payload', 'LONGTEXT NULL');
+  await addColumnIfMissing('ondc_transactions', 'error_message', 'TEXT NULL');
+  try {
+    // Existing installations used in/out. Keep both temporarily so MySQL can
+    // convert existing rows before narrowing the enum to the application values.
+    await pool.query(
+      "ALTER TABLE ondc_transactions MODIFY direction ENUM('in','out','inbound','outbound') NOT NULL DEFAULT 'outbound'"
+    );
+    await pool.query(
+      "UPDATE ondc_transactions SET direction = CASE direction WHEN 'in' THEN 'inbound' WHEN 'out' THEN 'outbound' ELSE direction END"
+    );
+    await pool.query(
+      "ALTER TABLE ondc_transactions MODIFY direction ENUM('inbound','outbound') NOT NULL DEFAULT 'outbound'"
+    );
+  } catch (e) {
+    logger.warn('ondc_transactions.direction migration:', e.message);
   }
 
   // Populate std_city_code from pincode for vendors that don't have it set
