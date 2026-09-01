@@ -907,10 +907,13 @@ const handleInit = async (req, res) => {
         ? await fetchVendorForOrder(tenantId, order.provider?.id).catch(() => null)
         : null;
 
+      // on_init must NOT include order.id or order.state (Pramaan validation)
+      const { id: _initId, state: _initState, ...initOrder } = orderObj;
+
       await sendCallback(context.bap_uri, 'on_init', context, {
         order: {
-          ...orderObj,
-          quote: stripBreakupItemQuantity(orderObj.quote),
+          ...initOrder,
+          quote: stripBreakupItemQuantity(initOrder.quote),
           fulfillments: (orderObj.fulfillments || []).map(f => ({
             ...f,
             tracking: true,
