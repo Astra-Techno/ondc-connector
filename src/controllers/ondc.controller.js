@@ -1490,7 +1490,7 @@ const handleUpdate = async (req, res) => {
           items:    order.items    || confirmedOrder.items,
           billing:  order.billing  || confirmedOrder.billing,
           quote:    order.quote    || confirmedOrder.quote,
-          payment:  order.payment  || confirmedOrder.payment,
+          payment:  { ...(confirmedOrder.payment || {}), ...(order.payment || {}) },
         };
 
         let vendor = cachedVendor;
@@ -1614,7 +1614,15 @@ const handleUpdate = async (req, res) => {
               billing:  fullOrder.billing,
               fulfillments: [...deliveryFls, returnFl],
               quote:    fullOrder.quote,
-              payment:  { ...(fullOrder.payment || {}), status: 'PAID' },
+              payment:  {
+                ...(confirmedOrder.payment || {}),
+                ...(order.payment || {}),
+                '@ondc/org/settlement_details': [
+                  ...((confirmedOrder.payment?.['@ondc/org/settlement_details']) || []),
+                  ...((order.payment?.['@ondc/org/settlement_details']) || []),
+                ],
+                status: 'PAID',
+              },
               tags:     ORDER_TAGS,
               created_at: fullOrder.created_at || new Date().toISOString(),
               updated_at: confirmTimestamp || fullOrder.updated_at || new Date().toISOString(),
