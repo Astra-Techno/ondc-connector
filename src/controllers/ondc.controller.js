@@ -1042,8 +1042,12 @@ const handleConfirm = async (req, res) => {
       ;(async () => {
         try {
           const lsDelay = ms => new Promise(r => setTimeout(r, ms));
+          const lsCancelled = () => cancelledOrders.has(order.id);
           // Send Pending (Accepted) → Packed → Agent-assigned immediately (before LSP mock relay fires at ~5s)
           // Auto-status skips these for logistics orders (lsEntry exists in cache after startLogisticsFlow)
+          // Yield to event loop so any /cancel that arrived during on_confirm processing can register first
+          await lsDelay(500);
+          if (lsCancelled()) { logger.info('Logistics block aborted before Pending (order cancelled)', { order_id: order.id }); return; }
           const lsCtx0 = { ...context, message_id: uuidv4() };
           const pendingPayload = buildStatusPayload(order.id, order, 'Pending', 'In-progress', vendor);
           await sendCallback(context.bap_uri, 'on_status', lsCtx0, { order: pendingPayload }, tenant);
@@ -1052,6 +1056,7 @@ const handleConfirm = async (req, res) => {
           logger.info('Logistics: Pending on_status sent', { order_id: order.id });
           await lsDelay(2000);
 
+          if (lsCancelled()) { logger.info('Logistics block aborted after Pending (order cancelled)', { order_id: order.id }); return; }
           const lsCtx1 = { ...context, message_id: uuidv4() };
           const packedPayload = buildStatusPayload(order.id, order, 'Packed', 'In-progress', vendor);
           await sendCallback(context.bap_uri, 'on_status', lsCtx1, { order: packedPayload }, tenant);
@@ -1060,6 +1065,7 @@ const handleConfirm = async (req, res) => {
           logger.info('Logistics: Packed on_status sent', { order_id: order.id });
           await lsDelay(2000);
 
+          if (lsCancelled()) { logger.info('Logistics block aborted after Packed (order cancelled)', { order_id: order.id }); return; }
           const lsCtx2 = { ...context, message_id: uuidv4() };
           const agentPayload = buildStatusPayload(order.id, order, 'Agent-assigned', 'In-progress', vendor);
           await sendCallback(context.bap_uri, 'on_status', lsCtx2, { order: agentPayload }, tenant);
