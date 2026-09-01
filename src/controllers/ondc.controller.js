@@ -1534,11 +1534,39 @@ const handleUpdate = async (req, res) => {
               ],
             }];
           }
+          // Return = reverse logistics: start = buyer (delivery.end), end = seller (delivery.start)
+          const deliveryFl = (confirmedOrder.fulfillments || []).find(f => f.type === 'Delivery' || f.type !== 'Return') || {};
+          const buyerEnd = deliveryFl.end || {};
+          const sellerGps = normalizeGps(vendor?.gps);
+
+          const returnStart = {
+            location: buyerEnd.location ? { ...buyerEnd.location } : {
+              gps: sellerGps,
+              address: { locality: vendor?.city || 'Bengaluru', city: vendor?.city || 'Bengaluru', area_code: vendor?.pincode || '560001', state: vendor?.state || 'Karnataka' },
+            },
+            time: { timestamp: now },
+          };
+
+          const returnEnd = {
+            location: {
+              gps: sellerGps,
+              address: {
+                locality: vendor?.address || vendor?.city || 'Bengaluru',
+                city:     vendor?.city    || 'Bengaluru',
+                area_code: vendor?.pincode || '560001',
+                state:    vendor?.state   || 'Karnataka',
+              },
+            },
+            time: { timestamp: now },
+          };
+
           return {
             id: returnId,
             type: 'Return',
             state: { descriptor: { code: returnState } },
             '@ondc/org/provider_name': providerName,
+            start: returnStart,
+            end:   returnEnd,
             tags,
           };
         };
@@ -1785,10 +1813,31 @@ const triggerMerchantReturnUpdate = async (req, res) => {
     const returnContext = cachedEntry.returnContext || context;
 
     // Build base return fulfillment once (state is set per iteration below)
+    // Build fallback start/end for Return fulfillment (reverse logistics)
+    const deliveryFlForReturn = (order.fulfillments || []).find(f => f.type === 'Delivery' || f.type !== 'Return') || {};
+    const buyerEndFallback = deliveryFlForReturn.end || {};
+    const sellerGpsFallback = normalizeGps(vendor?.gps);
+    const fallbackReturnStart = {
+      location: buyerEndFallback.location ? { ...buyerEndFallback.location } : {
+        gps: sellerGpsFallback,
+        address: { locality: vendor?.city || 'Bengaluru', city: vendor?.city || 'Bengaluru', area_code: vendor?.pincode || '560001', state: vendor?.state || 'Karnataka' },
+      },
+      time: { timestamp: new Date().toISOString() },
+    };
+    const fallbackReturnEnd = {
+      location: {
+        gps: sellerGpsFallback,
+        address: { locality: vendor?.address || vendor?.city || 'Bengaluru', city: vendor?.city || 'Bengaluru', area_code: vendor?.pincode || '560001', state: vendor?.state || 'Karnataka' },
+      },
+      time: { timestamp: new Date().toISOString() },
+    };
+
     const baseReturnFl = storedReturnFl || {
       id: 'r1',
       type: 'Return',
       '@ondc/org/provider_name': providerName,
+      start: fallbackReturnStart,
+      end:   fallbackReturnEnd,
       tags: [{
         code: 'return_request',
         list: [
