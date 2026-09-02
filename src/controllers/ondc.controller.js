@@ -2087,16 +2087,59 @@ const buildRtoFulfillment = (rtoState, reasonId, order, deliveryFulfillment) => 
     .filter(Boolean);
 
   // RTO start = delivery end (buyer), RTO end = delivery start (seller)
-  const rtoStart = deliveryFulfillment?.end ? {
-    ...(deliveryFulfillment.end.location ? { location: deliveryFulfillment.end.location } : {}),
-    ...(deliveryFulfillment.end.contact ? { contact: deliveryFulfillment.end.contact } : {}),
-    time: { timestamp: new Date().toISOString() },
-  } : { time: { timestamp: new Date().toISOString() } };
+  const now = new Date().toISOString();
+  const t1h = new Date(Date.now() + 1 * 3600 * 1000).toISOString();
+  const t2h = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
 
-  const rtoEnd = deliveryFulfillment?.start ? {
-    ...(deliveryFulfillment.start.location ? { location: deliveryFulfillment.start.location } : {}),
-    ...(deliveryFulfillment.start.contact ? { contact: deliveryFulfillment.start.contact } : {}),
-  } : {};
+  // Ensure RTO start (buyer location) has all required fields
+  const dfEnd = deliveryFulfillment?.end || {};
+  const dfEndLoc = dfEnd.location || {};
+  const dfEndAddr = dfEndLoc.address || {};
+  const rtoStartLocation = {
+    id: dfEndLoc.id || 'buyer_loc',
+    gps: dfEndLoc.gps || '12.9716,77.5946',
+    descriptor: dfEndLoc.descriptor || { name: dfEndAddr.name || dfEndAddr.locality || 'Buyer Location' },
+    address: {
+      name:      dfEndAddr.name      || dfEndAddr.locality || 'Buyer Address',
+      building:  dfEndAddr.building  || dfEndAddr.locality || 'NA',
+      locality:  dfEndAddr.locality  || 'Bengaluru',
+      city:      dfEndAddr.city      || 'Bengaluru',
+      area_code: dfEndAddr.area_code || '560001',
+      state:     dfEndAddr.state     || 'Karnataka',
+      country:   dfEndAddr.country   || 'IND',
+    },
+  };
+  const rtoStart = {
+    location: rtoStartLocation,
+    contact:  dfEnd.contact  || deliveryFulfillment?.start?.contact || { phone: '9999999999', email: 'buyer@example.com' },
+    person:   dfEnd.person   || { name: 'Buyer' },
+    time:     { range: { start: now, end: t1h }, timestamp: now },
+  };
+
+  // Ensure RTO end (seller location) has all required fields
+  const dfStart = deliveryFulfillment?.start || {};
+  const dfStartLoc = dfStart.location || {};
+  const dfStartAddr = dfStartLoc.address || {};
+  const rtoEndLocation = {
+    id: dfStartLoc.id || 'l1',
+    gps: dfStartLoc.gps || '12.9716,77.5946',
+    descriptor: dfStartLoc.descriptor || { name: 'Store' },
+    address: {
+      name:      dfStartAddr.name      || dfStartAddr.locality || 'Store',
+      building:  dfStartAddr.building  || dfStartAddr.locality || 'NA',
+      locality:  dfStartAddr.locality  || 'Bengaluru',
+      city:      dfStartAddr.city      || 'Bengaluru',
+      area_code: dfStartAddr.area_code || '560001',
+      state:     dfStartAddr.state     || 'Karnataka',
+      country:   dfStartAddr.country   || 'IND',
+    },
+  };
+  const rtoEnd = {
+    location: rtoEndLocation,
+    contact:  dfStart.contact || { phone: '9999999999', email: 'support@store.in' },
+    person:   dfStart.person  || { name: 'Store Manager' },
+    time:     { range: { start: t1h, end: t2h }, timestamp: t2h },
+  };
 
   return {
     id:   'rto1',
