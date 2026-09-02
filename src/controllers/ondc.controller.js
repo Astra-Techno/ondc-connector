@@ -1391,6 +1391,13 @@ const handleCancel = async (req, res) => {
           }
         }
         cancelledQuote.price.value = nonItemTotal.toFixed(2);
+        // Strip item.tags with code "quote" — on_cancel validator only allows item-level tag codes
+        for (const bu of cancelledQuote.breakup) {
+          if (bu.item?.tags) {
+            bu.item.tags = bu.item.tags.filter(t => t.code !== 'quote');
+            if (!bu.item.tags.length) delete bu.item.tags;
+          }
+        }
       }
 
       // Items: original items with count=0 + copies pointing to Cancel fulfillment
@@ -2067,6 +2074,13 @@ const triggerMerchantCancel = async (req, res) => {
         if (item.price) item.price.value = '0.00';
         if (item['@ondc/org/item_quantity']) item['@ondc/org/item_quantity'].count = 0;
       });
+    }
+    // Strip item.tags with code "quote" — on_cancel validator only allows item-level tag codes
+    for (const bu of (cancelQuote.breakup || [])) {
+      if (bu.item?.tags) {
+        bu.item.tags = bu.item.tags.filter(t => t.code !== 'quote');
+        if (!bu.item.tags.length) delete bu.item.tags;
+      }
     }
 
     // For RTO cancel: duplicate items — originals with count=0 on Delivery, copies with original count on RTO
