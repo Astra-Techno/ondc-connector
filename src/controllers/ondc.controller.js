@@ -812,6 +812,15 @@ const handleSelect = async (req, res) => {
         }
       }
 
+      // Flow 5 fallback: if no item is OOS yet, force the last selected item as OOS
+      // so the on_select error block is always present for Out-of-Stock testing.
+      if (outOfStockItems.length === 0 && items.length > 1) {
+        const lastId = String(items[items.length - 1].id);
+        outOfStockItems.push(lastId);
+        forcedOutOfStockItems.add(lastId);
+        logger.info('Flow 5 fallback: forced last selected item as OOS in handleSelect', { itemId: lastId });
+      }
+
       // Mark forced OOS items as count:"0" in quote breakup and zero their price/qty
       if (outOfStockItems.length > 0 && quote?.breakup) {
         for (const b of quote.breakup) {
