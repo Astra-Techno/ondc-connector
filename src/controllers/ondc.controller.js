@@ -1152,6 +1152,109 @@ const handleConfirm = async (req, res) => {
         logger.info('Auto on_status sequence complete', { order_id: order.id });
 
         // Return sequence (Flow 4A) is triggered by handleUpdate when Pramaan sends /update
+
+        // Auto-trigger merchant RTO on_cancel after Order-delivered (Flow 3B: Merchant Side RTO)
+        // Wait 3s so Workbench registers Order-delivered first. Harmless NACK on non-RTO flows.
+        await delay(3000);
+        if (cancelledOrders.has(order.id)) { logger.info('Skipping auto RTO cancel (order already cancelled)', { order_id: order.id }); return; }
+        try {
+          const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';
+          const reason_id = '013';
+          cancelledOrders.add(order.id);
+          updateOrderStatus(order.id, 'Cancelled').catch(e => logger.warn('DB cancel update failed (non-blocking):', e.message));
+          markRetailOrderCancelled(order.id);
+
+          const merchantPreCancelState = confirmedOrderCache.get(order.id)?.currentFulfillmentState || 'Order-delivered';
+          const cancelNow = new Date().toISOString();
+          const merchantCancelFulfillmentTags = [
+            { code: 'cancel_request', list: [
+              { code: 'retry_count',  value: '3' },
+              { code: 'rto_id',       value: 'rto1' },
+              { code: 'reason_id',    value: reason_id },
+              { code: 'initiated_by', value: subscriberId },
+            ]},
+            { code: 'precancel_state', list: [
+              { code: 'fulfillment_state', value: merchantPreCancelState },
+              { code: 'updated_at',        value: order.updated_at || cancelNow },
+            ]},
+          ];
+
+          const builtDeliveryFulfillments = (order.fulfillments || []).map(f =>
+            buildFulfillmentWithLocation(f, vendor, 'Cancelled', cancelNow)
+          );
+          const deliveryFulfillments = builtDeliveryFulfillments.map(f => ({
+            ...f,
+            tags: merchantCancelFulfillmentTags,
+          }));
+          const deliveryF = builtDeliveryFulfillments[0] || null;
+          const fulfillments = [...deliveryFulfillments, buildRtoFulfillment('RTO-Initiated', reason_id, order, deliveryF)];
+
+          const cancelQuote = JSON.parse(JSON.stringify(order.quote || { price: { currency: 'INR', value: '0' }, breakup: [], ttl: 'P1D' }));
+          if (cancelQuote.price) cancelQuote.price.value = '0.00';
+          (cancelQuote.breakup || []).forEach(item => {
+            if (item.price) item.price.value = '0.00';
+            if (item['@ondc/org/item_quantity']) item['@ondc/org/item_quantity'].count = 0;
+          });
+          for (const bu of (cancelQuote.breakup || [])) {
+            if (bu.item?.tags) {
+              bu.item.tags = bu.item.tags.filter(t => t.code !== 'quote');
+              if (!bu.item.tags.length) delete bu.item.tags;
+            }
+          }
+
+          let cancelItems = order.items || [];
+          const rtoItems = cancelItems
+            .filter(item => (item.quantity?.count || 0) > 0)
+            .map(item => ({ id: item.id, quantity: { count: item.quantity.count }, fulfillment_id: 'rto1' }));
+          cancelItems = [
+            ...cancelItems.map(item => ({ ...item, quantity: { count: 0 } })),
+            ...rtoItems,
+          ];
+
+          const cancelPayload = {
+            id:    order.id,
+            state: 'Cancelled',
+            provider:  order.provider,
+            items:     cancelItems,
+            billing:   order.billing,
+            quote:     cancelQuote,
+            payment: {
+              ...(order.payment || {}),
+              '@ondc/org/buyer_app_finder_fee_type':   'percent',
+              '@ondc/org/buyer_app_finder_fee_amount': '3',
+              '@ondc/org/settlement_details':           buildSettlementDetails(),
+              status: 'PAID',
+            },
+            cancellation: {
+              cancelled_by: subscriberId,
+              reason: { id: reason_id },
+            },
+            fulfillments,
+            tags: ORDER_TAGS,
+            created_at:  order.created_at || cancelNow,
+            updated_at:  new Date(Date.now() + 1).toISOString(),
+          };
+
+          await sendCallback(context.bap_uri, 'on_cancel', { ...context, message_id: uuidv4() }, { order: cancelPayload }, tenant);
+          logger.info('Auto merchant RTO on_cancel sent', { order_id: order.id });
+
+          // Auto-send RTO on_status sequence: RTO-Initiated → RTO-Delivered
+          await delay(1000);
+          const rtoInitPayload = buildStatusPayload(order.id, order, 'RTO-Initiated', 'Cancelled', vendor);
+          await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: rtoInitPayload }, tenant);
+          const e1 = confirmedOrderCache.get(order.id);
+          if (e1) e1.currentFulfillmentState = 'RTO-Initiated';
+          logger.info('Auto RTO-Initiated on_status sent', { order_id: order.id });
+
+          await delay(2000);
+          const rtoDelvPayload = buildStatusPayload(order.id, order, 'RTO-Delivered', 'Cancelled', vendor);
+          await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: rtoDelvPayload }, tenant);
+          const e2 = confirmedOrderCache.get(order.id);
+          if (e2) e2.currentFulfillmentState = 'RTO-Delivered';
+          logger.info('Auto RTO-Delivered on_status sent', { order_id: order.id });
+        } catch (rtoErr) {
+          logger.warn('Auto merchant RTO on_cancel failed (non-blocking):', rtoErr.message);
+        }
       };
       autoStatusSequence().catch(err => logger.error('Auto on_status sequence failed:', err.message));
 
