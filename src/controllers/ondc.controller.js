@@ -1155,6 +1155,20 @@ const handleConfirm = async (req, res) => {
       };
       autoStatusSequence().catch(err => logger.error('Auto on_status sequence failed:', err.message));
 
+      // Auto-trigger merchant part-cancel on_update (Flow 3A / Merchant RTO)
+      // Fires 3s after on_confirm so Workbench has time to register on_confirm first.
+      // For flows that don't expect on_update, Workbench NACKs it harmlessly.
+      ;(async () => {
+        try {
+          await new Promise(r => setTimeout(r, 3000));
+          if (cancelledOrders.has(order.id)) return; // buyer already cancelled
+          await sendPartialCancelOnUpdate(context, order, vendor, tenant, order.updated_at || now);
+          logger.info('Auto merchant on_update (part-cancel) sent', { order_id: order.id });
+        } catch (e) {
+          logger.warn('Auto merchant on_update failed (non-blocking):', e.message);
+        }
+      })();
+
     } catch (err) {
       logger.error('handleConfirm processing failed:', err.message);
       if (context?.bap_uri) {
