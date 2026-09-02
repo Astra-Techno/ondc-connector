@@ -920,6 +920,7 @@ const handleInit = async (req, res) => {
           })),
           payment: {
             ...order.payment,
+            status: 'NOT-PAID',
             '@ondc/org/buyer_app_finder_fee_type':   'percent',
             '@ondc/org/buyer_app_finder_fee_amount': '3',
             '@ondc/org/settlement_details':           buildSettlementDetails(),
