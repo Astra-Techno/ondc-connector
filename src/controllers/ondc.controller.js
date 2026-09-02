@@ -493,6 +493,18 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         ],
       };});
 
+      // Auto-populate forcedOutOfStockItems with the last catalog item so Flow 5
+      // (Out of Stock) always has at least one item with available.count = "0".
+      // This runs once (on first on_search) and persists across flows in the same session.
+      if (forcedOutOfStockItems.size === 0 && items.length > 0) {
+        const lastItemId = String(items[items.length - 1].id);
+        forcedOutOfStockItems.add(lastItemId);
+        // Update the item we just built so this on_search already reflects count=0
+        items[items.length - 1].quantity.available.count = '0';
+        items[items.length - 1].quantity.maximum.count   = '0';
+        logger.info('Auto-forced last catalog item as out-of-stock for Flow 5', { itemId: lastItemId });
+      }
+
       // Ensure GPS has 6+ decimal places
       const rawGps = vendor.gps || '13.0827,80.2707';
       const gps6 = rawGps.split(',').map(c => {
@@ -800,7 +812,7 @@ const handleSelect = async (req, res) => {
         }
       }
 
-      // Mark forced OOS items as count:"0" in quote breakup (schema requires "99" or "0" only)
+      // Mark forced OOS items as count:"0" in quote breakup and zero their price/qty
       if (outOfStockItems.length > 0 && quote?.breakup) {
         for (const b of quote.breakup) {
           if (outOfStockItems.includes(String(b['@ondc/org/item_id']))) {
@@ -808,8 +820,13 @@ const handleSelect = async (req, res) => {
               b.item.quantity.available = { count: '0' };
               b.item.quantity.maximum   = { count: '0' };
             }
+            if (b['@ondc/org/item_quantity']) b['@ondc/org/item_quantity'].count = 0;
+            b.price = { currency: 'INR', value: '0.00' };
           }
         }
+        // Recalculate quote total from remaining breakup prices
+        const newTotal = quote.breakup.reduce((sum, b) => sum + parseFloat(b.price?.value || '0'), 0);
+        quote.price.value = newTotal.toFixed(2);
       }
 
       let providerName = '';
