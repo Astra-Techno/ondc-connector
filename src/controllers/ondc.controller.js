@@ -1158,6 +1158,15 @@ const handleConfirm = async (req, res) => {
         // If Workbench NACKs (non-RTO flow), undo the cancel — don't pollute state.
         await delay(3000);
         if (cancelledOrders.has(order.id)) { logger.info('Skipping auto RTO cancel (order already cancelled)', { order_id: order.id }); return; }
+
+        // Skip auto RTO cancel if an IGM issue is active for this transaction (prevents out-of-sequence NACK)
+        const hasActiveIgm = [...issueCache.values()].some(
+          entry => entry.context?.transaction_id === context.transaction_id && (entry.stage || 0) < 5
+        );
+        if (hasActiveIgm) {
+          logger.info('Skipping auto RTO cancel — active IGM issue for this transaction', { order_id: order.id, txn: context.transaction_id });
+          return;
+        }
         try {
           const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';
           const reason_id = '013';
