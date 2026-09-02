@@ -1154,15 +1154,13 @@ const handleConfirm = async (req, res) => {
         // Return sequence (Flow 4A) is triggered by handleUpdate when Pramaan sends /update
 
         // Auto-trigger merchant RTO on_cancel after Order-delivered (Flow 3B: Merchant Side RTO)
-        // Wait 3s so Workbench registers Order-delivered first. Harmless NACK on non-RTO flows.
+        // Wait 3s so Workbench registers Order-delivered first.
+        // If Workbench NACKs (non-RTO flow), undo the cancel — don't pollute state.
         await delay(3000);
         if (cancelledOrders.has(order.id)) { logger.info('Skipping auto RTO cancel (order already cancelled)', { order_id: order.id }); return; }
         try {
           const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';
           const reason_id = '013';
-          cancelledOrders.add(order.id);
-          updateOrderStatus(order.id, 'Cancelled').catch(e => logger.warn('DB cancel update failed (non-blocking):', e.message));
-          markRetailOrderCancelled(order.id);
 
           const merchantPreCancelState = confirmedOrderCache.get(order.id)?.currentFulfillmentState || 'Order-delivered';
           const cancelNow = new Date().toISOString();
@@ -1235,8 +1233,18 @@ const handleConfirm = async (req, res) => {
             updated_at:  new Date(Date.now() + 1).toISOString(),
           };
 
-          await sendCallback(context.bap_uri, 'on_cancel', { ...context, message_id: uuidv4() }, { order: cancelPayload }, tenant);
-          logger.info('Auto merchant RTO on_cancel sent', { order_id: order.id });
+          const cancelResult = await sendCallback(context.bap_uri, 'on_cancel', { ...context, message_id: uuidv4() }, { order: cancelPayload }, tenant);
+          const cancelAck = cancelResult?.message?.ack?.status;
+          if (cancelAck === 'NACK' || cancelAck !== 'ACK') {
+            logger.info('Auto RTO on_cancel NACK/rejected (non-RTO flow) — skipping RTO sequence', { order_id: order.id, ack: cancelAck });
+            return; // Don't mark as cancelled, don't send RTO on_status
+          }
+
+          // ACK received — this IS an RTO flow. Mark as cancelled and continue.
+          cancelledOrders.add(order.id);
+          updateOrderStatus(order.id, 'Cancelled').catch(e => logger.warn('DB cancel update failed (non-blocking):', e.message));
+          markRetailOrderCancelled(order.id);
+          logger.info('Auto merchant RTO on_cancel ACK — proceeding with RTO sequence', { order_id: order.id });
 
           // Auto-send RTO on_status sequence: RTO-Initiated → RTO-Delivered
           await delay(1000);
@@ -2700,9 +2708,36 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
     complainant_id: origIssue.complainant_id || origIssue.actors?.[0]?.actor_id || origContext?.bap_id,
     source_id:      origIssue.source_id      || origIssue.actors?.[0]?.actor_id || origContext?.bap_id,
     respondent_ids: [bppSubscriberId],
-    // Echo back IGM 2.0 arrays from original /issue
-    refs:    origIssue.refs    || [],
-    actors:  origIssue.actors  || [],
+    // IGM 2.0 refs — build from order_details if not provided
+    refs: (origIssue.refs && origIssue.refs.length > 0) ? origIssue.refs : [
+      { ref_id: origIssue.order_details?.id || origIssue.id || '', ref_type: 'ORDER' },
+      ...(origIssue.order_details?.items || []).map(i => ({ ref_id: i.id || '', ref_type: 'ITEM' })),
+    ],
+    // IGM 2.0 actors — build from complainant_info + BPP if not provided
+    actors: (origIssue.actors && origIssue.actors.length > 0) ? origIssue.actors : [
+      {
+        id: origContext?.bap_id || origIssue.complainant_id || '',
+        type: 'CONSUMER',
+        info: {
+          person: { name: origIssue.complainant_info?.person?.name || 'Buyer' },
+          contact: {
+            phone: origIssue.complainant_info?.contact?.phone || '',
+            email: origIssue.complainant_info?.contact?.email || '',
+          },
+        },
+      },
+      {
+        id: bppSubscriberId,
+        type: 'INTERFACING_NP',
+        info: {
+          person: { name: 'Support Desk' },
+          contact: {
+            phone: process.env.SUPPORT_PHONE || '+919999999999',
+            email: process.env.SUPPORT_EMAIL || 'support@cottkart.com',
+          },
+        },
+      },
+    ],
     descriptor: origIssue.descriptor || {
       code:       origIssue.category || 'ITEM',
       short_desc: origIssue.description?.short_desc || 'Issue reported',
