@@ -1194,6 +1194,13 @@ const handleConfirm = async (req, res) => {
           logger.info('Skipping auto RTO cancel — active IGM issue for this transaction', { order_id: order.id, txn: context.transaction_id });
           return;
         }
+
+        // Skip auto RTO cancel if a buyer-initiated return is in progress (prevents out-of-sequence NACK)
+        const cachedForRto = confirmedOrderCache.get(order.id);
+        if (cachedForRto?.returnFulfillment) {
+          logger.info('Skipping auto RTO cancel — buyer return in progress', { order_id: order.id });
+          return;
+        }
         try {
           const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';
           const reason_id = '013';
