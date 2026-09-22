@@ -98,7 +98,6 @@ const buildInitTags = (vendor) => [{
     { code: 'np_type',               value: 'MSN'      },
     { code: 'tax_number',            value: vendor?.gst_number || process.env.ONDC_GST_NUMBER || '07AAACN0000A1Z5' },
     { code: 'provider_tax_number',   value: vendor?.pan_number || process.env.ONDC_PROVIDER_PAN || 'AAACN0000A' },
-    { code: 'accept_bap_terms',      value: 'Y'        },
   ],
 }];
 
