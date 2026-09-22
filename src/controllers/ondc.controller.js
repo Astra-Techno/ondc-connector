@@ -98,6 +98,7 @@ const buildInitTags = (vendor) => [{
     { code: 'np_type',               value: 'MSN'      },
     { code: 'tax_number',            value: vendor?.gst_number || process.env.ONDC_GST_NUMBER || '07AAACN0000A1Z5' },
     { code: 'provider_tax_number',   value: vendor?.pan_number || process.env.ONDC_PROVIDER_PAN || 'AAACN0000A' },
+    { code: 'accept_bap_terms',      value: 'Y'        },
   ],
 }];
 
@@ -198,7 +199,7 @@ const buildFulfillmentWithLocation = (f, vendor, stateCode, now) => {
   // Strip BAP-sent properties not allowed in BPP on_* responses
   const { '@ondc/org/tracking': _tracking, ...fRest } = f;
 
-  return {
+  const result = {
     ...fRest,
     id:       f.id   || 'f1',
     type:     f.type || 'Delivery',
@@ -234,6 +235,15 @@ const buildFulfillmentWithLocation = (f, vendor, stateCode, now) => {
       time: { range: { start: t24h, end: t48h }, timestamp: t48h },
     },
   };
+
+  // Add documents section for Order-picked-up (proof of pickup / invoice)
+  if (stateCode === 'Order-picked-up') {
+    result.documents = [
+      { url: 'https://ondc.cottkart.com/invoice/proforma_invoice.pdf', label: 'PROFORMA_INVOICE' },
+    ];
+  }
+
+  return result;
 };
 
 // Flow 3A — merchant partial cancel on_update (ONDC spec: Cancel fulfillment + precancel_state)
@@ -250,11 +260,18 @@ const buildPartialCancelUpdatePayload = (order, vendor, confirmTimestamp) => {
   );
   const cancelledLineTotal = (cancelledPrice * cancelledQty).toFixed(2);
 
-  // Recalculate quote: remove cancelled item, keep delivery + remaining items
+  // Recalculate quote: zero out cancelled item price/qty but KEEP the breakup entry
   const originalBreakup = order.quote?.breakup || [];
-  const updatedBreakup = originalBreakup.filter(b =>
-    !(b['@ondc/org/title_type'] === 'item' && b['@ondc/org/item_id'] === cancelledItem?.id)
-  );
+  const updatedBreakup = originalBreakup.map(b => {
+    if (b['@ondc/org/title_type'] === 'item' && b['@ondc/org/item_id'] === cancelledItem?.id) {
+      return { ...b, price: { currency: 'INR', value: '0.00' }, '@ondc/org/item_quantity': { count: 0 } };
+    }
+    // Also zero out the tax entry for the cancelled item
+    if (b['@ondc/org/title_type'] === 'tax' && b['@ondc/org/item_id'] === cancelledItem?.id) {
+      return { ...b, price: { currency: 'INR', value: '0.00' } };
+    }
+    return { ...b };
+  });
   const updatedTotal = updatedBreakup.reduce((sum, b) => sum + parseFloat(b.price?.value || 0), 0).toFixed(2);
 
   // Cancel fulfillment (type "Cancel", state "Cancelled") — separate from Delivery
@@ -305,13 +322,21 @@ const buildPartialCancelUpdatePayload = (order, vendor, confirmTimestamp) => {
     ],
   }));
 
-  // Items: remaining items keep their fulfillment_id, cancelled item points to Cancel fulfillment
+  // Items: cancelled item gets count=0 on delivery + new entry on Cancel fulfillment;
+  // remaining items keep their original entries
   const itemsPayload = [
-    ...remainingItems.map(i => ({ ...i })),
+    // Cancelled item with count=0 on original delivery fulfillment
     ...(cancelledItem ? [{
       ...cancelledItem,
+      quantity: { count: 0 },
+    }] : []),
+    // Remaining items keep their fulfillment_id
+    ...remainingItems.map(i => ({ ...i })),
+    // Cancelled item pointing to Cancel fulfillment
+    ...(cancelledItem ? [{
+      id: cancelledItem.id,
+      quantity: { count: cancelledQty },
       fulfillment_id: cancelFulfillmentId,
-      tags: [{ code: 'cancellation', list: [{ code: 'reason_id', value: '001' }] }],
     }] : []),
   ];
 
@@ -438,8 +463,13 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         return [defaultImg];
       };
 
-      const items = products.map(p => {
+      // Variant unitized measures — each item in a variant group must have a different measure
+      const variantMeasures = ['500', '1000', '250', '750', '100'];
+
+      const items = products.map((p, idx) => {
         const imgs = itemImages(p);
+        const measureValue = p.measure_value || variantMeasures[idx % variantMeasures.length];
+        const measureUnit  = p.measure_unit  || p.unit || 'gram';
         return {
         id: p.external_product_id,
         time: { label: 'enable', timestamp: now },
@@ -457,7 +487,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
           maximum_value: String(p.mrp || p.price),
         },
         quantity: {
-          unitized: { measure: { unit: p.unit || 'unit', value: '1' } },
+          unitized: { measure: { unit: measureUnit, value: measureValue } },
           available: { count: (p.stock > 0 && !forcedOutOfStockItems.has(String(p.external_product_id))) ? '99' : '0' },
           maximum:   { count: (p.stock > 0 && !forcedOutOfStockItems.has(String(p.external_product_id))) ? '99' : '0' },
         },
@@ -596,7 +626,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
             code: 'serviceability',
             list: [
               { code: 'location', value: 'l1' },
-              { code: 'category', value: 'Grocery' },
+              { code: 'category', value: items[0]?.category_id || 'Snacks, Dry Fruits, Nuts' },
               { code: 'type',     value: '10' },
               { code: 'val',      value: '10' },
               { code: 'unit',     value: 'km' },
@@ -885,6 +915,13 @@ const handleSelect = async (req, res) => {
       }
 
       await sendCallback(context.bap_uri, 'on_select', context, payload, tenant);
+
+      // Clear forcedOutOfStockItems after sending OOS on_select so subsequent
+      // flows (normal prepaid, return, etc.) don't get a stale error block.
+      if (outOfStockItems.length > 0) {
+        forcedOutOfStockItems.clear();
+        logger.info('Cleared forcedOutOfStockItems after OOS on_select sent');
+      }
     } catch (err) {
       logger.error('handleSelect processing failed:', err.message);
       if (context?.bap_uri) {
@@ -1228,7 +1265,6 @@ const handleConfirm = async (req, res) => {
             tags: merchantCancelFulfillmentTags,
           }));
           const deliveryF = builtDeliveryFulfillments[0] || null;
-          const fulfillments = [...deliveryFulfillments, buildRtoFulfillment('RTO-Initiated', reason_id, order, deliveryF)];
 
           const cancelQuote = JSON.parse(JSON.stringify(order.quote || { price: { currency: 'INR', value: '0' }, breakup: [], ttl: 'P1D' }));
           if (cancelQuote.price) cancelQuote.price.value = '0.00';
@@ -1243,14 +1279,46 @@ const handleConfirm = async (req, res) => {
             }
           }
 
-          let cancelItems = order.items || [];
-          const rtoItems = cancelItems
-            .filter(item => (item.quantity?.count || 0) > 0)
-            .map(item => ({ id: item.id, quantity: { count: item.quantity.count }, fulfillment_id: 'rto1' }));
-          cancelItems = [
-            ...cancelItems.map(item => ({ ...item, quantity: { count: 0 } })),
-            ...rtoItems,
-          ];
+          // Separate already-cancelled items (from part-cancel on_update) from RTO items
+          const allItems = order.items || [];
+          const partCancelledItemId = allItems[0]?.id; // First item was part-cancelled
+          const cancelItems = [];
+          const rtoOnlyItems = []; // Items being RTO'd (not previously cancelled)
+          for (const item of allItems) {
+            const qty = item.quantity?.count || 0;
+            if (item.id === partCancelledItemId && allItems.length > 1) {
+              // Part-cancelled item: count=0 on delivery, count on Cancel fulfillment
+              cancelItems.push({ ...item, quantity: { count: 0 } });
+              cancelItems.push({ id: item.id, quantity: { count: qty || 1 }, fulfillment_id: 'c1' });
+            } else {
+              // RTO item: count=0 on delivery, count on RTO fulfillment
+              cancelItems.push({ ...item, quantity: { count: 0 } });
+              if (qty > 0) {
+                cancelItems.push({ id: item.id, quantity: { count: qty }, fulfillment_id: 'rto1' });
+                rtoOnlyItems.push(item);
+              }
+            }
+          }
+
+          // Cancel fulfillment for part-cancelled item
+          const cancelTypeFulfillment = {
+            id: 'c1',
+            type: 'Cancel',
+            state: { descriptor: { code: 'Cancelled' } },
+            tags: [{
+              code: 'quote_trail', list: [
+                { code: 'type', value: 'item' }, { code: 'id', value: partCancelledItemId || '' },
+                { code: 'currency', value: 'INR' }, { code: 'value', value: '0' },
+              ],
+            }],
+          };
+
+          // Build RTO fulfillment with quote_trail only for RTO items (not part-cancelled ones)
+          const rtoQuote = { ...order.quote, breakup: (order.quote?.breakup || []).filter(b =>
+            rtoOnlyItems.some(ri => ri.id === b['@ondc/org/item_id']) || !['item'].includes(b['@ondc/org/title_type'])
+          )};
+          const rtoFulfillment = buildRtoFulfillment('RTO-Initiated', reason_id, { ...order, quote: rtoQuote }, deliveryF);
+          const allFulfillments = [...deliveryFulfillments, cancelTypeFulfillment, rtoFulfillment];
 
           const cancelPayload = {
             id:    order.id,
@@ -1270,7 +1338,7 @@ const handleConfirm = async (req, res) => {
               cancelled_by: subscriberId,
               reason: { id: reason_id },
             },
-            fulfillments,
+            fulfillments: allFulfillments,
             tags: ORDER_TAGS,
             created_at:  order.created_at || cancelNow,
             updated_at:  new Date(Date.now() + 1).toISOString(),
@@ -1741,6 +1809,32 @@ const handleUpdate = async (req, res) => {
             time: { timestamp: now },
           };
 
+          // Extract return item details for quote_trail
+          const returnItemId = bapReturnFl?.tags?.[0]?.list?.find(t => t.code === 'item_id')?.value || fullOrder.items?.[0]?.id || '';
+          const returnItemQty = parseInt(bapReturnFl?.tags?.[0]?.list?.find(t => t.code === 'item_quantity')?.value || '1', 10);
+
+          // Add quote_trail tags for Return_Picked and Return_Delivered
+          const needsQuoteTrail = ['Return_Picked', 'Return_Delivered'].includes(returnState);
+          if (needsQuoteTrail) {
+            const returnItemBreakup = (confirmedOrder.quote?.breakup || []).find(
+              b => b['@ondc/org/item_id'] === returnItemId && b['@ondc/org/title_type'] === 'item'
+            );
+            const itemPrice = parseFloat(returnItemBreakup?.item?.price?.value || returnItemBreakup?.price?.value || '0');
+            const refundValue = (itemPrice * returnItemQty).toFixed(2);
+            tags = [
+              ...tags,
+              {
+                code: 'quote_trail',
+                list: [
+                  { code: 'type',     value: 'item' },
+                  { code: 'id',       value: returnItemId },
+                  { code: 'currency', value: 'INR' },
+                  { code: 'value',    value: `-${refundValue}` },
+                ],
+              },
+            ];
+          }
+
           return {
             id: returnId,
             type: 'Return',
@@ -1756,14 +1850,56 @@ const handleUpdate = async (req, res) => {
           const deliveryFulfillments = (confirmedOrder.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
             buildFulfillmentWithLocation(f, vendor, 'Order-delivered', now)
           );
+
+          // Extract return item info
+          const returnItemId = bapReturnFl?.tags?.[0]?.list?.find(t => t.code === 'item_id')?.value || '';
+          const returnItemQty = parseInt(bapReturnFl?.tags?.[0]?.list?.find(t => t.code === 'item_quantity')?.value || '1', 10);
+          const returnFl = buildReturnFulfillment(returnState, bapReturnFl);
+          const returnFlId = returnFl.id;
+
+          // Update items: returned items get count=0 on delivery + new entry on return fulfillment
+          const needsItemUpdate = ['Return_Picked', 'Return_Delivered'].includes(returnState);
+          let updatedItems = fullOrder.items;
+          if (needsItemUpdate && returnItemId) {
+            updatedItems = [];
+            for (const item of (fullOrder.items || [])) {
+              if (item.id === returnItemId) {
+                updatedItems.push({ ...item, quantity: { count: Math.max(0, (item.quantity?.count || 1) - returnItemQty) } });
+                updatedItems.push({ id: item.id, quantity: { count: returnItemQty }, fulfillment_id: returnFlId });
+              } else {
+                updatedItems.push({ ...item });
+              }
+            }
+          }
+
+          // Update quote: subtract returned item price for Return_Picked/Delivered
+          let updatedQuote = fullOrder.quote;
+          if (needsItemUpdate && returnItemId && updatedQuote?.breakup) {
+            updatedQuote = JSON.parse(JSON.stringify(updatedQuote));
+            const returnBreakup = updatedQuote.breakup.find(
+              b => b['@ondc/org/item_id'] === returnItemId && b['@ondc/org/title_type'] === 'item'
+            );
+            if (returnBreakup) {
+              const itemPrice = parseFloat(returnBreakup.item?.price?.value || returnBreakup.price?.value || '0');
+              const refund = itemPrice * returnItemQty;
+              const origLinePrice = parseFloat(returnBreakup.price?.value || '0');
+              returnBreakup.price.value = Math.max(0, origLinePrice - refund).toFixed(2);
+              if (returnBreakup['@ondc/org/item_quantity']) {
+                returnBreakup['@ondc/org/item_quantity'].count = Math.max(0, (returnBreakup['@ondc/org/item_quantity'].count || 1) - returnItemQty);
+              }
+            }
+            const newTotal = updatedQuote.breakup.reduce((sum, b) => sum + parseFloat(b.price?.value || '0'), 0);
+            updatedQuote.price.value = newTotal.toFixed(2);
+          }
+
           return {
             id:       fullOrder.id,
             state:    'Completed',
             provider: fullOrder.provider,
-            items:    fullOrder.items,
+            items:    updatedItems,
             billing:  fullOrder.billing,
-            fulfillments: [...deliveryFulfillments, buildReturnFulfillment(returnState, bapReturnFl)],
-            quote:    fullOrder.quote,
+            fulfillments: [...deliveryFulfillments, returnFl],
+            quote:    updatedQuote,
             payment:  { ...(fullOrder.payment || {}), status: 'PAID' },
             tags:     ORDER_TAGS,
             created_at: fullOrder.created_at || now,
@@ -1787,14 +1923,66 @@ const handleUpdate = async (req, res) => {
             const deliveryFls = (confirmedOrder.fulfillments || [{ id: 'f1', type: 'Delivery' }])
               .filter(f => f.type !== 'Return' && f.type !== 'Cancel')
               .map(f => buildFulfillmentWithLocation(f, vendor, 'Order-delivered', nowR));
+
+            // Extract return item info from tags
+            const returnReqTag = paymentReturnFl?.tags?.find(t => t.code === 'return_request');
+            const pReturnItemId = returnReqTag?.list?.find(t => t.code === 'item_id')?.value || '';
+            const pReturnItemQty = parseInt(returnReqTag?.list?.find(t => t.code === 'item_quantity')?.value || '1', 10);
+            const returnFlId = returnFl.id || paymentReturnFl?.id || 'r1';
+
+            // Add quote_trail to return fulfillment for Return_Picked / Return_Delivered
+            const pNeedsQuoteTrail = ['Return_Picked', 'Return_Delivered'].includes(returnState);
+            if (pNeedsQuoteTrail && pReturnItemId) {
+              const pBreakup = confirmedOrder.quote?.breakup?.find(
+                b => b['@ondc/org/item_id'] === pReturnItemId && b['@ondc/org/title_type'] === 'item'
+              );
+              const pItemPrice = parseFloat(pBreakup?.item?.price?.value || pBreakup?.price?.value || '0');
+              const pRefund = (pItemPrice * pReturnItemQty).toFixed(2);
+              returnFl.tags = [
+                ...(returnFl.tags || []),
+                { code: 'quote_trail', list: [
+                  { code: 'type', value: 'item' }, { code: 'id', value: pReturnItemId },
+                  { code: 'currency', value: 'INR' }, { code: 'value', value: `-${pRefund}` },
+                ]},
+              ];
+            }
+
+            // Update items: returned item count=0 on delivery + new entry on return fulfillment
+            let pItems = fullOrder.items;
+            if (pNeedsQuoteTrail && pReturnItemId) {
+              pItems = [];
+              for (const item of (fullOrder.items || [])) {
+                if (item.id === pReturnItemId) {
+                  pItems.push({ ...item, quantity: { count: Math.max(0, (item.quantity?.count || 1) - pReturnItemQty) } });
+                  pItems.push({ id: item.id, quantity: { count: pReturnItemQty }, fulfillment_id: returnFlId });
+                } else {
+                  pItems.push({ ...item });
+                }
+              }
+            }
+
+            // Update quote: subtract returned item
+            let pQuote = fullOrder.quote;
+            if (pNeedsQuoteTrail && pReturnItemId && pQuote?.breakup) {
+              pQuote = JSON.parse(JSON.stringify(pQuote));
+              const pRetBu = pQuote.breakup.find(b => b['@ondc/org/item_id'] === pReturnItemId && b['@ondc/org/title_type'] === 'item');
+              if (pRetBu) {
+                const pPrice = parseFloat(pRetBu.item?.price?.value || pRetBu.price?.value || '0');
+                const pRefAmt = pPrice * pReturnItemQty;
+                pRetBu.price.value = Math.max(0, parseFloat(pRetBu.price?.value || '0') - pRefAmt).toFixed(2);
+                if (pRetBu['@ondc/org/item_quantity']) pRetBu['@ondc/org/item_quantity'].count = Math.max(0, (pRetBu['@ondc/org/item_quantity'].count || 1) - pReturnItemQty);
+              }
+              pQuote.price.value = pQuote.breakup.reduce((s, b) => s + parseFloat(b.price?.value || '0'), 0).toFixed(2);
+            }
+
             return {
               id:       fullOrder.id,
               state:    'Completed',
               provider: fullOrder.provider,
-              items:    fullOrder.items,
+              items:    pItems,
               billing:  fullOrder.billing,
               fulfillments: [...deliveryFls, returnFl],
-              quote:    fullOrder.quote,
+              quote:    pQuote,
               payment:  {
                 ...(confirmedOrder.payment || {}),
                 ...(order.payment || {}),
@@ -2421,9 +2609,47 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
   );
 
   const deliveryF = deliveryFulfillments[0] || null;
-  const fulfillments = isRto
-    ? [...deliveryFulfillments, buildRtoFulfillment(fulfillmentState, '013', order, deliveryF)]
-    : deliveryFulfillments;
+
+  // For RTO: include Cancel fulfillment for part-cancelled item + RTO fulfillment with RTO-only quote_trail
+  let fulfillments;
+  let statusItems = order.items;
+  if (isRto) {
+    const allItems = order.items || [];
+    const partCancelledId = allItems[0]?.id;
+    const rtoOnlyItems = allItems.length > 1 ? allItems.slice(1) : allItems;
+
+    // Build items: part-cancelled → c1, remaining → count=0 on delivery + rto1
+    const builtItems = [];
+    for (const item of allItems) {
+      if (item.id === partCancelledId && allItems.length > 1) {
+        builtItems.push({ ...item, quantity: { count: 0 } });
+        builtItems.push({ id: item.id, quantity: { count: item.quantity?.count || 1 }, fulfillment_id: 'c1' });
+      } else {
+        builtItems.push({ ...item, quantity: { count: 0 } });
+        if ((item.quantity?.count || 0) > 0) {
+          builtItems.push({ id: item.id, quantity: { count: item.quantity.count }, fulfillment_id: 'rto1' });
+        }
+      }
+    }
+    statusItems = builtItems;
+
+    // Cancel fulfillment for part-cancelled item
+    const cancelFl = {
+      id: 'c1', type: 'Cancel', state: { descriptor: { code: 'Cancelled' } },
+      tags: [{ code: 'quote_trail', list: [
+        { code: 'type', value: 'item' }, { code: 'id', value: partCancelledId || '' },
+        { code: 'currency', value: 'INR' }, { code: 'value', value: '0' },
+      ]}],
+    };
+
+    // RTO fulfillment with quote_trail for RTO items only
+    const rtoQuote = { ...order.quote, breakup: (order.quote?.breakup || []).filter(b =>
+      rtoOnlyItems.some(ri => ri.id === b['@ondc/org/item_id']) || !['item'].includes(b['@ondc/org/title_type'])
+    )};
+    fulfillments = [...deliveryFulfillments, cancelFl, buildRtoFulfillment(fulfillmentState, '013', { ...order, quote: rtoQuote }, deliveryF)];
+  } else {
+    fulfillments = deliveryFulfillments;
+  }
 
   // For RTO on_status: zero out quote (same as on_cancel)
   let statusQuote = order.quote;
@@ -2440,7 +2666,7 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
     id:       order_id,
     state:    orderState,
     provider: order.provider,
-    items:    order.items,
+    items:    statusItems,
     billing:  order.billing,
     fulfillments,
     quote:     statusQuote,
@@ -2756,7 +2982,7 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
       { ref_id: origIssue.order_details?.id || origIssue.id || '', ref_type: 'ORDER' },
       ...(origIssue.order_details?.items || []).map(i => ({ ref_id: i.id || '', ref_type: 'ITEM' })),
     ],
-    // IGM 2.0 actors — build from complainant_info + BPP if not provided
+    // IGM actors — CONSUMER + INTERFACING_NP (BPP) + COUNTERPARTY_NP (BAP)
     actors: (origIssue.actors && origIssue.actors.length > 0) ? origIssue.actors : [
       {
         id: origContext?.bap_id || origIssue.complainant_id || '',
@@ -2777,6 +3003,17 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
           contact: {
             phone: process.env.SUPPORT_PHONE || '+919999999999',
             email: process.env.SUPPORT_EMAIL || 'support@cottkart.com',
+          },
+        },
+      },
+      {
+        id: origContext?.bap_id || origIssue.complainant_id || '',
+        type: 'COUNTERPARTY_NP',
+        info: {
+          person: { name: origIssue.complainant_info?.person?.name || 'Buyer App' },
+          contact: {
+            phone: origIssue.complainant_info?.contact?.phone || '',
+            email: origIssue.complainant_info?.contact?.email || '',
           },
         },
       },
