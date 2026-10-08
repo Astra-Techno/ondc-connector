@@ -1091,7 +1091,7 @@ const handleConfirm = async (req, res) => {
           await lsDelay(500);
           if (lsCancelled()) { logger.info('Logistics block aborted before Pending (order cancelled)', { order_id: order.id }); return; }
           const lsCtx0 = { ...context, message_id: uuidv4() };
-          const pendingPayload = buildStatusPayload(order.id, order, 'Pending', 'In-progress', vendor);
+          const pendingPayload = buildStatusPayload(order.id, order, 'Pending', 'Accepted', vendor);
           await sendCallback(context.bap_uri, 'on_status', lsCtx0, { order: pendingPayload }, tenant);
           const ce0 = confirmedOrderCache.get(order.id);
           if (ce0) ce0.currentFulfillmentState = 'Pending';
@@ -1137,7 +1137,7 @@ const handleConfirm = async (req, res) => {
         // Steps 1-4 fire rapidly (2s apart). Step 5 (Order-delivered) is delayed by 45s
         // to give Flow 3B/3C time to trigger cancel before Order-delivered fires.
         const steps = [
-          { fulfillmentState: 'Pending',            orderState: 'In-progress', delayAfter: 2000  },
+          { fulfillmentState: 'Pending',            orderState: 'Accepted',    delayAfter: 2000  },
           { fulfillmentState: 'Packed',              orderState: 'In-progress', delayAfter: 2000  },
           { fulfillmentState: 'Agent-assigned',      orderState: 'In-progress', delayAfter: 2000  },
           { fulfillmentState: 'Order-picked-up',     orderState: 'In-progress', delayAfter: 2000  },
@@ -2685,7 +2685,7 @@ const triggerMerchantStatusSequence = async (req, res) => {
     // Per Pramaan PDF: order state must be "In-progress" for transit states, "Completed" for delivered
     const sequences = {
       '3a': [
-        { fulfillmentState: 'Pending',           orderState: 'In-progress' },
+        { fulfillmentState: 'Pending',           orderState: 'Accepted' },
         { fulfillmentState: 'Packed',            orderState: 'In-progress' },
         { fulfillmentState: 'Agent-assigned',    orderState: 'In-progress' },
         { fulfillmentState: 'Order-picked-up',   orderState: 'In-progress' },
@@ -2693,7 +2693,7 @@ const triggerMerchantStatusSequence = async (req, res) => {
         { fulfillmentState: 'Order-delivered',   orderState: 'Completed' },
       ],
       '3b': [
-        { fulfillmentState: 'Pending',          orderState: 'In-progress' },
+        { fulfillmentState: 'Pending',          orderState: 'Accepted' },
         { fulfillmentState: 'Packed',           orderState: 'In-progress' },
         { fulfillmentState: 'Agent-assigned',   orderState: 'In-progress' },
         { fulfillmentState: 'Order-picked-up',  orderState: 'In-progress' },
