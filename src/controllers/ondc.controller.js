@@ -667,9 +667,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         {
           code: 'bpp_terms',
           list: [
-            { code: 'np_type',         value: 'MSN' },
-            { code: 'accept_bap_terms', value: 'Y'  },
-            { code: 'collect_payment',  value: 'Y'  },
+            { code: 'np_type', value: 'MSN' },
           ],
         },
       ],
