@@ -487,8 +487,8 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         },
         quantity: {
           unitized: { measure: { unit: measureUnit, value: measureValue } },
-          available: { count: (p.stock > 0 && !forcedOutOfStockItems.has(String(p.external_product_id))) ? '99' : '0' },
-          maximum:   { count: (p.stock > 0 && !forcedOutOfStockItems.has(String(p.external_product_id))) ? '99' : '0' },
+          available: { count: p.stock > 0 ? '99' : '0' },
+          maximum:   { count: p.stock > 0 ? '99' : '0' },
         },
         category_id:    p.category || 'Snacks, Dry Fruits, Nuts',
         fulfillment_id: 'f1',
@@ -522,17 +522,6 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         ],
       };});
 
-      // Auto-populate forcedOutOfStockItems with the last catalog item so Flow 5
-      // (Out of Stock) always has at least one item with available.count = "0".
-      // This runs once (on first on_search) and persists across flows in the same session.
-      if (forcedOutOfStockItems.size === 0 && items.length > 0) {
-        const lastItemId = String(items[items.length - 1].id);
-        forcedOutOfStockItems.add(lastItemId);
-        // Update the item we just built so this on_search already reflects count=0
-        items[items.length - 1].quantity.available.count = '0';
-        items[items.length - 1].quantity.maximum.count   = '0';
-        logger.info('Auto-forced last catalog item as out-of-stock for Flow 5', { itemId: lastItemId });
-      }
 
       // Ensure GPS has 6+ decimal places
       const rawGps = vendor.gps || '13.0827,80.2707';
@@ -839,14 +828,6 @@ const handleSelect = async (req, res) => {
         }
       }
 
-      // Flow 5 fallback: if no item is OOS yet, force the last selected item as OOS
-      // so the on_select error block is always present for Out-of-Stock testing.
-      if (outOfStockItems.length === 0 && items.length > 1) {
-        const lastId = String(items[items.length - 1].id);
-        outOfStockItems.push(lastId);
-        forcedOutOfStockItems.add(lastId);
-        logger.info('Flow 5 fallback: forced last selected item as OOS in handleSelect', { itemId: lastId });
-      }
 
       // Mark forced OOS items as count:"0" in quote breakup and zero their price/qty
       if (outOfStockItems.length > 0 && quote?.breakup) {
