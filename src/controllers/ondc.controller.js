@@ -3235,8 +3235,15 @@ const handleIssue = async (req, res) => {
         } catch (err) { logger.error('on_issue #2 failed:', err.message); }
       }, 2000);
 
-      // ── Callback 3: PROCESSING after share info (t+4s) ─────────────────────
-      setTimeout(async () => {
+      // IGM 2.0 detection: if issue has `actions` array, it's IGM 2.0.
+      // For IGM 2.0, stop after NEED-MORE-INFO and wait for BAP's RESOLUTION_ACCEPTED.
+      const isIgm2 = Array.isArray(issue.actions);
+      if (isIgm2) {
+        logger.info('IGM 2.0 detected — stopping auto-chain after NEED-MORE-INFO, waiting for RESOLUTION_ACCEPTED', { issue_id: issueId });
+      }
+
+      // ── Callback 3: PROCESSING after share info (t+4s) — IGM 1.0 only ────
+      if (!isIgm2) setTimeout(async () => {
         try {
           const p2Now    = new Date().toISOString();
           const p2Action = makeBppIgmAction('PROCESSING', 'Information received, processing resolution', updatedBy, p2Now);
@@ -3254,8 +3261,8 @@ const handleIssue = async (req, res) => {
         } catch (err) { logger.error('on_issue #3 failed:', err.message); }
       }, 4000);
 
-      // ── Callback 4: RESOLVED — resolution options offered (t+6s) ───────────
-      setTimeout(async () => {
+      // ── Callback 4: RESOLVED — resolution options offered (t+6s) — IGM 1.0 only ───
+      if (!isIgm2) setTimeout(async () => {
         try {
           const ro4Now   = new Date().toISOString();
           const ro4Action = makeBppIgmAction(
@@ -3299,8 +3306,8 @@ const handleIssue = async (req, res) => {
         } catch (err) { logger.error('on_issue #4 failed:', err.message); }
       }, 6000);
 
-      // ── Callback 5: RESOLVED — resolution confirmed / provided (t+8s) ──────
-      setTimeout(async () => {
+      // ── Callback 5: RESOLVED — resolution confirmed / provided (t+8s) — IGM 1.0 only ──
+      if (!isIgm2) setTimeout(async () => {
         try {
           const rp5Now   = new Date().toISOString();
           const rp5Action = makeBppIgmAction(
@@ -3337,11 +3344,11 @@ const handleIssue = async (req, res) => {
         } catch (err) { logger.error('on_issue #5 failed:', err.message); }
       }, 8000);
 
-      // ── Proactive on_issue_status CLOSED (t+9s) ─────────────────────────────
+      // ── Proactive on_issue_status CLOSED (t+9s) — IGM 1.0 only ────────────
       // Registered at stage-0 start so it fires exactly 9s after /issue received,
       // independent of how long on_issue callbacks take.
       // Pramaan Flow 6A captures this as "on_issue_status (II)".
-      setTimeout(async () => {
+      if (!isIgm2) setTimeout(async () => {
         try {
           const proactiveUpdatedBy = {
             org:     { name: tenant.subscriber_id },
@@ -3444,8 +3451,50 @@ const handleIssue = async (req, res) => {
       }, 3000);
 
     } else {
-      // Stage 1+ — auto-chain already running or complete — ACK only
-      logger.info('Issue received (auto-chain in progress/complete) — ACK only', { issue_id: issueId, stage });
+      // Stage 1+ — check if BAP sent RESOLUTION_ACCEPTED (IGM 2.0 No Action flow)
+      const lastAction = (issue.actions || []).slice(-1)[0];
+      const lastActionCode = lastAction?.descriptor?.code;
+
+      if (lastActionCode === 'RESOLUTION_ACCEPTED') {
+        logger.info('RESOLUTION_ACCEPTED received — sending RESOLVED on_issue', { issue_id: issueId });
+
+        const resolutionAction = cached?.resolveAction || 'NO-ACTION';
+        const raNow = new Date().toISOString();
+        const raAction = makeBppIgmAction(
+          'RESOLVED',
+          `Resolution accepted — ${resolutionAction.toLowerCase()} confirmed`,
+          updatedBy, raNow
+        );
+        const bppActRA = [...(cached?.bppActions || []), raAction];
+        issueCache.set(issueId, { ...(cached || { issue, context, tenant }), stage: 5, bppActions: bppActRA });
+
+        await sendCallback(
+          context.bap_uri, 'on_issue',
+          { ...igmCtx, message_id: uuidv4() },
+          buildIgmMessage(issue, context, tenant.subscriber_id, bppActRA, 'RESOLVED', {
+            resolution: {
+              network_issue_id:   issueId,
+              short_desc:         `Resolution accepted — ${resolutionAction.toLowerCase()} confirmed`,
+              long_desc:          `Resolution accepted — ${resolutionAction.toLowerCase()} confirmed`,
+              resolution_remarks: `Resolution accepted — ${resolutionAction.toLowerCase()} confirmed`,
+              resolution_action:  'RESOLVE',
+              action_triggered:   resolutionAction,
+              refund_amount:      '0.00',
+            },
+          }),
+          tenant
+        );
+        logger.info('on_issue (RESOLVED after RESOLUTION_ACCEPTED) sent', { issue_id: issueId });
+
+        pool.query(
+          `UPDATE issue_grievances SET status = 'resolved', updated_at = NOW() WHERE issue_id = ? AND tenant_id = ?`,
+          [issueId, tenant.id]
+        ).catch(e => logger.warn('Issue status update failed:', e.message));
+
+      } else {
+        // Auto-chain already running or complete — ACK only
+        logger.info('Issue received (auto-chain in progress/complete) — ACK only', { issue_id: issueId, stage });
+      }
     }
   } catch (err) {
     logger.error('handleIssue failed:', err.message);
