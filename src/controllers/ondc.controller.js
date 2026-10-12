@@ -3140,7 +3140,7 @@ const handleIssue = async (req, res) => {
               timestamp: new Date().toISOString(),
             };
             const statusPayload = buildStatusPayload(orderId, cachedOrder.order, 'Order-delivered', 'Completed', cachedOrder.vendor);
-            await sendCallback(context.bap_uri, 'on_status', statusCtx, statusPayload, tenant);
+            await sendCallback(context.bap_uri, 'on_status', statusCtx, { order: statusPayload }, tenant);
             logger.info('Proactive on_status (Completed) sent after IGM 2.0 CLOSED', { order_id: orderId });
           } else {
             logger.warn('No cached order for proactive on_status after IGM CLOSED', { order_id: orderId });
