@@ -3122,6 +3122,32 @@ const handleIssue = async (req, res) => {
         tenant
       );
       logger.info('on_issue_status (CLOSED) sent after BAP closure — Flow A3 (II)', { issue_id: issueId });
+
+      // IGM 2.0: After issue CLOSED, send proactive on_status with current order state
+      const isIgm2Close = Array.isArray(issue.actions);
+      if (isIgm2Close) {
+        const orderRef = (issue.refs || []).find(r => r.ref_type === 'ORDER');
+        const orderId = orderRef?.ref_id;
+        if (orderId) {
+          const cachedOrder = confirmedOrderCache.get(orderId);
+          if (cachedOrder) {
+            const statusCtx = {
+              ...context,
+              action: 'on_status',
+              bpp_id: process.env.ONDC_SUBSCRIBER_ID || context.bpp_id,
+              bpp_uri: process.env.ONDC_SUBSCRIBER_URL || context.bpp_uri,
+              message_id: uuidv4(),
+              timestamp: new Date().toISOString(),
+            };
+            const statusPayload = buildStatusPayload(orderId, cachedOrder.order, 'Order-delivered', 'Completed', cachedOrder.vendor);
+            await sendCallback(context.bap_uri, 'on_status', statusCtx, statusPayload, tenant);
+            logger.info('Proactive on_status (Completed) sent after IGM 2.0 CLOSED', { order_id: orderId });
+          } else {
+            logger.warn('No cached order for proactive on_status after IGM CLOSED', { order_id: orderId });
+          }
+        }
+      }
+
       return;
     }
 
