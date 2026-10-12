@@ -3526,13 +3526,13 @@ const handleIssue = async (req, res) => {
         ).catch(e => logger.warn('Issue status update failed:', e.message));
 
       } else if (lastActionCode === 'RESOLUTION_REJECTED') {
-        // IGM 2.0 Rejection flow — BAP rejected resolution, re-process
-        logger.info('RESOLUTION_REJECTED received — re-sending PROCESSING + NEED-MORE-INFO', { issue_id: issueId });
+        // IGM 2.0 Rejection flow — BAP rejected resolution, re-process (PROCESSING only, no NEED-MORE-INFO)
+        logger.info('RESOLUTION_REJECTED received — re-sending PROCESSING', { issue_id: issueId });
 
         const rrNow = new Date().toISOString();
         const reProcessAction = makeBppIgmAction('PROCESSING', 'Resolution rejected — re-processing issue', updatedBy, rrNow);
         const bppActRR = [...(cached?.bppActions || []), reProcessAction];
-        issueCache.set(issueId, { ...(cached || { issue, context, tenant }), stage: 2, bppActions: bppActRR });
+        issueCache.set(issueId, { ...(cached || { issue, context, tenant }), stage: 2, bppActions: bppActRR, resolveAction: 'REFUND' });
 
         await sendCallback(
           context.bap_uri, 'on_issue',
@@ -3541,36 +3541,6 @@ const handleIssue = async (req, res) => {
           tenant
         );
         logger.info('on_issue (PROCESSING after RESOLUTION_REJECTED) sent', { issue_id: issueId });
-
-        // After 2s, send NEED-MORE-INFO (unsolicited)
-        setTimeout(async () => {
-          try {
-            const nmiNow2 = new Date().toISOString();
-            const nmiAction2 = makeBppIgmAction('NEED-MORE-INFO', 'Please share additional details about the issue', updatedBy, nmiNow2);
-            const bppActNMI2 = [...bppActRR, nmiAction2];
-            issueCache.set(issueId, { ...(cached || { issue, context, tenant }), stage: 3, bppActions: bppActNMI2, resolveAction: 'REFUND' });
-
-            await sendCallback(
-              context.bap_uri, 'on_issue',
-              { ...igmCtx, message_id: uuidv4() },
-              buildIgmMessage(issue, context, tenant.subscriber_id, bppActNMI2, 'OPEN', {
-                additional_info_required: [{
-                  info_required: {
-                    issue_update_info: {
-                      code:       'REASON',
-                      name:       'Additional information required',
-                      short_desc: 'Please share additional details (e.g. photos, order reference) to help process your refund',
-                    },
-                    message_id: uuidv4(),
-                    updated_at: nmiNow2,
-                  },
-                }],
-              }),
-              tenant
-            );
-            logger.info('on_issue (NEED-MORE-INFO after RESOLUTION_REJECTED) sent', { issue_id: issueId });
-          } catch (err) { logger.error('on_issue NEED-MORE-INFO after REJECTED failed:', err.message); }
-        }, 2000);
 
       } else if (lastActionCode === 'ESCALATED') {
         // IGM 2.0 Rejection flow — BAP escalated after re-processing, send RESOLVED
@@ -3607,6 +3577,46 @@ const handleIssue = async (req, res) => {
           `UPDATE issue_grievances SET status = 'resolved', updated_at = NOW() WHERE issue_id = ? AND tenant_id = ?`,
           [issueId, tenant.id]
         ).catch(e => logger.warn('Issue status update failed:', e.message));
+
+        // After 2s, send unsolicited NEED-MORE-INFO (step 23 — prompts BAP to accept resolution)
+        setTimeout(async () => {
+          try {
+            const nmiNowEsc = new Date().toISOString();
+            const nmiActionEsc = makeBppIgmAction('NEED-MORE-INFO', 'Please confirm acceptance of the refund resolution', updatedBy, nmiNowEsc);
+            const latestCached = issueCache.get(issueId);
+            const bppActNMIEsc = [...(latestCached?.bppActions || bppActEsc), nmiActionEsc];
+            issueCache.set(issueId, { ...(latestCached || { issue, context, tenant }), stage: 5, bppActions: bppActNMIEsc, resolveAction: 'REFUND' });
+
+            await sendCallback(
+              context.bap_uri, 'on_issue',
+              { ...igmCtx, message_id: uuidv4() },
+              buildIgmMessage(issue, context, tenant.subscriber_id, bppActNMIEsc, 'RESOLVED', {
+                resolution: {
+                  network_issue_id:   issueId,
+                  short_desc:         'Issue escalated — providing refund as resolution',
+                  long_desc:          'Issue escalated — providing refund as resolution',
+                  resolution_remarks: 'Issue escalated — providing refund as resolution',
+                  resolution_action:  'RESOLVE',
+                  action_triggered:   'REFUND',
+                  refund_amount:      '0.00',
+                },
+                additional_info_required: [{
+                  info_required: {
+                    issue_update_info: {
+                      code:       'REASON',
+                      name:       'Resolution confirmation required',
+                      short_desc: 'Please confirm acceptance of the refund resolution',
+                    },
+                    message_id: uuidv4(),
+                    updated_at: nmiNowEsc,
+                  },
+                }],
+              }),
+              tenant
+            );
+            logger.info('on_issue (NEED-MORE-INFO after ESCALATED RESOLVED) sent', { issue_id: issueId });
+          } catch (err) { logger.error('on_issue NEED-MORE-INFO after ESCALATED failed:', err.message); }
+        }, 2000);
 
       } else {
         // Auto-chain already running or complete — ACK only
