@@ -3019,8 +3019,12 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
         cascaded_level: 1,
       })),
     },
-    // IGM 2.0: full ordered actions array (BAP actions first, then BPP actions)
-    actions:        [...bapActions, ...allBppActions],
+    // IGM 2.0: full ordered actions array (BAP actions first, then BPP actions) — deduplicated by id
+    actions:        (() => {
+      const merged = [...bapActions, ...allBppActions];
+      const seen = new Set();
+      return merged.filter(a => { if (!a.id) return true; if (seen.has(a.id)) return false; seen.add(a.id); return true; });
+    })(),
     last_action_id: lastBppAction?.id,
     created_at: origIssue.created_at || now,
     updated_at: now,
@@ -3062,69 +3066,73 @@ const handleIssue = async (req, res) => {
         logger.info('Issue CLOSED received with no cached issue — ACK only', { issue_id: issueId });
         return;
       }
-      const closeNow    = new Date().toISOString();
-      const closeUpdatedBy = {
-        org:     { name: tenant.subscriber_id },
-        contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
-        person:  { name: 'Support Desk' },
-      };
-      const closeAction = makeBppIgmAction('RESOLVED', 'Issue closure acknowledged — resolution confirmed', closeUpdatedBy, closeNow);
-      const bppActClose = [...(closeCached.bppActions || []), closeAction];
-      issueCache.set(issueId, { ...closeCached, stage: 5, bppActions: bppActClose });
+      // Detect IGM 2.0 (has actions array) vs IGM 1.0
+      const isIgm2Close = Array.isArray(issue.actions);
 
-      const igmCtxClose = buildIgmContext(closeCached.context || context);
-      const closeRemarks = 'Issue has been closed and resolution confirmed';
-      await sendCallback(
-        (closeCached.context || context).bap_uri, 'on_issue',
-        { ...igmCtxClose, message_id: uuidv4() },
-        buildIgmMessage(closeCached.issue || issue, closeCached.context || context, tenant.subscriber_id, bppActClose, 'CLOSED', {
-          resolution: {
-            network_issue_id:   issueId,
-            short_desc:         closeRemarks,
-            long_desc:          closeRemarks,
-            resolution_remarks: closeRemarks,
-            resolution_action:  'RESOLVE',
-            action_triggered:   closeCached.resolveAction || 'REFUND',
-            refund_amount:      '0.00',
-          },
-        }),
-        tenant
-      );
-      logger.info('on_issue (CLOSED — Resolution Provided) sent for Flow 6F', { issue_id: issueId });
+      // IGM 1.0: send on_issue(CLOSED) + on_issue_status(CLOSED)
+      // IGM 2.0: skip these — Workbench NACKs on_status if on_issue_status was sent before it
+      if (!isIgm2Close) {
+        const closeNow    = new Date().toISOString();
+        const closeUpdatedBy = {
+          org:     { name: tenant.subscriber_id },
+          contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+          person:  { name: 'Support Desk' },
+        };
+        const closeAction = makeBppIgmAction('RESOLVED', 'Issue closure acknowledged — resolution confirmed', closeUpdatedBy, closeNow);
+        const bppActClose = [...(closeCached.bppActions || []), closeAction];
+        issueCache.set(issueId, { ...closeCached, stage: 5, bppActions: bppActClose });
 
-      // Also send on_issue_status(CLOSED) — required by Pramaan A3 as "(II)"
-      await sendCallback(
-        (closeCached.context || context).bap_uri, 'on_issue_status',
-        { ...igmCtxClose, message_id: uuidv4() },
-        buildIgmMessage(closeCached.issue || issue, closeCached.context || context, tenant.subscriber_id, bppActClose, 'CLOSED', {
-          resolution: {
-            network_issue_id:   issueId,
-            short_desc:         closeRemarks,
-            long_desc:          closeRemarks,
-            resolution_remarks: closeRemarks,
-            resolution_action:  'RESOLVE',
-            action_triggered:   closeCached.resolveAction || 'REFUND',
-            refund_amount:      '0.00',
-          },
-          resolution_provider: {
-            respondent_info: {
-              type:         'TRANSACTION-COUNTERPARTY-NP',
-              organization: closeUpdatedBy,
-              resolution_support: {
-                respondentEmail: process.env.SUPPORT_EMAIL || '',
-                contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
-                gros: [],
-                chat_link: '',
+        const igmCtxClose = buildIgmContext(closeCached.context || context);
+        const closeRemarks = 'Issue has been closed and resolution confirmed';
+        await sendCallback(
+          (closeCached.context || context).bap_uri, 'on_issue',
+          { ...igmCtxClose, message_id: uuidv4() },
+          buildIgmMessage(closeCached.issue || issue, closeCached.context || context, tenant.subscriber_id, bppActClose, 'CLOSED', {
+            resolution: {
+              network_issue_id:   issueId,
+              short_desc:         closeRemarks,
+              long_desc:          closeRemarks,
+              resolution_remarks: closeRemarks,
+              resolution_action:  'RESOLVE',
+              action_triggered:   closeCached.resolveAction || 'REFUND',
+              refund_amount:      '0.00',
+            },
+          }),
+          tenant
+        );
+        logger.info('on_issue (CLOSED — Resolution Provided) sent for Flow 6F', { issue_id: issueId });
+
+        // Also send on_issue_status(CLOSED) — required by Pramaan A3 as "(II)"
+        await sendCallback(
+          (closeCached.context || context).bap_uri, 'on_issue_status',
+          { ...igmCtxClose, message_id: uuidv4() },
+          buildIgmMessage(closeCached.issue || issue, closeCached.context || context, tenant.subscriber_id, bppActClose, 'CLOSED', {
+            resolution: {
+              network_issue_id:   issueId,
+              short_desc:         closeRemarks,
+              long_desc:          closeRemarks,
+              resolution_remarks: closeRemarks,
+              resolution_action:  'RESOLVE',
+              action_triggered:   closeCached.resolveAction || 'REFUND',
+              refund_amount:      '0.00',
+            },
+            resolution_provider: {
+              respondent_info: {
+                type:         'TRANSACTION-COUNTERPARTY-NP',
+                organization: closeUpdatedBy,
+                resolution_support: {
+                  respondentEmail: process.env.SUPPORT_EMAIL || '',
+                  contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+                  gros: [],
+                  chat_link: '',
+                },
               },
             },
-          },
-        }),
-        tenant
-      );
-      logger.info('on_issue_status (CLOSED) sent after BAP closure — Flow A3 (II)', { issue_id: issueId });
-
-      // IGM 2.0: After issue CLOSED, send proactive on_status with current order state
-      const isIgm2Close = Array.isArray(issue.actions);
+          }),
+          tenant
+        );
+        logger.info('on_issue_status (CLOSED) sent after BAP closure — Flow A3 (II)', { issue_id: issueId });
+      }
       if (isIgm2Close) {
         const orderRef = (issue.refs || []).find(r => r.ref_type === 'ORDER');
         const orderId = orderRef?.ref_id;
