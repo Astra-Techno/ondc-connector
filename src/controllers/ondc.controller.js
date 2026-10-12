@@ -3572,6 +3572,42 @@ const handleIssue = async (req, res) => {
           } catch (err) { logger.error('on_issue NEED-MORE-INFO after REJECTED failed:', err.message); }
         }, 2000);
 
+      } else if (lastActionCode === 'ESCALATED') {
+        // IGM 2.0 Rejection flow — BAP escalated after re-processing, send RESOLVED
+        logger.info('ESCALATED received — sending RESOLVED on_issue', { issue_id: issueId });
+
+        const escNow = new Date().toISOString();
+        const escAction = makeBppIgmAction(
+          'RESOLVED',
+          'Issue escalated — providing refund as resolution',
+          updatedBy, escNow
+        );
+        const bppActEsc = [...(cached?.bppActions || []), escAction];
+        issueCache.set(issueId, { ...(cached || { issue, context, tenant }), stage: 5, bppActions: bppActEsc, resolveAction: 'REFUND' });
+
+        await sendCallback(
+          context.bap_uri, 'on_issue',
+          { ...igmCtx, message_id: uuidv4() },
+          buildIgmMessage(issue, context, tenant.subscriber_id, bppActEsc, 'RESOLVED', {
+            resolution: {
+              network_issue_id:   issueId,
+              short_desc:         'Issue escalated — providing refund as resolution',
+              long_desc:          'Issue escalated — providing refund as resolution',
+              resolution_remarks: 'Issue escalated — providing refund as resolution',
+              resolution_action:  'RESOLVE',
+              action_triggered:   'REFUND',
+              refund_amount:      '0.00',
+            },
+          }),
+          tenant
+        );
+        logger.info('on_issue (RESOLVED after ESCALATED) sent', { issue_id: issueId });
+
+        pool.query(
+          `UPDATE issue_grievances SET status = 'resolved', updated_at = NOW() WHERE issue_id = ? AND tenant_id = ?`,
+          [issueId, tenant.id]
+        ).catch(e => logger.warn('Issue status update failed:', e.message));
+
       } else {
         // Auto-chain already running or complete — ACK only
         logger.info('Issue received (auto-chain in progress/complete) — ACK only', { issue_id: issueId, stage });
