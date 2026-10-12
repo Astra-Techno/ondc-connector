@@ -3525,6 +3525,53 @@ const handleIssue = async (req, res) => {
           [issueId, tenant.id]
         ).catch(e => logger.warn('Issue status update failed:', e.message));
 
+      } else if (lastActionCode === 'RESOLUTION_REJECTED') {
+        // IGM 2.0 Rejection flow — BAP rejected resolution, re-process
+        logger.info('RESOLUTION_REJECTED received — re-sending PROCESSING + NEED-MORE-INFO', { issue_id: issueId });
+
+        const rrNow = new Date().toISOString();
+        const reProcessAction = makeBppIgmAction('PROCESSING', 'Resolution rejected — re-processing issue', updatedBy, rrNow);
+        const bppActRR = [...(cached?.bppActions || []), reProcessAction];
+        issueCache.set(issueId, { ...(cached || { issue, context, tenant }), stage: 2, bppActions: bppActRR });
+
+        await sendCallback(
+          context.bap_uri, 'on_issue',
+          { ...igmCtx, message_id: uuidv4() },
+          buildIgmMessage(issue, context, tenant.subscriber_id, bppActRR, 'OPEN'),
+          tenant
+        );
+        logger.info('on_issue (PROCESSING after RESOLUTION_REJECTED) sent', { issue_id: issueId });
+
+        // After 2s, send NEED-MORE-INFO (unsolicited)
+        setTimeout(async () => {
+          try {
+            const nmiNow2 = new Date().toISOString();
+            const nmiAction2 = makeBppIgmAction('NEED-MORE-INFO', 'Please share additional details about the issue', updatedBy, nmiNow2);
+            const bppActNMI2 = [...bppActRR, nmiAction2];
+            issueCache.set(issueId, { ...(cached || { issue, context, tenant }), stage: 3, bppActions: bppActNMI2, resolveAction: 'REFUND' });
+
+            await sendCallback(
+              context.bap_uri, 'on_issue',
+              { ...igmCtx, message_id: uuidv4() },
+              buildIgmMessage(issue, context, tenant.subscriber_id, bppActNMI2, 'OPEN', {
+                additional_info_required: [{
+                  info_required: {
+                    issue_update_info: {
+                      code:       'REASON',
+                      name:       'Additional information required',
+                      short_desc: 'Please share additional details (e.g. photos, order reference) to help process your refund',
+                    },
+                    message_id: uuidv4(),
+                    updated_at: nmiNow2,
+                  },
+                }],
+              }),
+              tenant
+            );
+            logger.info('on_issue (NEED-MORE-INFO after RESOLUTION_REJECTED) sent', { issue_id: issueId });
+          } catch (err) { logger.error('on_issue NEED-MORE-INFO after REJECTED failed:', err.message); }
+        }, 2000);
+
       } else {
         // Auto-chain already running or complete — ACK only
         logger.info('Issue received (auto-chain in progress/complete) — ACK only', { issue_id: issueId, stage });
