@@ -3139,36 +3139,50 @@ const handleIssue = async (req, res) => {
         if (orderId) {
           const cachedOrder = confirmedOrderCache.get(orderId);
           if (cachedOrder) {
-            // IGM 2.0 CLOSED: send on_update with refund settlement details
-            const updateCtx = {
-              ...context,
-              action: 'on_update',
-              bpp_id: process.env.ONDC_SUBSCRIBER_ID || context.bpp_id,
-              bpp_uri: process.env.ONDC_SUBSCRIBER_URL || context.bpp_uri,
-              message_id: uuidv4(),
-              timestamp: new Date().toISOString(),
-            };
-            const cachedIssue = issueCache.get(issueId);
-            const refundAmount = cachedIssue?.resolveAction === 'REFUND' ? '0.00' : '0.00';
+            // Detect Rejection flow (had ESCALATED action) vs No-Action flow
+            const wasEscalated = (issue.actions || []).some(a => a.descriptor?.code === 'ESCALATED');
             const orderPayload = buildStatusPayload(orderId, cachedOrder.order, 'Order-delivered', 'Completed', cachedOrder.vendor);
-            // Add refund settlement to payment
-            orderPayload.payment = {
-              ...orderPayload.payment,
-              '@ondc/org/settlement_details': [
-                ...buildSettlementDetails(),
-                {
-                  settlement_counterparty: 'buyer',
-                  settlement_phase: 'refund',
-                  settlement_type: 'neft',
-                  settlement_amount: refundAmount,
-                  settlement_timestamp: updateCtx.timestamp,
-                },
-              ],
-            };
-            await sendCallback(context.bap_uri, 'on_update', updateCtx, { order: orderPayload }, tenant);
-            logger.info('Proactive on_update (refund settlement) sent after IGM 2.0 CLOSED', { order_id: orderId });
+
+            if (wasEscalated) {
+              // Rejection flow: send on_update with refund settlement details
+              const updateCtx = {
+                ...context,
+                action: 'on_update',
+                bpp_id: process.env.ONDC_SUBSCRIBER_ID || context.bpp_id,
+                bpp_uri: process.env.ONDC_SUBSCRIBER_URL || context.bpp_uri,
+                message_id: uuidv4(),
+                timestamp: new Date().toISOString(),
+              };
+              orderPayload.payment = {
+                ...orderPayload.payment,
+                '@ondc/org/settlement_details': [
+                  ...buildSettlementDetails(),
+                  {
+                    settlement_counterparty: 'buyer',
+                    settlement_phase: 'refund',
+                    settlement_type: 'neft',
+                    settlement_amount: '0.00',
+                    settlement_timestamp: updateCtx.timestamp,
+                  },
+                ],
+              };
+              await sendCallback(context.bap_uri, 'on_update', updateCtx, { order: orderPayload }, tenant);
+              logger.info('Proactive on_update (refund settlement) sent after IGM 2.0 Rejection CLOSED', { order_id: orderId });
+            } else {
+              // No-Action flow: send on_status (Completed)
+              const statusCtx = {
+                ...context,
+                action: 'on_status',
+                bpp_id: process.env.ONDC_SUBSCRIBER_ID || context.bpp_id,
+                bpp_uri: process.env.ONDC_SUBSCRIBER_URL || context.bpp_uri,
+                message_id: uuidv4(),
+                timestamp: new Date().toISOString(),
+              };
+              await sendCallback(context.bap_uri, 'on_status', statusCtx, { order: orderPayload }, tenant);
+              logger.info('Proactive on_status (Completed) sent after IGM 2.0 No-Action CLOSED', { order_id: orderId });
+            }
           } else {
-            logger.warn('No cached order for proactive on_update after IGM CLOSED', { order_id: orderId });
+            logger.warn('No cached order for proactive callback after IGM CLOSED', { order_id: orderId });
           }
         }
       }
