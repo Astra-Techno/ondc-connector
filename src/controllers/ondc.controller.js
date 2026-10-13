@@ -3139,19 +3139,36 @@ const handleIssue = async (req, res) => {
         if (orderId) {
           const cachedOrder = confirmedOrderCache.get(orderId);
           if (cachedOrder) {
-            const statusCtx = {
+            // IGM 2.0 CLOSED: send on_update with refund settlement details
+            const updateCtx = {
               ...context,
-              action: 'on_status',
+              action: 'on_update',
               bpp_id: process.env.ONDC_SUBSCRIBER_ID || context.bpp_id,
               bpp_uri: process.env.ONDC_SUBSCRIBER_URL || context.bpp_uri,
               message_id: uuidv4(),
               timestamp: new Date().toISOString(),
             };
-            const statusPayload = buildStatusPayload(orderId, cachedOrder.order, 'Order-delivered', 'Completed', cachedOrder.vendor);
-            await sendCallback(context.bap_uri, 'on_status', statusCtx, { order: statusPayload }, tenant);
-            logger.info('Proactive on_status (Completed) sent after IGM 2.0 CLOSED', { order_id: orderId });
+            const cachedIssue = issueCache.get(issueId);
+            const refundAmount = cachedIssue?.resolveAction === 'REFUND' ? '0.00' : '0.00';
+            const orderPayload = buildStatusPayload(orderId, cachedOrder.order, 'Order-delivered', 'Completed', cachedOrder.vendor);
+            // Add refund settlement to payment
+            orderPayload.payment = {
+              ...orderPayload.payment,
+              '@ondc/org/settlement_details': [
+                ...buildSettlementDetails(),
+                {
+                  settlement_counterparty: 'buyer',
+                  settlement_phase: 'refund',
+                  settlement_type: 'neft',
+                  settlement_amount: refundAmount,
+                  settlement_timestamp: updateCtx.timestamp,
+                },
+              ],
+            };
+            await sendCallback(context.bap_uri, 'on_update', updateCtx, { order: orderPayload }, tenant);
+            logger.info('Proactive on_update (refund settlement) sent after IGM 2.0 CLOSED', { order_id: orderId });
           } else {
-            logger.warn('No cached order for proactive on_status after IGM CLOSED', { order_id: orderId });
+            logger.warn('No cached order for proactive on_update after IGM CLOSED', { order_id: orderId });
           }
         }
       }
