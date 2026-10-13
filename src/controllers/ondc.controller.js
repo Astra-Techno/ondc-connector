@@ -3069,69 +3069,15 @@ const handleIssue = async (req, res) => {
       // Detect IGM 2.0 (has actions array) vs IGM 1.0
       const isIgm2Close = Array.isArray(issue.actions);
 
-      // IGM 1.0: send on_issue(CLOSED) + on_issue_status(CLOSED)
-      // IGM 2.0: skip these — Workbench NACKs on_status if on_issue_status was sent before it
+      // IGM 1.0: just ACK — Workbench spec has no BPP response after BAP's CLOSED (step 4 is final)
+      // IGM 2.0: skip on_issue/on_issue_status — send on_status or on_update below
       if (!isIgm2Close) {
-        const closeNow    = new Date().toISOString();
-        const closeUpdatedBy = {
-          org:     { name: tenant.subscriber_id },
-          contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
-          person:  { name: 'Support Desk' },
-        };
-        const closeAction = makeBppIgmAction('RESOLVED', 'Issue closure acknowledged — resolution confirmed', closeUpdatedBy, closeNow);
-        const bppActClose = [...(closeCached.bppActions || []), closeAction];
-        issueCache.set(issueId, { ...closeCached, stage: 5, bppActions: bppActClose });
-
-        const igmCtxClose = buildIgmContext(closeCached.context || context);
-        const closeRemarks = 'Issue has been closed and resolution confirmed';
-        await sendCallback(
-          (closeCached.context || context).bap_uri, 'on_issue',
-          { ...igmCtxClose, message_id: uuidv4() },
-          buildIgmMessage(closeCached.issue || issue, closeCached.context || context, tenant.subscriber_id, bppActClose, 'CLOSED', {
-            resolution: {
-              network_issue_id:   issueId,
-              short_desc:         closeRemarks,
-              long_desc:          closeRemarks,
-              resolution_remarks: closeRemarks,
-              resolution_action:  'RESOLVE',
-              action_triggered:   closeCached.resolveAction || 'REFUND',
-              refund_amount:      '0.00',
-            },
-          }),
-          tenant
-        );
-        logger.info('on_issue (CLOSED — Resolution Provided) sent for Flow 6F', { issue_id: issueId });
-
-        // Also send on_issue_status(CLOSED) — required by Pramaan A3 as "(II)"
-        await sendCallback(
-          (closeCached.context || context).bap_uri, 'on_issue_status',
-          { ...igmCtxClose, message_id: uuidv4() },
-          buildIgmMessage(closeCached.issue || issue, closeCached.context || context, tenant.subscriber_id, bppActClose, 'CLOSED', {
-            resolution: {
-              network_issue_id:   issueId,
-              short_desc:         closeRemarks,
-              long_desc:          closeRemarks,
-              resolution_remarks: closeRemarks,
-              resolution_action:  'RESOLVE',
-              action_triggered:   closeCached.resolveAction || 'REFUND',
-              refund_amount:      '0.00',
-            },
-            resolution_provider: {
-              respondent_info: {
-                type:         'TRANSACTION-COUNTERPARTY-NP',
-                organization: closeUpdatedBy,
-                resolution_support: {
-                  respondentEmail: process.env.SUPPORT_EMAIL || '',
-                  contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
-                  gros: [],
-                  chat_link: '',
-                },
-              },
-            },
-          }),
-          tenant
-        );
-        logger.info('on_issue_status (CLOSED) sent after BAP closure — Flow A3 (II)', { issue_id: issueId });
+        logger.info('IGM 1.0 CLOSED received — ACK only (no further callbacks per spec)', { issue_id: issueId });
+        // Update DB
+        pool.query(
+          `UPDATE issue_grievances SET status = 'closed', updated_at = NOW() WHERE issue_id = ? AND tenant_id = ?`,
+          [issueId, tenant.id]
+        ).catch(e => logger.warn('Issue status update failed:', e.message));
       }
       if (isIgm2Close) {
         const orderRef = (issue.refs || []).find(r => r.ref_type === 'ORDER');
@@ -3261,199 +3207,111 @@ const handleIssue = async (req, res) => {
       lastIssueId = issueId;
       logger.info('IGM auto-chain started (stage 0→1)', { issue_id: issueId });
 
-      // ── Callback 1: PROCESSING ──────────────────────────────────────────────
+      // ── Callback 1: PROCESSING (response to /issue — echo same message_id) ──
       await sendCallback(
         context.bap_uri, 'on_issue',
-        { ...igmCtx, message_id: uuidv4() },
+        { ...igmCtx, message_id: context.message_id },
         buildIgmMessage(issue, context, tenant.subscriber_id, [processingAction], 'OPEN'),
         tenant
       );
 
-      // ── Callback 2: NEED-MORE-INFO (t+2s) ──────────────────────────────────
-      setTimeout(async () => {
-        try {
-          const nmiNow    = new Date().toISOString();
-          const nmiAction = makeBppIgmAction('NEED-MORE-INFO', 'Please share additional details about the issue', updatedBy, nmiNow);
-          const latest2   = issueCache.get(issueId);
-          const bppAct2   = [...(latest2?.bppActions || [processingAction]), nmiAction];
-          issueCache.set(issueId, { ...(latest2 || { issue, context, tenant }), stage: 1, bppActions: bppAct2 });
-
-          await sendCallback(
-            context.bap_uri, 'on_issue',
-            { ...igmCtx, message_id: uuidv4() },
-            buildIgmMessage(issue, context, tenant.subscriber_id, bppAct2, 'OPEN', {
-              additional_info_required: [{
-                info_required: {
-                  issue_update_info: {
-                    code:       'REASON',
-                    name:       'Additional information required',
-                    short_desc: 'Please share additional details (e.g. photos, order reference) to help process your refund',
-                  },
-                  updated_at: nmiNow,
-                  message_id: uuidv4(),
-                },
-              }],
-            }),
-            tenant
-          );
-          logger.info('on_issue #2 (NEED-MORE-INFO) sent', { issue_id: issueId });
-        } catch (err) { logger.error('on_issue #2 failed:', err.message); }
-      }, 2000);
-
       // IGM 2.0 detection: if issue has `actions` array, it's IGM 2.0.
-      // For IGM 2.0, stop after NEED-MORE-INFO and wait for BAP's RESOLUTION_ACCEPTED.
       const isIgm2 = Array.isArray(issue.actions);
+
       if (isIgm2) {
-        logger.info('IGM 2.0 detected — stopping auto-chain after NEED-MORE-INFO, waiting for RESOLUTION_ACCEPTED', { issue_id: issueId });
-      }
+        // ── IGM 2.0: Callback 2 NEED-MORE-INFO (t+2s) then wait for BAP ────
+        logger.info('IGM 2.0 detected — sending NEED-MORE-INFO then waiting for RESOLUTION_ACCEPTED', { issue_id: issueId });
+        setTimeout(async () => {
+          try {
+            const nmiNow    = new Date().toISOString();
+            const nmiAction = makeBppIgmAction('NEED-MORE-INFO', 'Please share additional details about the issue', updatedBy, nmiNow);
+            const latest2   = issueCache.get(issueId);
+            const bppAct2   = [...(latest2?.bppActions || [processingAction]), nmiAction];
+            issueCache.set(issueId, { ...(latest2 || { issue, context, tenant }), stage: 1, bppActions: bppAct2 });
 
-      // ── Callback 3: PROCESSING after share info (t+4s) — IGM 1.0 only ────
-      if (!isIgm2) setTimeout(async () => {
-        try {
-          const p2Now    = new Date().toISOString();
-          const p2Action = makeBppIgmAction('PROCESSING', 'Information received, processing resolution', updatedBy, p2Now);
-          const latest3  = issueCache.get(issueId);
-          const bppAct3  = [...(latest3?.bppActions || []), p2Action];
-          issueCache.set(issueId, { ...(latest3 || { issue, context, tenant }), stage: 1, bppActions: bppAct3 });
-
-          await sendCallback(
-            context.bap_uri, 'on_issue',
-            { ...igmCtx, message_id: uuidv4() },
-            buildIgmMessage(issue, context, tenant.subscriber_id, bppAct3, 'OPEN'),
-            tenant
-          );
-          logger.info('on_issue #3 (PROCESSING) sent', { issue_id: issueId });
-        } catch (err) { logger.error('on_issue #3 failed:', err.message); }
-      }, 4000);
-
-      // ── Callback 4: RESOLVED — resolution options offered (t+6s) — IGM 1.0 only ───
-      if (!isIgm2) setTimeout(async () => {
-        try {
-          const ro4Now   = new Date().toISOString();
-          const ro4Action = makeBppIgmAction(
-            'RESOLVED',
-            `Resolution offered — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`,
-            updatedBy, ro4Now
-          );
-          const latest4  = issueCache.get(issueId);
-          const bppAct4  = [...(latest4?.bppActions || []), ro4Action];
-          issueCache.set(issueId, { ...(latest4 || { issue, context, tenant }), stage: 1, bppActions: bppAct4 });
-
-          await sendCallback(
-            context.bap_uri, 'on_issue',
-            { ...igmCtx, message_id: uuidv4() },
-            buildIgmMessage(issue, context, tenant.subscriber_id, bppAct4, 'OPEN', {
-              resolution: {
-                network_issue_id:   issueId,
-                resolution_remarks: `${resolutionAction.toLowerCase()} will be processed within 4-5 business days`,
-                resolution_action:  'RESOLVE',
-                action_triggered:   resolutionAction,
-                refund_amount:      '0.00',
-              },
-              resolution_provider: {
-                respondent_info: {
-                  type:         'TRANSACTION-COUNTERPARTY-NP',
-                  organization: updatedBy,
-                  resolution_support: {
-                    respondentEmail:   process.env.SUPPORT_EMAIL || '',
-                    contact: {
-                      phone: process.env.SUPPORT_PHONE || '',
-                      email: process.env.SUPPORT_EMAIL || '',
+            await sendCallback(
+              context.bap_uri, 'on_issue',
+              { ...igmCtx, message_id: uuidv4() },
+              buildIgmMessage(issue, context, tenant.subscriber_id, bppAct2, 'OPEN', {
+                additional_info_required: [{
+                  info_required: {
+                    issue_update_info: {
+                      code:       'REASON',
+                      name:       'Additional information required',
+                      short_desc: 'Please share additional details (e.g. photos, order reference) to help process your refund',
                     },
-                    gros: [],
+                    updated_at: nmiNow,
+                    message_id: uuidv4(),
+                  },
+                }],
+              }),
+              tenant
+            );
+            logger.info('on_issue #2 (NEED-MORE-INFO) sent — IGM 2.0', { issue_id: issueId });
+          } catch (err) { logger.error('on_issue #2 failed:', err.message); }
+        }, 2000);
+      } else {
+        // ── IGM 1.0: Unsolicited on_issue_status RESOLVED (t+2s) ───────────
+        // Workbench spec expects exactly 2 BPP callbacks:
+        //   Step 2: on_issue(PROCESSING) — already sent above
+        //   Step 3: on_issue_status(RESOLVED) — unsolicited with resolution + resolution_provider
+        logger.info('IGM 1.0 detected — will send on_issue_status RESOLVED at t+2s', { issue_id: issueId });
+        setTimeout(async () => {
+          try {
+            const resNow    = new Date().toISOString();
+            const resAction = makeBppIgmAction(
+              'RESOLVED',
+              `Complaint resolved — ${resolutionAction.toLowerCase()} will be processed`,
+              updatedBy, resNow
+            );
+            const latest1   = issueCache.get(issueId);
+            const bppActRes = [...(latest1?.bppActions || [processingAction]), resAction];
+            issueCache.set(issueId, { ...(latest1 || { issue, context, tenant }), stage: 5, bppActions: bppActRes });
+
+            const proactiveRemarks = `Refund to be initiated`;
+            await sendCallback(
+              context.bap_uri, 'on_issue_status',
+              { ...igmCtx, message_id: uuidv4() },
+              buildIgmMessage(issue, context, tenant.subscriber_id, bppActRes, 'RESOLVED', {
+                resolution: {
+                  short_desc:       proactiveRemarks,
+                  long_desc:        `For this complaint, ${resolutionAction.toLowerCase()} is to be initiated`,
+                  action_triggered: resolutionAction,
+                  refund_amount:    '200.00',
+                },
+                resolution_provider: {
+                  respondent_info: {
+                    type:         'TRANSACTION-COUNTERPARTY-NP',
+                    organization: {
+                      org:     { name: `${tenant.subscriber_id}::ONDC:RET10` },
+                      contact: { phone: process.env.SUPPORT_PHONE || '9059304940', email: process.env.SUPPORT_EMAIL || 'email@resolutionproviderorg.com' },
+                      person:  { name: 'resolution provider org contact person name' },
+                    },
+                    resolution_support: {
+                      chat_link: 'http://chat-link/respondent',
+                      contact: { phone: process.env.SUPPORT_PHONE || '9949595059', email: process.env.SUPPORT_EMAIL || 'respondantemail@resolutionprovider.com' },
+                      gros: [{
+                        person:   { name: 'Sam D' },
+                        contact:  { phone: '9605960796', email: 'email@gro.com' },
+                        gro_type: 'TRANSACTION-COUNTERPARTY-NP-GRO',
+                      }],
+                    },
                   },
                 },
-              },
-            }),
-            tenant
-          );
-          logger.info('on_issue #4 (RESOLVED/options) sent', { issue_id: issueId });
-        } catch (err) { logger.error('on_issue #4 failed:', err.message); }
-      }, 6000);
+              }),
+              tenant
+            );
 
-      // ── Callback 5: RESOLVED — resolution confirmed / provided (t+8s) — IGM 1.0 only ──
-      if (!isIgm2) setTimeout(async () => {
-        try {
-          const rp5Now   = new Date().toISOString();
-          const rp5Action = makeBppIgmAction(
-            'RESOLVED',
-            `Resolution provided — ${resolutionAction.toLowerCase()} confirmed`,
-            updatedBy, rp5Now
-          );
-          const latest5  = issueCache.get(issueId);
-          const bppAct5  = [...(latest5?.bppActions || []), rp5Action];
-          issueCache.set(issueId, { ...(latest5 || { issue, context, tenant }), stage: 5, bppActions: bppAct5 });
+            // Update DB
+            pool.query(
+              `UPDATE issue_grievances SET status = 'resolved', updated_at = NOW() WHERE issue_id = ? AND tenant_id = ?`,
+              [issueId, tenant.id]
+            ).catch(e => logger.warn('Issue status update failed:', e.message));
 
-          await sendCallback(
-            context.bap_uri, 'on_issue',
-            { ...igmCtx, message_id: uuidv4() },
-            buildIgmMessage(issue, context, tenant.subscriber_id, bppAct5, 'RESOLVED', {
-              resolution: {
-                network_issue_id:   issueId,
-                resolution_remarks: `Resolution confirmed — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`,
-                resolution_action:  'RESOLVE',
-                action_triggered:   resolutionAction,
-                refund_amount:      '0.00',
-              },
-            }),
-            tenant
-          );
-
-          // Update DB so /issue_status returns CLOSED
-          pool.query(
-            `UPDATE issue_grievances SET status = 'resolved', updated_at = NOW() WHERE issue_id = ? AND tenant_id = ?`,
-            [issueId, tenant.id]
-          ).catch(e => logger.warn('Issue status update failed:', e.message));
-
-          logger.info('on_issue #5 (RESOLVED/provided) sent — auto-chain complete', { issue_id: issueId });
-        } catch (err) { logger.error('on_issue #5 failed:', err.message); }
-      }, 8000);
-
-      // ── Proactive on_issue_status CLOSED (t+9s) — IGM 1.0 only ────────────
-      // Registered at stage-0 start so it fires exactly 9s after /issue received,
-      // independent of how long on_issue callbacks take.
-      // Pramaan Flow 6A captures this as "on_issue_status (II)".
-      if (!isIgm2) setTimeout(async () => {
-        try {
-          const proactiveUpdatedBy = {
-            org:     { name: tenant.subscriber_id },
-            contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
-            person:  { name: 'Support Desk' },
-          };
-          const latestFinal  = issueCache.get(issueId);
-          const finalActions = latestFinal?.bppActions || [];
-          const proactiveRemarks = `Resolution confirmed — ${resolutionAction.toLowerCase()} will be processed within 4-5 business days`;
-          await sendCallback(
-            context.bap_uri, 'on_issue_status',
-            { ...igmCtx, message_id: uuidv4() },
-            buildIgmMessage(issue, context, tenant.subscriber_id, finalActions, 'CLOSED', {
-              resolution: {
-                network_issue_id:   issueId,
-                short_desc:         proactiveRemarks,
-                long_desc:          proactiveRemarks,
-                resolution_remarks: proactiveRemarks,
-                resolution_action:  'RESOLVE',
-                action_triggered:   resolutionAction,
-                refund_amount:      '0.00',
-              },
-              resolution_provider: {
-                respondent_info: {
-                  type:         'TRANSACTION-COUNTERPARTY-NP',
-                  organization: proactiveUpdatedBy,
-                  resolution_support: {
-                    respondentEmail: process.env.SUPPORT_EMAIL || '',
-                    contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
-                    gros: [],
-                    chat_link: '',
-                  },
-                },
-              },
-            }),
-            tenant
-          );
-          logger.info('Proactive on_issue_status CLOSED sent (t+9s)', { issue_id: issueId });
-        } catch (err) { logger.error('Proactive on_issue_status failed:', err.message); }
-      }, 9000);
+            logger.info('on_issue_status (RESOLVED) sent — IGM 1.0 auto-chain complete', { issue_id: issueId });
+          } catch (err) { logger.error('on_issue_status RESOLVED failed:', err.message); }
+        }, 2000);
+      }
 
     } else if (issueStatus === 'ESCALATED') {
       // ── Escalation flow (Flow 6F) ────────────────────────────────────────────
