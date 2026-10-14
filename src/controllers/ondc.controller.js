@@ -59,6 +59,52 @@ const forcedOutOfStockItems = new Set();
 // In-memory cache: issue_id → { issue, context } (for proactive on_issue_status)
 const issueCache = new Map();
 let lastIssueId = null;
+const { FLOWS, getWorkflowProfile, isMerchantRto, isCertificationContext } = require('../services/ondc/workflowPolicy');
+const { createIgm2Workflow } = require('../services/ondc/igm2Workflow');
+const { affectedItem, buildIgmOrderUpdate } = require('../services/ondc/igmOrderUpdate');
+
+const igm2Workflow = createIgm2Workflow({
+  send: sendCallback,
+  log: message => logger.error('IGM 2.0 workflow:', message),
+  persist: async (session, status) => {
+    await pool.query(
+      `INSERT INTO issue_grievances (tenant_id, transaction_id, issue_id, order_id, description, status, raw_payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE status = VALUES(status), raw_payload = VALUES(raw_payload), updated_at = NOW()`,
+      [session.tenant.id, session.context.transaction_id, session.issue.id,
+        session.issue.refs?.find(r => r.ref_type === 'ORDER')?.ref_id || null,
+        session.issue.descriptor?.short_desc || '', status,
+        JSON.stringify({ context: session.context, message: { issue: { ...session.issue, actions: session.actions,
+          resolutions: session.resolutions, status: session.status } } })]
+    ).catch(e => logger.warn('IGM persistence failed:', e.message));
+  },
+  getRefundAmount: session => {
+    const orderId = session.issue.refs?.find(r => r.ref_type === 'ORDER')?.ref_id;
+    const entry = confirmedOrderCache.get(orderId);
+    if (!entry || entry.tenantId !== session.tenant.id || entry.context.transaction_id !== session.context.transaction_id) throw new Error('IGM order is unavailable');
+    return affectedItem(session.issue, entry.order).amount;
+  },
+  onClose: async (session, context) => {
+    const orderId = session.issue.refs?.find(r => r.ref_type === 'ORDER')?.ref_id;
+    const entry = confirmedOrderCache.get(orderId);
+    if (!entry || entry.tenantId !== session.tenant.id || entry.context.transaction_id !== context.transaction_id) throw new Error('IGM closure order is unavailable');
+    const payload = buildStatusPayload(orderId, entry.order, 'Order-delivered', 'Completed', entry.vendor);
+    const order = buildIgmOrderUpdate(session.issue, payload, session.selected);
+    const api = session.selected.descriptor.code === 'NO_ACTION' ? 'on_status' : 'on_update';
+    const result = await sendCallback(context.bap_uri, api, { ...context, message_id: uuidv4() }, { order }, session.tenant);
+    if (result?.message?.ack?.status !== 'ACK') throw new Error('IGM final order callback was not acknowledged');
+    entry.order = order;
+  },
+});
+
+// Authenticated local test configuration. Workbench does not send its scenario
+// name in the protocol request, so identical OPEN requests cannot identify it.
+const setWorkflowProfile = (req, res) => {
+  const entry = confirmedOrderCache.get(req.params.order_id);
+  if (!entry || entry.tenantId !== req.tenant.id) return res.status(404).json({ error: 'Order not found in this session' });
+  if (!FLOWS.has(req.body.flow)) return res.status(400).json({ error: 'Invalid workflow', allowed: [...FLOWS] });
+  entry.workflowProfile = req.body.flow;
+  return res.json({ success: true, order_id: req.params.order_id, flow: entry.workflowProfile });
+};
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
@@ -1010,10 +1056,18 @@ const handleConfirm = async (req, res) => {
         : null;
 
       if (order.id) {
-        confirmedOrderCache.set(order.id, { order, context, vendor, confirmTimestamp: null });
+        const existing = confirmedOrderCache.get(order.id);
+        if (existing?.tenantId === tenant.id && existing.context.transaction_id === context.transaction_id) {
+          if (existing.confirmationMessage) await sendCallback(context.bap_uri, 'on_confirm', context, existing.confirmationMessage, tenant);
+          return;
+        }
+        cancelledOrders.delete(order.id);
+        confirmedOrderCache.set(order.id, { order, context, vendor, tenantId: tenant.id, confirmTimestamp: null });
         lastConfirmedOrderId = order.id;
         logger.info('Cached confirmed order', { order_id: order.id, hasContext: !!context?.domain, hasBilling: !!order.billing });
       }
+      const runEntry = confirmedOrderCache.get(order.id);
+      const isCurrentRun = () => confirmedOrderCache.get(order.id) === runEntry;
 
       // 1. Save to DB
       if (tenant.id) await saveONDCOrder(tenant.id, confirmedBody, confirmedBody);
@@ -1043,7 +1097,7 @@ const handleConfirm = async (req, res) => {
       const bapStaticTerms = bapTermsTag?.list?.find(l => l.code === 'static_terms')?.value;
       const bapTaxNumber   = bapTermsTag?.list?.find(l => l.code === 'tax_number')?.value;
 
-      await sendCallback(context.bap_uri, 'on_confirm', context, {
+      const confirmationMessage = {
         order: {
           id:         order.id,
           state:      'Created',
@@ -1068,12 +1122,14 @@ const handleConfirm = async (req, res) => {
           created_at: order.created_at || now,
           updated_at: order.updated_at || now,
         },
-      }, tenant);
+      };
+      runEntry.confirmationMessage = confirmationMessage;
+      await sendCallback(context.bap_uri, 'on_confirm', context, confirmationMessage, tenant);
 
       // Save the computed quote + confirm updated_at back into cache so
       // autoStatusSequence / buildStatusPayload can access order.quote
       const confirmUpdatedAt = order.updated_at || now;
-      const cached = confirmedOrderCache.get(order.id);
+      const cached = runEntry;
       // Set directly on the closure-captured order object (used by autoStatusSequence)
       order.quote = stripBreakupItemQuantity(quote);
       if (cached) {
@@ -1083,10 +1139,11 @@ const handleConfirm = async (req, res) => {
       // Trigger On-Network Logistics search (Flow A1) — fire-and-forget
       ;(async () => {
         try {
+          if (process.env.ONDC_ON_NETWORK_LOGISTICS !== 'true') return;
           const lsDelay = ms => new Promise(r => setTimeout(r, ms));
-          const lsCancelled = () => cancelledOrders.has(order.id);
+          const lsCancelled = () => !isCurrentRun() || cancelledOrders.has(order.id);
           // Send Pending (Accepted) → Packed → Agent-assigned immediately (before LSP mock relay fires at ~5s)
-          // Auto-status skips these for logistics orders (lsEntry exists in cache after startLogisticsFlow)
+          // The retail simulator is disabled when this LSP path is enabled.
           // Yield to event loop so any /cancel that arrived during on_confirm processing can register first
           await lsDelay(500);
           if (lsCancelled()) { logger.info('Logistics block aborted before Pending (order cancelled)', { order_id: order.id }); return; }
@@ -1116,12 +1173,15 @@ const handleConfirm = async (req, res) => {
           logger.info('Logistics: Agent-assigned on_status sent', { order_id: order.id });
           await lsDelay(30000);  // Allow buyer cancellation window before triggering logistics
 
-          if (cancelledOrders.has(order.id)) {
+          if (lsCancelled()) {
             logger.info('Logistics search skipped — order cancelled during window', { order_id: order.id });
             return;
           }
           const lsResult = await searchLogistics(order, context, tenant);
-          await startLogisticsFlow(order, context, tenant, lsResult, vendor);
+          await startLogisticsFlow(order, context, tenant, lsResult, vendor, state => {
+            const entry = confirmedOrderCache.get(order.id);
+            if (entry?.context.transaction_id === context.transaction_id) entry.currentFulfillmentState = state;
+          });
         } catch (e) {
           logger.warn('Logistics search failed (non-blocking):', e.message);
         }
@@ -1131,11 +1191,12 @@ const handleConfirm = async (req, res) => {
       // Sends: Packed → Agent-assigned → Order-picked-up → Out-for-delivery → Order-delivered
       // with 2s delay between each. Flows that send /cancel (3B) will interrupt naturally.
       const autoStatusSequence = async () => {
+        // LSP events own fulfillment when on-network logistics is enabled.
+        if (!isCertificationContext(context) || process.env.ONDC_ON_NETWORK_LOGISTICS === 'true') return;
         const delay = ms => new Promise(r => setTimeout(r, ms));
-        const isCancelled = () => cancelledOrders.has(order.id);
+        const isCancelled = () => !isCurrentRun() || cancelledOrders.has(order.id);
 
-        // Steps 1-4 fire rapidly (2s apart). Step 5 (Order-delivered) is delayed by 45s
-        // to give Flow 3B/3C time to trigger cancel before Order-delivered fires.
+        // Schedule certification progress; buyer cancellation invalidates the chain.
         const steps = [
           { fulfillmentState: 'Pending',            orderState: 'Accepted',    delayAfter: 2000  },
           { fulfillmentState: 'Packed',              orderState: 'In-progress', delayAfter: 2000  },
@@ -1150,6 +1211,7 @@ const handleConfirm = async (req, res) => {
 
         for (const step of steps) {
           if (isCancelled()) { logger.info('Auto on_status aborted (order cancelled)', { order_id: order.id }); return; }
+          if (step.fulfillmentState === 'Order-delivered' && isMerchantRto(confirmedOrderCache.get(order.id))) continue;
 
           // Skip states already sent early by logistics block (Packed, Agent-assigned at T=0s)
           // Works for both retail and logistics orders.
@@ -1195,11 +1257,11 @@ const handleConfirm = async (req, res) => {
 
         // Return sequence (Flow 4A) is triggered by handleUpdate when Pramaan sends /update
 
-        // Auto-trigger merchant RTO on_cancel after Order-delivered (Flow 3B: Merchant Side RTO)
-        // Wait 3s so Workbench registers Order-delivered first.
-        // If Workbench NACKs (non-RTO flow), undo the cancel — don't pollute state.
+        // Only an explicitly selected merchant scenario may initiate RTO.
+        if (!isMerchantRto(confirmedOrderCache.get(order.id))) return;
+        // Let the preceding fulfillment event finish before the merchant action.
         await delay(3000);
-        if (cancelledOrders.has(order.id)) { logger.info('Skipping auto RTO cancel (order already cancelled)', { order_id: order.id }); return; }
+        if (isCancelled()) { logger.info('Skipping auto RTO cancel (order cancelled or run superseded)', { order_id: order.id }); return; }
 
         // Skip auto RTO cancel if an IGM issue is active for this transaction (prevents out-of-sequence NACK)
         const hasActiveIgm = [...issueCache.values()].some(
@@ -1329,7 +1391,7 @@ const handleConfirm = async (req, res) => {
             return; // Don't mark as cancelled, don't send RTO on_status
           }
 
-          // ACK received — this IS an RTO flow. Mark as cancelled and continue.
+          // ACK received for the explicitly selected merchant cancellation.
           cancelledOrders.add(order.id);
           updateOrderStatus(order.id, 'Cancelled').catch(e => logger.warn('DB cancel update failed (non-blocking):', e.message));
           markRetailOrderCancelled(order.id);
@@ -1357,11 +1419,12 @@ const handleConfirm = async (req, res) => {
 
       // Auto-trigger merchant part-cancel on_update (Flow 3A / Merchant RTO)
       // Fires 3s after on_confirm so Workbench has time to register on_confirm first.
-      // For flows that don't expect on_update, Workbench NACKs it harmlessly.
+      // Other workflows must never receive this cancellation event.
       ;(async () => {
         try {
           await new Promise(r => setTimeout(r, 3000));
-          if (cancelledOrders.has(order.id)) return; // buyer already cancelled
+          if (!isCertificationContext(context) || !isMerchantRto(confirmedOrderCache.get(order.id))) return;
+          if (!isCurrentRun() || cancelledOrders.has(order.id)) return;
           await sendPartialCancelOnUpdate(context, order, vendor, tenant, order.updated_at || now);
           logger.info('Auto merchant on_update (part-cancel) sent', { order_id: order.id });
         } catch (e) {
@@ -1555,7 +1618,7 @@ const handleCancel = async (req, res) => {
       const now = new Date(Math.max(Date.now() + 1, cancelTime + 1)).toISOString();
 
       // Spec: on_cancel fulfillments need cancel_request + precancel_state tags
-      const preCancelState = cachedEntry?.currentFulfillmentState || 'Pending';
+      const preCancelState = currentState || 'Pending';
       const cancelFulfillmentTags = [
         {
           code: 'cancel_request',
@@ -3058,6 +3121,14 @@ const handleIssue = async (req, res) => {
     const issueId    = issue.id || uuidv4();
     const issueStatus = issue.status;
 
+    if (Array.isArray(issue.actions)) {
+      const orderId = issue.refs?.find(r => r.ref_type === 'ORDER')?.ref_id;
+      const entry = confirmedOrderCache.get(orderId);
+      const profile = getWorkflowProfile(entry);
+      await igm2Workflow.handle(issue, context, tenant, profile === 'prepaid' ? 'igm' : profile);
+      return;
+    }
+
     // If issue status is CLOSED — BAP is closing/rating the issue (Flow 6F Escalation).
     // BPP must send a final on_issue confirming the closure ("Resolution Provided").
     if (issueStatus === 'CLOSED') {
@@ -3600,6 +3671,8 @@ const handleIssueStatus = async (req, res) => {
     const tenant = await getTenantByBppId(context?.bpp_id);
     if (!tenant) return;
 
+    if (await igm2Workflow.status(context, tenant, issue_id)) return;
+
     let dbStatus   = 'OPEN';
     let resolution = null;
     try {
@@ -4092,6 +4165,7 @@ const triggerSendRecon = async (req, res) => {
 };
 
 module.exports = {
+  setWorkflowProfile,
   handleSearch,
   handleSelect,
   handleInit,
