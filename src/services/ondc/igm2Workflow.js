@@ -139,6 +139,10 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
             info: {
               org: { name: `${tenant.subscriber_id}::${context.domain || 'ONDC:RET10'}` },
               person: { name: 'Support Desk' },
+              contact: {
+                phone: process.env.SUPPORT_PHONE || '9059304940',
+                email: process.env.SUPPORT_EMAIL || 'support@cottkart.com',
+              },
             },
           },
           actions: [], resolutions: [], processed: new Set(), revision: 0, state: 'NEW',
