@@ -2,6 +2,20 @@ const { randomUUID } = require('crypto');
 
 // IGM 2.0 state machine. Each issue is serialized so deferred events cannot
 // race with incoming requests. Retries up to 3 times on transient failures.
+//
+// Generic IGM 2.0 BPP flow (10 steps):
+//   1. issue(OPEN)              → BAP opens issue
+//   2. on_issue(PROCESSING)     → BPP sync response
+//   3. on_issue(NEED-MORE-INFO) → BPP unsolicited (deferred)
+//   4. issue(INFO_PROVIDED)     → BAP provides info
+//   5. on_issue(PROCESSING)     → BPP sync response (ack info)
+//   6. on_issue(RESOLUTION_PROPOSED) → BPP unsolicited (deferred) with resolutions
+//   7. issue(RESOLUTION_ACCEPTED)    → BAP accepts
+//   8. on_issue(RESOLVED)       → BPP sync response
+//   9. issue(CLOSED)            → BAP closes
+//  10. on_status/on_update      → BPP unsolicited (via onClose)
+//
+// Rejection flow adds: RESOLUTION_REJECTED → PROCESSING → NEED-MORE-INFO → ESCALATED → ...
 const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule = setTimeout, log = () => {} }) => {
   const sessions = new Map();
   const locks = new Map();
@@ -40,7 +54,7 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
     update_target: [{ path: 'issue.actions', action: 'APPENDED' }],
     issue: {
       ...s.issue,
-      actors: merge(s.issue.actors || [], [s.respondentActor]),
+      actors: merge(s.issue.actors || [], [s.respondentActor, ...(s.groActor ? [s.groActor] : [])]),
       actions: s.actions,
       ...(s.resolutions.length ? { resolutions: s.resolutions } : {}),
       status: s.status,
@@ -92,6 +106,53 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
     s.state = 'AWAITING_INFO';
   };
 
+  // Send RESOLUTION_PROPOSED with resolutions (PARENT + child options)
+  const sendResolutionProposed = async (s) => {
+    const parentId = `R_PARENT_${randomUUID().slice(0, 8)}`;
+    const noActionId = `R_NO_ACTION_${randomUUID().slice(0, 8)}`;
+    const refundId = `R_REFUND_${randomUUID().slice(0, 8)}`;
+    const now = new Date().toISOString();
+
+    // Build resolutions array with PARENT and child options
+    s.resolutions = [
+      {
+        id: parentId,
+        descriptor: { code: 'PARENT', short_desc: 'PROVIDING RESOLUTION OPTIONS. PLEASE SELECT ONE' },
+        updated_at: now,
+        proposed_by: s.respondentId,
+      },
+      {
+        id: noActionId,
+        ref_id: parentId,
+        ref_type: 'PARENT',
+        descriptor: { code: 'NO-ACTION', short_desc: 'No action required' },
+        updated_at: now,
+        proposed_by: s.respondentId,
+      },
+      {
+        id: refundId,
+        ref_id: parentId,
+        ref_type: 'PARENT',
+        descriptor: { code: 'REFUND', short_desc: 'Providing refund for the item' },
+        updated_at: now,
+        proposed_by: s.respondentId,
+        tags: [{
+          descriptor: { code: 'RESOLUTION_DETAILS' },
+          list: [
+            { descriptor: { code: 'ITEM' }, value: s.issue.refs?.find(r => r.ref_type === 'ITEM')?.ref_id || 'I1' },
+            { descriptor: { code: 'REFUND_AMOUNT' }, value: getRefundAmount ? String(getRefundAmount(s)) : '0.00' },
+          ],
+        }],
+      },
+    ];
+
+    s.actions.push(makeAction(s, 'RESOLUTION_PROPOSED', parentId));
+    s.status = 'RESOLVED';
+    await emit(s, s.context, true);
+    s.state = 'AWAITING_DECISION';
+    await persist(s, 'in_progress');
+  };
+
   // Send RESOLVED with resolution details
   const sendResolved = async (s, context, unsolicited = false) => {
     const act = resolveAction(s);
@@ -99,7 +160,12 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
     if (act === 'REFUND' && getRefundAmount) {
       try { refundAmount = String(getRefundAmount(s)); } catch (_) { /* use default */ }
     }
-    s.actions.push(makeAction(s, 'RESOLVED'));
+    // Find the selected resolution from resolutions array
+    const selectedRes = s.resolutions.find(r => {
+      const code = r.descriptor?.code;
+      return act === 'NO-ACTION' ? code === 'NO-ACTION' : code === act;
+    });
+    s.actions.push(makeAction(s, 'RESOLVED', selectedRes?.id));
     s.status = 'RESOLVED';
     s.selected = { descriptor: { code: act === 'NO-ACTION' ? 'NO_ACTION' : act } };
     await emit(s, context, unsolicited, 'on_issue', {
@@ -113,8 +179,8 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
         refund_amount: refundAmount,
       },
     });
-    s.state = 'AWAITING_DECISION';
-    await persist(s, 'in_progress');
+    s.state = 'AWAITING_CLOSE';
+    await persist(s, 'resolved');
   };
 
   const handle = (issue, context, tenant, profile = 'igm') => {
@@ -145,6 +211,17 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
               },
             },
           },
+          groActor: {
+            id: `${respondentId}-GRO`, type: 'COUNTERPARTY_NP_GRO',
+            info: {
+              org: { name: `${tenant.subscriber_id}::${context.domain || 'ONDC:RET10'}` },
+              person: { name: 'Grievance Officer SNP' },
+              contact: {
+                phone: process.env.GRO_PHONE || process.env.SUPPORT_PHONE || '9059304940',
+                email: process.env.GRO_EMAIL || process.env.SUPPORT_EMAIL || 'support@cottkart.com',
+              },
+            },
+          },
           actions: [], resolutions: [], processed: new Set(), revision: 0, state: 'NEW',
         };
         sessions.set(key, s);
@@ -166,9 +243,13 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
         defer(key, s, 'PROCESSING', () =>
           sendNeedMoreInfo(s, 'Please share additional details about the issue'));
 
-      // ── INFO_PROVIDED: send RESOLVED with resolution ──────────────────────
+      // ── INFO_PROVIDED: send PROCESSING (ack), then defer RESOLUTION_PROPOSED
       } else if (code === 'INFO_PROVIDED' && s.state === 'AWAITING_INFO') {
-        await sendResolved(s, context, false);
+        s.actions.push(makeAction(s, 'PROCESSING', incoming.ref_id));
+        s.status = 'PROCESSING';
+        await emit(s, context);
+        s.state = 'PROPOSING';
+        defer(key, s, 'PROPOSING', () => sendResolutionProposed(s));
 
       // ── RESOLUTION_REJECTED: re-process, then defer NEED-MORE-INFO ────────
       } else if (code === 'RESOLUTION_REJECTED' && s.state === 'AWAITING_DECISION') {
@@ -180,45 +261,24 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
         defer(key, s, 'PROCESSING', () =>
           sendNeedMoreInfo(s, 'Please share additional details to help process your refund'));
 
-      // ── ESCALATED: mark escalated, send PROCESSING, defer RESOLVED + NEED-MORE-INFO
+      // ── ESCALATED: mark escalated, send PROCESSING, defer RESOLUTION_PROPOSED
       } else if (code === 'ESCALATED' && ['AWAITING_DECISION', 'PROCESSING'].includes(s.state)) {
         s.escalated = true;
         s.actions.push(makeAction(s, 'PROCESSING', incoming.id));
         s.status = 'PROCESSING';
         await emit(s, context);
-        s.state = 'PROCESSING';
-        defer(key, s, 'PROCESSING', async () => {
-          await sendResolved(s, s.context, true);
-          // After RESOLVED, defer NEED-MORE-INFO asking for confirmation
-          defer(key, s, 'AWAITING_DECISION', async () => {
-            // Transition back to AWAITING_INFO so next INFO_PROVIDED/RESOLUTION_ACCEPTED is accepted
-            s.actions.push(makeAction(s, 'NEED-MORE-INFO'));
-            await emit(s, s.context, true, 'on_issue', {
-              additional_info_required: [{
-                info_required: {
-                  issue_update_info: {
-                    code: 'REASON',
-                    name: 'Resolution confirmation required',
-                    short_desc: 'Please confirm acceptance of the refund resolution',
-                  },
-                  message_id: randomUUID(),
-                  updated_at: new Date().toISOString(),
-                },
-              }],
-            });
-            // Stay in AWAITING_DECISION — BAP will send RESOLUTION_ACCEPTED next
-          });
-        });
+        s.state = 'PROPOSING';
+        defer(key, s, 'PROPOSING', () => sendResolutionProposed(s));
 
-      // ── RESOLUTION_ACCEPTED: send RESOLVED (final confirmation) ───────────
+      // ── RESOLUTION_ACCEPTED: send RESOLVED ────────────────────────────────
       } else if (code === 'RESOLUTION_ACCEPTED' && s.state === 'AWAITING_DECISION') {
-        s.actions.push(makeAction(s, 'RESOLVED'));
-        s.status = 'RESOLVED';
-        // Ensure selected is set for onClose
-        if (!s.selected) s.selected = { descriptor: { code: resolveAction(s) === 'NO-ACTION' ? 'NO_ACTION' : resolveAction(s) } };
-        await emit(s, context);
-        s.state = 'AWAITING_CLOSE';
-        await persist(s, 'resolved');
+        // Determine which resolution was accepted from incoming ref_id
+        if (incoming.ref_id) {
+          const accepted = s.resolutions.find(r => r.id === incoming.ref_id);
+          if (accepted?.descriptor?.code === 'REFUND') s.escalated = true;
+          else if (accepted?.descriptor?.code === 'NO-ACTION') s.escalated = false;
+        }
+        await sendResolved(s, context, false);
 
       // ── CLOSED: trigger onClose (sends on_status or on_update) ────────────
       } else if (issue.status === 'CLOSED' && code === 'CLOSED' && s.state === 'AWAITING_CLOSE') {
