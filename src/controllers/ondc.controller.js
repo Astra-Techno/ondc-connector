@@ -3544,6 +3544,39 @@ const handleIssue = async (req, res) => {
           } catch (err) { logger.error('on_issue RESOLVED after ESCALATED failed:', err.message); }
         }, 3000);
 
+      } else if (lastActionCode === 'INFO_PROVIDED') {
+        // IGM 2.0 — BAP provided additional info, respond with RESOLVED
+        logger.info('INFO_PROVIDED received — sending RESOLVED on_issue', { issue_id: issueId });
+
+        const resolutionAction = cached?.resolveAction || 'NO-ACTION';
+        const ipNow = new Date().toISOString();
+        const ipAction = makeBppIgmAction('RESOLVED', `Info received — ${resolutionAction.toLowerCase()} confirmed`, updatedBy, ipNow);
+        const bppActIP = [...(cached?.bppActions || []), ipAction];
+        issueCache.set(issueId, { ...(cached || { issue, context, tenant }), stage: 5, bppActions: bppActIP, resolveAction: resolutionAction });
+
+        await sendCallback(
+          context.bap_uri, 'on_issue',
+          { ...igmCtx, message_id: context.message_id },
+          buildIgmMessage(issue, context, tenant.subscriber_id, bppActIP, 'RESOLVED', {
+            resolution: {
+              network_issue_id:   issueId,
+              short_desc:         `Info received — ${resolutionAction.toLowerCase()} confirmed`,
+              long_desc:          `Info received — ${resolutionAction.toLowerCase()} confirmed`,
+              resolution_remarks: `Info received — ${resolutionAction.toLowerCase()} confirmed`,
+              resolution_action:  'RESOLVE',
+              action_triggered:   resolutionAction,
+              refund_amount:      '0.00',
+            },
+          }),
+          tenant
+        );
+        logger.info('on_issue (RESOLVED after INFO_PROVIDED) sent', { issue_id: issueId });
+
+        pool.query(
+          `UPDATE issue_grievances SET status = 'resolved', updated_at = NOW() WHERE issue_id = ? AND tenant_id = ?`,
+          [issueId, tenant.id]
+        ).catch(e => logger.warn('Issue status update failed:', e.message));
+
       } else {
         // Auto-chain already running or complete — ACK only
         logger.info('Issue received (auto-chain in progress/complete) — ACK only', { issue_id: issueId, stage });
