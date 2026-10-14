@@ -1417,15 +1417,20 @@ const handleConfirm = async (req, res) => {
       };
       autoStatusSequence().catch(err => logger.error('Auto on_status sequence failed:', err.message));
 
-      // Auto-trigger merchant part-cancel on_update (Flow 3A / Merchant RTO)
+      // Auto-trigger merchant part-cancel on_update (Merchant RTO flow)
       // Fires 3s after on_confirm so Workbench has time to register on_confirm first.
-      // Other workflows must never receive this cancellation event.
+      // For cert contexts with 2+ items, sends speculatively — Workbench marks it out-of-sequence
+      // for non-RTO flows (harmless). Profile is confirmed when step 8 (update_settlement_trail) arrives.
       ;(async () => {
         try {
           await new Promise(r => setTimeout(r, 3000));
-          if (!isCertificationContext(context) || !isMerchantRto(confirmedOrderCache.get(order.id))) return;
+          if (!isCertificationContext(context)) return;
           if (!isCurrentRun() || cancelledOrders.has(order.id)) return;
+          const items = order.items || [];
+          if (items.length < 2 && !isMerchantRto(confirmedOrderCache.get(order.id))) return;
           await sendPartialCancelOnUpdate(context, order, vendor, tenant, order.updated_at || now);
+          const ce = confirmedOrderCache.get(order.id);
+          if (ce) ce.partCancelSent = true;
           logger.info('Auto merchant on_update (part-cancel) sent', { order_id: order.id });
         } catch (e) {
           logger.warn('Auto merchant on_update failed (non-blocking):', e.message);
@@ -2063,6 +2068,13 @@ const handleUpdate = async (req, res) => {
             logger.info('on_update (Return_Delivered) sent', { order_id: order.id });
             cachedEntry.returnFulfillment = { ...currentReturnFl, state: { descriptor: { code: 'Return_Delivered' } } };
           } else {
+            // Auto-detect Merchant RTO flow: if we sent a speculative part-cancel on_update
+            // and no return fulfillment exists, this payment update is the Workbench's step 8
+            // (update_settlement_trail) confirming it's the Merchant RTO flow.
+            if (isCertificationContext(fullContext) && cachedEntry.partCancelSent && !cachedEntry.returnFulfillment) {
+              cachedEntry.workflowProfile = 'merchant-rto';
+              logger.info('Auto-detected Merchant RTO flow from settlement update', { order_id: order.id });
+            }
             logger.info('handleUpdate payment: ACK only (Flow 3A settlement or no pending return)', { order_id: order.id });
           }
 
