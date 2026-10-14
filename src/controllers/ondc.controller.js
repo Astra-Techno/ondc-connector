@@ -1282,58 +1282,79 @@ const handleConfirm = async (req, res) => {
         try {
           const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';
           const reason_id = '013';
-
-          const merchantPreCancelState = confirmedOrderCache.get(order.id)?.currentFulfillmentState || 'Order-delivered';
           const cancelNow = new Date().toISOString();
-          const merchantCancelFulfillmentTags = [
-            { code: 'cancel_request', list: [
-              { code: 'retry_count',  value: '3' },
-              { code: 'rto_id',       value: 'rto1' },
-              { code: 'reason_id',    value: reason_id },
-              { code: 'initiated_by', value: subscriberId },
-            ]},
-            { code: 'precancel_state', list: [
-              { code: 'fulfillment_state', value: merchantPreCancelState },
-              { code: 'updated_at',        value: order.updated_at || cancelNow },
-            ]},
-          ];
+          const merchantPreCancelState = confirmedOrderCache.get(order.id)?.currentFulfillmentState || 'Out-for-delivery';
 
-          const builtDeliveryFulfillments = (order.fulfillments || []).map(f =>
-            buildFulfillmentWithLocation(f, vendor, 'Cancelled', cancelNow)
-          );
-          const deliveryFulfillments = builtDeliveryFulfillments.map(f => ({
-            ...f,
-            tags: merchantCancelFulfillmentTags,
-          }));
-          const deliveryF = builtDeliveryFulfillments[0] || null;
+          // Build delivery fulfillment for Cancelled — only spec-allowed fields (no @ondc/org/category, no instructions, no arbitrary BAP spreads)
+          const deliveryF = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }])[0];
+          const cancelPhone = (vendor?.phone || '9999999999').replace(/^\+91/, '');
+          const cancelGps = normalizeGps(vendor?.gps);
+          const ct1h  = new Date(Date.now() + 1 * 3600 * 1000).toISOString();
+          const ct2h  = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
+          const ct24h = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+          const ct48h = new Date(Date.now() + 48 * 3600 * 1000).toISOString();
 
-          const cancelQuote = JSON.parse(JSON.stringify(order.quote || { price: { currency: 'INR', value: '0' }, breakup: [], ttl: 'P1D' }));
-          if (cancelQuote.price) cancelQuote.price.value = '0.00';
-          (cancelQuote.breakup || []).forEach(item => {
-            if (item.price) item.price.value = '0.00';
-            if (item['@ondc/org/item_quantity']) item['@ondc/org/item_quantity'].count = 0;
-          });
-          for (const bu of (cancelQuote.breakup || [])) {
-            if (bu.item?.tags) {
-              bu.item.tags = bu.item.tags.filter(t => t.code !== 'quote');
-              if (!bu.item.tags.length) delete bu.item.tags;
-            }
-          }
+          const cancelledDelivery = {
+            id:   deliveryF.id || 'f1',
+            type: 'Delivery',
+            state: { descriptor: { code: 'Cancelled' } },
+            tracking: false,
+            '@ondc/org/provider_name': vendor?.business_name || '',
+            '@ondc/org/TAT':           deliveryF['@ondc/org/TAT'] || 'PT24H',
+            start: {
+              location: {
+                id:         'l1',
+                descriptor: { name: vendor?.business_name || 'Store' },
+                gps:        cancelGps,
+                address: {
+                  locality:  vendor?.address || vendor?.city || 'Bengaluru',
+                  city:      vendor?.city    || 'Bengaluru',
+                  area_code: vendor?.pincode || '560001',
+                  state:     vendor?.state   || 'Karnataka',
+                },
+              },
+              contact: { phone: cancelPhone, email: vendor?.email || 'support@store.in' },
+              time:    { range: { start: ct1h, end: ct2h }, timestamp: ct1h },
+            },
+            end: {
+              person:   deliveryF.end?.person  || { name: 'Buyer' },
+              contact:  deliveryF.end?.contact || { email: '', phone: '' },
+              location: {
+                gps:     deliveryF.end?.location?.gps || '12.9716,77.5946',
+                address: deliveryF.end?.location?.address || {
+                  name: 'Buyer', locality: 'Bengaluru', city: 'Bengaluru',
+                  state: 'Karnataka', country: 'IND', area_code: '560001',
+                },
+              },
+              time: { range: { start: ct24h, end: ct48h } },
+            },
+            tags: [
+              { code: 'cancel_request', list: [
+                { code: 'retry_count',  value: '3' },
+                { code: 'rto_id',       value: 'rto1' },
+                { code: 'reason_id',    value: reason_id },
+                { code: 'initiated_by', value: subscriberId },
+              ]},
+              { code: 'precancel_state', list: [
+                { code: 'fulfillment_state', value: merchantPreCancelState },
+                { code: 'updated_at',        value: order.updated_at || cancelNow },
+              ]},
+            ],
+          };
 
           // Separate already-cancelled items (from part-cancel on_update) from RTO items
           const allItems = order.items || [];
-          const partCancelledItemId = allItems[0]?.id; // First item was part-cancelled
+          const partCancelledItemId = allItems[0]?.id;
           const cancelItems = [];
-          const rtoOnlyItems = []; // Items being RTO'd (not previously cancelled)
+          const rtoOnlyItems = [];
           for (const item of allItems) {
             const qty = item.quantity?.count || 0;
+            const fid = deliveryF.id || 'f1';
             if (item.id === partCancelledItemId && allItems.length > 1) {
-              // Part-cancelled item: count=0 on delivery, count on Cancel fulfillment
-              cancelItems.push({ ...item, quantity: { count: 0 } });
+              cancelItems.push({ id: item.id, quantity: { count: 0 }, fulfillment_id: fid });
               cancelItems.push({ id: item.id, quantity: { count: qty || 1 }, fulfillment_id: 'c1' });
             } else {
-              // RTO item: count=0 on delivery, count on RTO fulfillment
-              cancelItems.push({ ...item, quantity: { count: 0 } });
+              cancelItems.push({ id: item.id, quantity: { count: 0 }, fulfillment_id: fid });
               if (qty > 0) {
                 cancelItems.push({ id: item.id, quantity: { count: qty }, fulfillment_id: 'rto1' });
                 rtoOnlyItems.push(item);
@@ -1341,25 +1362,44 @@ const handleConfirm = async (req, res) => {
             }
           }
 
-          // Cancel fulfillment for part-cancelled item
+          // Cancel fulfillment for part-cancelled item — include cancel_request + quote_trail per spec
+          const cancelledPrice = parseFloat(
+            order.quote?.breakup?.find(b => b['@ondc/org/item_id'] === partCancelledItemId && b['@ondc/org/title_type'] === 'item')?.item?.price?.value
+            || '0'
+          );
+          const cancelledQty = allItems[0]?.quantity?.count || 1;
+          const cancelledLineTotal = (cancelledPrice * cancelledQty).toFixed(2);
           const cancelTypeFulfillment = {
             id: 'c1',
             type: 'Cancel',
             state: { descriptor: { code: 'Cancelled' } },
-            tags: [{
-              code: 'quote_trail', list: [
-                { code: 'type', value: 'item' }, { code: 'id', value: partCancelledItemId || '' },
-                { code: 'currency', value: 'INR' }, { code: 'value', value: '0' },
-              ],
-            }],
+            tags: [
+              { code: 'cancel_request', list: [
+                { code: 'reason_id',    value: '002' },
+                { code: 'initiated_by', value: subscriberId },
+              ]},
+              { code: 'quote_trail', list: [
+                { code: 'type', value: 'item' },
+                { code: 'id',   value: partCancelledItemId || '' },
+                { code: 'currency', value: 'INR' },
+                { code: 'value',    value: `-${cancelledLineTotal}` },
+              ]},
+            ],
           };
 
-          // Build RTO fulfillment with quote_trail only for RTO items (not part-cancelled ones)
+          // Build quote — zero out all breakup line totals and quantities (preserve item.price unit price)
+          const cancelQuote = JSON.parse(JSON.stringify(order.quote || { price: { currency: 'INR', value: '0' }, breakup: [], ttl: 'P1D' }));
+          if (cancelQuote.price) cancelQuote.price.value = '0.00';
+          (cancelQuote.breakup || []).forEach(b => {
+            if (b.price) b.price.value = '0.00';
+            if (b['@ondc/org/item_quantity']) b['@ondc/org/item_quantity'].count = 0;
+          });
+
+          // Build RTO fulfillment with quote_trail only for RTO items
           const rtoQuote = { ...order.quote, breakup: (order.quote?.breakup || []).filter(b =>
             rtoOnlyItems.some(ri => ri.id === b['@ondc/org/item_id']) || !['item'].includes(b['@ondc/org/title_type'])
           )};
-          const rtoFulfillment = buildRtoFulfillment('RTO-Initiated', reason_id, { ...order, quote: rtoQuote }, deliveryF);
-          const allFulfillments = [...deliveryFulfillments, cancelTypeFulfillment, rtoFulfillment];
+          const rtoFulfillment = buildRtoFulfillment('RTO-Initiated', reason_id, { ...order, quote: rtoQuote }, cancelledDelivery);
 
           const cancelPayload = {
             id:    order.id,
@@ -1370,17 +1410,14 @@ const handleConfirm = async (req, res) => {
             quote:     cancelQuote,
             payment: {
               ...(order.payment || {}),
-              '@ondc/org/buyer_app_finder_fee_type':   'percent',
-              '@ondc/org/buyer_app_finder_fee_amount': '3',
-              '@ondc/org/settlement_details':           buildSettlementDetails(),
+              '@ondc/org/settlement_details': buildSettlementDetails(),
               status: 'PAID',
             },
             cancellation: {
               cancelled_by: subscriberId,
               reason: { id: reason_id },
             },
-            fulfillments: allFulfillments,
-            tags: ORDER_TAGS,
+            fulfillments: [cancelledDelivery, cancelTypeFulfillment, rtoFulfillment],
             created_at:  order.created_at || cancelNow,
             updated_at:  new Date(Date.now() + 1).toISOString(),
           };
@@ -2356,8 +2393,10 @@ const triggerMerchantReturnUpdate = async (req, res) => {
   }
 };
 
-// Build RTO fulfillment object (type "RTO") for Flow 3B
-// SDK spec: RTO fulfillment has quote_trail tags (negative values per breakup item) + start/end locations
+// Build RTO fulfillment object (type "RTO") for on_cancel / on_status RTO
+// Spec: RTO start = delivery end (buyer), RTO end = delivery start (seller)
+// start has: contact, location(gps, address), time(timestamp) — NO id/descriptor on location, NO range
+// end has: location(id, descriptor, gps, address), contact — NO person, NO time (time added for RTO-Delivered separately)
 const buildRtoFulfillment = (rtoState, reasonId, order, deliveryFulfillment) => {
   const quote = order?.quote || {};
   const breakup = quote.breakup || [];
@@ -2379,76 +2418,55 @@ const buildRtoFulfillment = (rtoState, reasonId, order, deliveryFulfillment) => 
     })
     .filter(Boolean);
 
-  // RTO start = delivery end (buyer), RTO end = delivery start (seller)
   const now = new Date().toISOString();
-  const t1h = new Date(Date.now() + 1 * 3600 * 1000).toISOString();
-  const t2h = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
 
-  // Ensure RTO start (buyer location) has all required fields
+  // RTO start = buyer location (from delivery end) — minimal per spec
   const dfEnd = deliveryFulfillment?.end || {};
   const dfEndLoc = dfEnd.location || {};
   const dfEndAddr = dfEndLoc.address || {};
-  const rtoStartLocation = {
-    id: dfEndLoc.id || 'buyer_loc',
-    gps: dfEndLoc.gps || '12.9716,77.5946',
-    descriptor: dfEndLoc.descriptor || { name: dfEndAddr.name || dfEndAddr.locality || 'Buyer Location' },
-    address: {
-      name:      dfEndAddr.name      || dfEndAddr.locality || 'Buyer Address',
-      building:  dfEndAddr.building  || dfEndAddr.locality || 'NA',
-      locality:  dfEndAddr.locality  || 'Bengaluru',
-      city:      dfEndAddr.city      || 'Bengaluru',
-      area_code: dfEndAddr.area_code || '560001',
-      state:     dfEndAddr.state     || 'Karnataka',
-      country:   dfEndAddr.country   || 'IND',
-    },
-  };
   const rtoStart = {
-    location: rtoStartLocation,
-    contact:  dfEnd.contact  || deliveryFulfillment?.start?.contact || { phone: '9999999999', email: 'buyer@example.com' },
-    person:   dfEnd.person   || { name: 'Buyer' },
-    time:     { range: { start: now, end: t1h }, timestamp: now },
+    contact:  dfEnd.contact || { phone: '9999999999', email: 'buyer@example.com' },
+    location: {
+      gps: dfEndLoc.gps || '12.9716,77.5946',
+      address: {
+        name:      dfEndAddr.name      || dfEndAddr.locality || 'Buyer Address',
+        building:  dfEndAddr.building  || 'NA',
+        locality:  dfEndAddr.locality  || 'Bengaluru',
+        city:      dfEndAddr.city      || 'Bengaluru',
+        state:     dfEndAddr.state     || 'Karnataka',
+        country:   dfEndAddr.country   || 'IND',
+        area_code: dfEndAddr.area_code || '560001',
+      },
+    },
+    time: { timestamp: now },
   };
 
-  // Ensure RTO end (seller location) has all required fields
+  // RTO end = seller location (from delivery start) — with id/descriptor per spec
   const dfStart = deliveryFulfillment?.start || {};
   const dfStartLoc = dfStart.location || {};
   const dfStartAddr = dfStartLoc.address || {};
-  const rtoEndLocation = {
-    id: dfStartLoc.id || 'l1',
-    gps: dfStartLoc.gps || '12.9716,77.5946',
-    descriptor: dfStartLoc.descriptor || { name: 'Store' },
-    address: {
-      name:      dfStartAddr.name      || dfStartAddr.locality || 'Store',
-      building:  dfStartAddr.building  || dfStartAddr.locality || 'NA',
-      locality:  dfStartAddr.locality  || 'Bengaluru',
-      city:      dfStartAddr.city      || 'Bengaluru',
-      area_code: dfStartAddr.area_code || '560001',
-      state:     dfStartAddr.state     || 'Karnataka',
-      country:   dfStartAddr.country   || 'IND',
-    },
-  };
   const rtoEnd = {
-    location: rtoEndLocation,
-    contact:  dfStart.contact || { phone: '9999999999', email: 'support@store.in' },
-    person:   dfStart.person  || { name: 'Store Manager' },
-    time:     { range: { start: t1h, end: t2h }, timestamp: t2h },
+    location: {
+      id:         dfStartLoc.id         || 'l1',
+      descriptor: dfStartLoc.descriptor || { name: 'Store' },
+      gps:        dfStartLoc.gps        || '12.9716,77.5946',
+      address: {
+        locality:  dfStartAddr.locality  || 'Bengaluru',
+        city:      dfStartAddr.city      || 'Bengaluru',
+        area_code: dfStartAddr.area_code || '560001',
+        state:     dfStartAddr.state     || 'Karnataka',
+      },
+    },
+    contact: dfStart.contact || { phone: '9999999999', email: 'support@store.in' },
   };
 
   return {
-    id:   'rto1',
-    type: 'RTO',
+    id:    'rto1',
+    type:  'RTO',
     state: { descriptor: { code: rtoState } },
     start: rtoStart,
     end:   rtoEnd,
-    tags:  quoteTrailTags.length > 0 ? quoteTrailTags : [{
-      code: 'quote_trail',
-      list: [
-        { code: 'type',     value: 'item' },
-        { code: 'id',       value: '' },
-        { code: 'currency', value: 'INR' },
-        { code: 'value',    value: '0' },
-      ],
-    }],
+    tags:  quoteTrailTags.length > 0 ? quoteTrailTags : [],
   };
 };
 
@@ -2658,28 +2676,70 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
   // RTO states: Delivery state = Cancelled + separate RTO fulfillment with locations/tags
   const isRto = fulfillmentState === 'RTO-Delivered' || fulfillmentState === 'RTO-Initiated';
 
-  const deliveryFulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
-    buildFulfillmentWithLocation(f, vendor, isRto ? 'Cancelled' : fulfillmentState, now)
-  );
-
-  const deliveryF = deliveryFulfillments[0] || null;
-
-  // For RTO: include Cancel fulfillment for part-cancelled item + RTO fulfillment with RTO-only quote_trail
   let fulfillments;
   let statusItems = order.items;
+  let statusQuote = order.quote;
+
   if (isRto) {
+    const subscriberId = process.env.ONDC_SUBSCRIBER_ID || 'ondc.cottkart.com';
     const allItems = order.items || [];
     const partCancelledId = allItems[0]?.id;
     const rtoOnlyItems = allItems.length > 1 ? allItems.slice(1) : allItems;
+    const deliveryF = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }])[0];
+    const fid = deliveryF.id || 'f1';
+    const rtoPhone = (vendor?.phone || '9999999999').replace(/^\+91/, '');
+    const rtoGps = normalizeGps(vendor?.gps);
+    const rt1h  = new Date(Date.now() + 1 * 3600 * 1000).toISOString();
+    const rt2h  = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
+    const rt24h = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+    const rt48h = new Date(Date.now() + 48 * 3600 * 1000).toISOString();
 
-    // Build items: part-cancelled → c1, remaining → count=0 on delivery + rto1
+    // Build Cancelled delivery fulfillment — minimal fields (no @ondc/org/category, no instructions)
+    const cancelledDelivery = {
+      id:   fid,
+      type: 'Delivery',
+      state: { descriptor: { code: 'Cancelled' } },
+      tracking: false,
+      '@ondc/org/provider_name': vendor?.business_name || '',
+      '@ondc/org/TAT':           deliveryF['@ondc/org/TAT'] || 'PT24H',
+      start: {
+        location: {
+          id: 'l1', descriptor: { name: vendor?.business_name || 'Store' },
+          gps: rtoGps,
+          address: { locality: vendor?.address || vendor?.city || 'Bengaluru', city: vendor?.city || 'Bengaluru', area_code: vendor?.pincode || '560001', state: vendor?.state || 'Karnataka' },
+        },
+        contact: { phone: rtoPhone, email: vendor?.email || 'support@store.in' },
+        time: { range: { start: rt1h, end: rt2h }, timestamp: rt1h },
+      },
+      end: {
+        person:   deliveryF.end?.person  || { name: 'Buyer' },
+        contact:  deliveryF.end?.contact || { email: '', phone: '' },
+        location: {
+          gps: deliveryF.end?.location?.gps || '12.9716,77.5946',
+          address: deliveryF.end?.location?.address || { name: 'Buyer', locality: 'Bengaluru', city: 'Bengaluru', state: 'Karnataka', country: 'IND', area_code: '560001' },
+        },
+        time: { range: { start: rt24h, end: rt48h } },
+      },
+      tags: [
+        { code: 'cancel_request', list: [
+          { code: 'retry_count', value: '3' }, { code: 'rto_id', value: 'rto1' },
+          { code: 'reason_id', value: '013' }, { code: 'initiated_by', value: subscriberId },
+        ]},
+        { code: 'precancel_state', list: [
+          { code: 'fulfillment_state', value: 'Out-for-delivery' },
+          { code: 'updated_at', value: order.updated_at || now },
+        ]},
+      ],
+    };
+
+    // Build items: stripped to {id, quantity, fulfillment_id}
     const builtItems = [];
     for (const item of allItems) {
       if (item.id === partCancelledId && allItems.length > 1) {
-        builtItems.push({ ...item, quantity: { count: 0 } });
+        builtItems.push({ id: item.id, quantity: { count: 0 }, fulfillment_id: fid });
         builtItems.push({ id: item.id, quantity: { count: item.quantity?.count || 1 }, fulfillment_id: 'c1' });
       } else {
-        builtItems.push({ ...item, quantity: { count: 0 } });
+        builtItems.push({ id: item.id, quantity: { count: 0 }, fulfillment_id: fid });
         if ((item.quantity?.count || 0) > 0) {
           builtItems.push({ id: item.id, quantity: { count: item.quantity.count }, fulfillment_id: 'rto1' });
         }
@@ -2687,33 +2747,46 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
     }
     statusItems = builtItems;
 
-    // Cancel fulfillment for part-cancelled item
+    // Cancel fulfillment with cancel_request + quote_trail tags
+    const cancelledPrice = parseFloat(
+      order.quote?.breakup?.find(b => b['@ondc/org/item_id'] === partCancelledId && b['@ondc/org/title_type'] === 'item')?.item?.price?.value || '0'
+    );
+    const cancelledQty = allItems[0]?.quantity?.count || 1;
     const cancelFl = {
       id: 'c1', type: 'Cancel', state: { descriptor: { code: 'Cancelled' } },
-      tags: [{ code: 'quote_trail', list: [
-        { code: 'type', value: 'item' }, { code: 'id', value: partCancelledId || '' },
-        { code: 'currency', value: 'INR' }, { code: 'value', value: '0' },
-      ]}],
+      tags: [
+        { code: 'cancel_request', list: [
+          { code: 'reason_id', value: '002' }, { code: 'initiated_by', value: subscriberId },
+        ]},
+        { code: 'quote_trail', list: [
+          { code: 'type', value: 'item' }, { code: 'id', value: partCancelledId || '' },
+          { code: 'currency', value: 'INR' }, { code: 'value', value: `-${(cancelledPrice * cancelledQty).toFixed(2)}` },
+        ]},
+      ],
     };
 
-    // RTO fulfillment with quote_trail for RTO items only
+    // RTO fulfillment
     const rtoQuote = { ...order.quote, breakup: (order.quote?.breakup || []).filter(b =>
       rtoOnlyItems.some(ri => ri.id === b['@ondc/org/item_id']) || !['item'].includes(b['@ondc/org/title_type'])
     )};
-    fulfillments = [...deliveryFulfillments, cancelFl, buildRtoFulfillment(fulfillmentState, '013', { ...order, quote: rtoQuote }, deliveryF)];
-  } else {
-    fulfillments = deliveryFulfillments;
-  }
+    const rtoFl = buildRtoFulfillment(fulfillmentState, '013', { ...order, quote: rtoQuote }, cancelledDelivery);
+    // For RTO-Delivered: add end.time.timestamp per spec
+    if (fulfillmentState === 'RTO-Delivered') {
+      rtoFl.end.time = { timestamp: now };
+    }
+    fulfillments = [cancelledDelivery, cancelFl, rtoFl];
 
-  // For RTO on_status: zero out quote (same as on_cancel)
-  let statusQuote = order.quote;
-  if (isRto) {
+    // Zero out quote for RTO states
     statusQuote = JSON.parse(JSON.stringify(order.quote || { price: { currency: 'INR', value: '0' }, breakup: [], ttl: 'P1D' }));
     if (statusQuote.price) statusQuote.price.value = '0.00';
-    (statusQuote.breakup || []).forEach(item => {
-      if (item.price) item.price.value = '0.00';
-      if (item['@ondc/org/item_quantity']) item['@ondc/org/item_quantity'].count = 0;
+    (statusQuote.breakup || []).forEach(b => {
+      if (b.price) b.price.value = '0.00';
+      if (b['@ondc/org/item_quantity']) b['@ondc/org/item_quantity'].count = 0;
     });
+  } else {
+    fulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
+      buildFulfillmentWithLocation(f, vendor, fulfillmentState, now)
+    );
   }
 
   return {
@@ -2725,7 +2798,7 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
     fulfillments,
     quote:     statusQuote,
     payment: {
-      ...order.payment,
+      ...(order.payment || {}),
       '@ondc/org/settlement_details': buildSettlementDetails(),
       status: (order.payment?.type === 'ON-FULFILLMENT')
         ? (fulfillmentState === 'Order-delivered' || orderState === 'Completed' ? 'PAID' : 'NOT-PAID')
@@ -2733,7 +2806,7 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
     },
     tags:       ORDER_TAGS,
     created_at: order.created_at || now,
-    updated_at: order.updated_at || now,
+    updated_at: now,
   };
 };
 
