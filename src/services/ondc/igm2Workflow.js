@@ -251,15 +251,14 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
         s.state = 'PROPOSING';
         defer(key, s, 'PROPOSING', () => sendResolutionProposed(s));
 
-      // ── RESOLUTION_REJECTED: re-process, then defer NEED-MORE-INFO ────────
+      // ── RESOLUTION_REJECTED: re-process, then defer RESOLUTION_PROPOSED ───
       } else if (code === 'RESOLUTION_REJECTED' && s.state === 'AWAITING_DECISION') {
         s.escalated = false; // rejection resets to re-evaluation
         s.actions.push(makeAction(s, 'PROCESSING', incoming.ref_id));
         s.status = 'PROCESSING';
         await emit(s, context);
-        s.state = 'PROCESSING';
-        defer(key, s, 'PROCESSING', () =>
-          sendNeedMoreInfo(s, 'Please share additional details to help process your refund'));
+        s.state = 'PROPOSING';
+        defer(key, s, 'PROPOSING', () => sendResolutionProposed(s));
 
       // ── ESCALATED: mark escalated, send PROCESSING, defer RESOLUTION_PROPOSED
       } else if (code === 'ESCALATED' && ['AWAITING_DECISION', 'PROCESSING'].includes(s.state)) {
