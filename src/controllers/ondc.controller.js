@@ -1211,7 +1211,8 @@ const handleConfirm = async (req, res) => {
 
         for (const step of steps) {
           if (isCancelled()) { logger.info('Auto on_status aborted (order cancelled)', { order_id: order.id }); return; }
-          if (step.fulfillmentState === 'Order-delivered' && isMerchantRto(confirmedOrderCache.get(order.id))) continue;
+          // Merchant RTO: skip Pending (spec starts at Packed after part-cancel on_update) and Order-delivered (RTO cancel follows Out-for-delivery)
+          if (isMerchantRto(confirmedOrderCache.get(order.id)) && (step.fulfillmentState === 'Pending' || step.fulfillmentState === 'Order-delivered')) continue;
 
           // Skip states already sent early by logistics block (Packed, Agent-assigned at T=0s)
           // Works for both retail and logistics orders.
@@ -1428,9 +1429,9 @@ const handleConfirm = async (req, res) => {
           if (!isCurrentRun() || cancelledOrders.has(order.id)) return;
           const items = order.items || [];
           if (items.length < 2 && !isMerchantRto(confirmedOrderCache.get(order.id))) return;
-          await sendPartialCancelOnUpdate(context, order, vendor, tenant, order.updated_at || now);
           const ce = confirmedOrderCache.get(order.id);
-          if (ce) ce.partCancelSent = true;
+          if (ce) ce.partCancelSent = true; // Set BEFORE send to avoid race with incoming update
+          await sendPartialCancelOnUpdate(context, order, vendor, tenant, order.updated_at || now);
           logger.info('Auto merchant on_update (part-cancel) sent', { order_id: order.id });
         } catch (e) {
           logger.warn('Auto merchant on_update failed (non-blocking):', e.message);
