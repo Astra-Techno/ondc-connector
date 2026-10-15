@@ -1393,6 +1393,10 @@ const handleConfirm = async (req, res) => {
           (cancelQuote.breakup || []).forEach(b => {
             if (b.price) b.price.value = '0.00';
             if (b['@ondc/org/item_quantity']) b['@ondc/org/item_quantity'].count = 0;
+            if (b.item?.tags) {
+              b.item.tags = b.item.tags.filter(t => t.code !== 'quote');
+              if (!b.item.tags.length) delete b.item.tags;
+            }
           });
 
           // Build RTO fulfillment with quote_trail only for RTO items
@@ -2420,13 +2424,15 @@ const buildRtoFulfillment = (rtoState, reasonId, order, deliveryFulfillment) => 
 
   const now = new Date().toISOString();
 
-  // RTO start = buyer location (from delivery end) — minimal per spec
+  // RTO start = buyer location (from delivery end)
   const dfEnd = deliveryFulfillment?.end || {};
   const dfEndLoc = dfEnd.location || {};
   const dfEndAddr = dfEndLoc.address || {};
   const rtoStart = {
     contact:  dfEnd.contact || { phone: '9999999999', email: 'buyer@example.com' },
     location: {
+      id:         dfEndLoc.id         || 'buyer_loc',
+      descriptor: dfEndLoc.descriptor || { name: 'Buyer Address' },
       gps: dfEndLoc.gps || '12.9716,77.5946',
       address: {
         name:      dfEndAddr.name      || dfEndAddr.locality || 'Buyer Address',
@@ -2438,23 +2444,27 @@ const buildRtoFulfillment = (rtoState, reasonId, order, deliveryFulfillment) => 
         area_code: dfEndAddr.area_code || '560001',
       },
     },
-    time: { timestamp: now },
+    time: { range: { start: now, end: now }, timestamp: now },
   };
 
-  // RTO end = seller location (from delivery start) — with id/descriptor per spec
+  // RTO end = seller location (from delivery start)
   const dfStart = deliveryFulfillment?.start || {};
   const dfStartLoc = dfStart.location || {};
   const dfStartAddr = dfStartLoc.address || {};
   const rtoEnd = {
+    person: dfStart.person || dfEnd.person || { name: 'Buyer' },
     location: {
       id:         dfStartLoc.id         || 'l1',
       descriptor: dfStartLoc.descriptor || { name: 'Store' },
       gps:        dfStartLoc.gps        || '12.9716,77.5946',
       address: {
+        name:      dfStartAddr.name      || dfStartAddr.locality || 'Store',
+        building:  dfStartAddr.building  || 'NA',
         locality:  dfStartAddr.locality  || 'Bengaluru',
         city:      dfStartAddr.city      || 'Bengaluru',
         area_code: dfStartAddr.area_code || '560001',
         state:     dfStartAddr.state     || 'Karnataka',
+        country:   dfStartAddr.country   || 'IND',
       },
     },
     contact: dfStart.contact || { phone: '9999999999', email: 'support@store.in' },
@@ -2782,6 +2792,10 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
     (statusQuote.breakup || []).forEach(b => {
       if (b.price) b.price.value = '0.00';
       if (b['@ondc/org/item_quantity']) b['@ondc/org/item_quantity'].count = 0;
+      if (b.item?.tags) {
+        b.item.tags = b.item.tags.filter(t => t.code !== 'quote');
+        if (!b.item.tags.length) delete b.item.tags;
+      }
     });
   } else {
     fulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
