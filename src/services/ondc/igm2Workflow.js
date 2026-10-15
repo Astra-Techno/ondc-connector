@@ -270,7 +270,8 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
         defer(key, s, 'PROPOSING', () => sendResolutionProposed(s));
 
       // ── RESOLUTION_ACCEPTED: send RESOLVED ────────────────────────────────
-      } else if (code === 'RESOLUTION_ACCEPTED' && s.state === 'AWAITING_DECISION') {
+      // Also accept from AWAITING_INFO — Workbench may skip INFO_PROVIDED/RESOLUTION_PROPOSED
+      } else if (code === 'RESOLUTION_ACCEPTED' && ['AWAITING_DECISION', 'AWAITING_INFO'].includes(s.state)) {
         // Determine which resolution was accepted from incoming ref_id
         if (incoming.ref_id) {
           const accepted = s.resolutions.find(r => r.id === incoming.ref_id);
