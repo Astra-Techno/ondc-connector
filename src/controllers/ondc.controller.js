@@ -88,9 +88,8 @@ const igm2Workflow = createIgm2Workflow({
     const entry = confirmedOrderCache.get(orderId);
     if (!entry || entry.tenantId !== session.tenant.id || entry.context.transaction_id !== context.transaction_id) throw new Error('IGM closure order is unavailable');
     const payload = buildStatusPayload(orderId, entry.order, 'Order-delivered', 'Completed', entry.vendor);
-    const outcome = session.selected?.descriptor?.code;
-    const api = outcome === 'NO_ACTION' ? 'on_status' : 'on_update';
-    const order = api === 'on_status' ? payload : buildIgmOrderUpdate(session.issue, payload, session.selected);
+    const order = buildIgmOrderUpdate(session.issue, payload, session.selected);
+    const api = 'on_update';
     const result = await sendCallback(context.bap_uri, api, { ...context, message_id: uuidv4() }, { order }, session.tenant);
     if (result?.message?.ack?.status !== 'ACK') throw new Error('IGM final order callback was not acknowledged');
     entry.order = order;
