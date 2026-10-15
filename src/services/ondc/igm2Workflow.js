@@ -252,7 +252,7 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
         defer(key, s, 'PROPOSING', () => sendResolutionProposed(s));
 
       // ── RESOLUTION_REJECTED: re-process, then defer RESOLUTION_PROPOSED ───
-      } else if (code === 'RESOLUTION_REJECTED' && s.state === 'AWAITING_DECISION') {
+      } else if (code === 'RESOLUTION_REJECTED' && ['AWAITING_DECISION', 'AWAITING_INFO'].includes(s.state)) {
         s.escalated = false; // rejection resets to re-evaluation
         s.actions.push(makeAction(s, 'PROCESSING', incoming.ref_id));
         s.status = 'PROCESSING';
@@ -261,7 +261,7 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
         defer(key, s, 'PROPOSING', () => sendResolutionProposed(s));
 
       // ── ESCALATED: mark escalated, send PROCESSING, defer RESOLUTION_PROPOSED
-      } else if (code === 'ESCALATED' && ['AWAITING_DECISION', 'PROCESSING'].includes(s.state)) {
+      } else if (code === 'ESCALATED' && ['AWAITING_DECISION', 'AWAITING_INFO', 'PROCESSING'].includes(s.state)) {
         s.escalated = true;
         s.actions.push(makeAction(s, 'PROCESSING', incoming.id));
         s.status = 'PROCESSING';
