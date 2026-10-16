@@ -20,6 +20,7 @@ const {
 //                     logisticsOrderId, logisticsConfirmed,
 //                     logisticsDelivered, retailCancelled }
 const logisticsOrderCache = new Map();
+const logisticsStatusQueues = new Map();
 
 // Lookup by logistics transaction_id (used in callbacks which carry ls txn_id)
 const getByLsTxn = (txnId) => {
@@ -30,7 +31,7 @@ const getByLsTxn = (txnId) => {
 };
 
 // Called by handleConfirm after successful retail on_confirm + logistics /search
-const startLogisticsFlow = async (retailOrder, retailContext, tenant, lsSearchResult, vendor = null) => {
+const startLogisticsFlow = async (retailOrder, retailContext, tenant, lsSearchResult, vendor = null, onRetailState = null) => {
   const { txnId, lsContext } = lsSearchResult;
   const deliveryFl = (retailOrder.fulfillments || []).find(f => f.type === 'Delivery')
     || retailOrder.fulfillments?.[0] || null;
@@ -42,6 +43,7 @@ const startLogisticsFlow = async (retailOrder, retailContext, tenant, lsSearchRe
     retailOrder,
     tenant,
     vendor,
+    onRetailState,
     retailDeliveryFl: deliveryFl,
     lspProvider:        null,
     lsOrder:            null,
@@ -178,8 +180,6 @@ const LS_TO_RETAIL_STATE = {
   'Cancelled':          'Cancelled',
 };
 
-const TERMINAL_STATES = new Set(['Order-delivered', 'Cancelled', 'RTO-Delivered']);
-
 // Build a logistics-relayed fulfillment with all required ONDC fields
 const buildLogisticsRelayFulfillment = (f, vendor, retailState, now) => {
   const t1h  = new Date(new Date(now).getTime() +  1 * 3600 * 1000).toISOString();
@@ -230,7 +230,7 @@ const buildLogisticsRelayFulfillment = (f, vendor, retailState, now) => {
 /**
  * on_status from LSP — relay as retail on_status to BAP
  */
-const handleLogisticsOnStatus = async (body) => {
+const processLogisticsStatus = async (body) => {
   const { context, message } = body;
   const txnId = context?.transaction_id;
   logger.info('Logistics on_status received', { txnId });
@@ -247,7 +247,12 @@ const handleLogisticsOnStatus = async (body) => {
   const lsState       = lsFulfillment?.state?.descriptor?.code || 'Order-delivered';
 
   const retailState = LS_TO_RETAIL_STATE[lsState] || lsState;
-  const orderState  = TERMINAL_STATES.has(retailState) ? 'Completed' : 'In-progress';
+  const orderState = ['Cancelled', 'RTO-Initiated', 'RTO-Delivered'].includes(retailState)
+    ? 'Cancelled' : retailState === 'Order-delivered' ? 'Completed' : 'In-progress';
+  const progression = ['Packed', 'Agent-assigned', 'Order-picked-up', 'Out-for-delivery', 'Order-delivered'];
+  if (entry.lastRetailState === retailState ||
+      (progression.includes(entry.lastRetailState) && progression.includes(retailState) &&
+       progression.indexOf(retailState) < progression.indexOf(entry.lastRetailState))) return;
 
   // Track that LSP has delivered (used to skip auto-status Order-delivered for logistics orders)
   if (retailState === 'Order-delivered') {
@@ -283,8 +288,22 @@ const handleLogisticsOnStatus = async (body) => {
   };
 
   const retailCtx = { ...entry.retailContext, message_id: uuidv4() };
-  await sendCallback(retailCtx.bap_uri, 'on_status', retailCtx, { order: statusPayload }, entry.tenant);
+  const result = await sendCallback(retailCtx.bap_uri, 'on_status', retailCtx, { order: statusPayload }, entry.tenant);
+  if (result?.message?.ack?.status !== 'ACK') return;
+  entry.lastRetailState = retailState;
+  if (entry.onRetailState) entry.onRetailState(retailState);
   logger.info('Retail on_status relayed from logistics', { orderId, retailState, orderState });
+};
+
+const handleLogisticsOnStatus = body => {
+  const txnId = body.context?.transaction_id;
+  const previous = logisticsStatusQueues.get(txnId) || Promise.resolve();
+  const current = previous.catch(() => {}).then(() => processLogisticsStatus(body));
+  logisticsStatusQueues.set(txnId, current);
+  current.finally(() => {
+    if (logisticsStatusQueues.get(txnId) === current) logisticsStatusQueues.delete(txnId);
+  }).catch(() => {});
+  return current;
 };
 
 /**

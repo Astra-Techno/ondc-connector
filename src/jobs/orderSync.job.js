@@ -33,8 +33,9 @@ const runOrderSync = async () => {
       JOIN tenant_ondc_config oc ON oc.tenant_id = o.tenant_id AND oc.is_active = 1
       WHERE o.status NOT IN ('delivered', 'cancelled', 'returned')
         AND o.cottkart_order_id IS NOT NULL
+        AND COALESCE(o.bap_id, '') <> ? AND COALESCE(o.bap_id, '') NOT LIKE 'pramaan.ondc.org%'
       LIMIT 100
-    `);
+    `, [process.env.WORKBENCH_BAP_ID || 'workbench.ondc.tech']);
 
     for (const order of orders) {
       try {
@@ -87,7 +88,8 @@ const runOrderSync = async () => {
 
         // Build fulfillments array — preserve original fulfillment data, update state
         const fulfillments = storedFulfillment
-          ? [{ ...storedFulfillment, state: { descriptor: { code: mapped.fulfillmentState } }, tracking: Boolean(ckData.tracking_url) }]
+          ? (Array.isArray(storedFulfillment) ? storedFulfillment : [storedFulfillment]).map(f =>
+              ({ ...f, state: { descriptor: { code: mapped.fulfillmentState } }, tracking: Boolean(ckData.tracking_url) }))
           : [{ id: 'f1', type: 'Delivery', state: { descriptor: { code: mapped.fulfillmentState } }, tracking: Boolean(ckData.tracking_url) }];
 
         // Build tracking tag if URL available

@@ -53,8 +53,9 @@ const confirmedOrderCache = new Map();
 let lastConfirmedOrderId = null; // track most recent for /latest shortcut
 // Track cancelled orders so auto-sequence can abort
 const cancelledOrders = new Set();
-// Forced out-of-stock items for Flow 5 testing (cleared on server restart or via trigger)
+// Forced out-of-stock items for Flow 5 testing (cleared after first OOS on_select)
 const forcedOutOfStockItems = new Set();
+let oosAutoFired = false; // one-shot flag: auto-OOS fires only once per server session
 
 // In-memory cache: issue_id → { issue, context } (for proactive on_issue_status)
 const issueCache = new Map();
@@ -874,6 +875,14 @@ const handleSelect = async (req, res) => {
         }
       }
 
+      // Auto-OOS for Workbench Flow 5: if no items are naturally OOS and auto-OOS
+      // hasn't fired yet this session, pick one random item as OOS.
+      // One-shot flag prevents other flows from being affected.
+      if (outOfStockItems.length === 0 && !oosAutoFired && isCertificationContext(context) && items.length > 0) {
+        const randomItem = items[Math.floor(Math.random() * items.length)];
+        outOfStockItems.push(randomItem.id);
+        logger.info('Auto-OOS: picked random item for Workbench OOS flow', { item_id: randomItem.id });
+      }
 
       // Mark forced OOS items as count:"0" in quote breakup and zero their price/qty
       if (outOfStockItems.length > 0 && quote?.breakup) {
@@ -933,18 +942,19 @@ const handleSelect = async (req, res) => {
       // Only include error block when items are actually out of stock (ONDC spec 40002)
       if (outOfStockItems.length > 0) {
         payload.error = makeError(SELLER.ITEM_QTY_UNAVAILABLE,
-          JSON.stringify(outOfStockItems.map(id => ({ item_id: String(id), error: '40002' }))),
+          JSON.stringify({ item_id: String(outOfStockItems[0]), error: '40002' }),
         );
         logger.warn('Out of stock items in /select', { outOfStockItems });
       }
 
       await sendCallback(context.bap_uri, 'on_select', context, payload, tenant);
 
-      // Clear forcedOutOfStockItems after sending OOS on_select so subsequent
-      // flows (normal prepaid, return, etc.) don't get a stale error block.
+      // Mark auto-OOS as fired and clear forced items so subsequent flows aren't affected.
+      // To re-arm: restart server or POST /trigger/set-out-of-stock.
       if (outOfStockItems.length > 0) {
+        oosAutoFired = true;
         forcedOutOfStockItems.clear();
-        logger.info('Cleared forcedOutOfStockItems after OOS on_select sent');
+        logger.info('OOS on_select sent; auto-OOS armed off for remaining session');
       }
     } catch (err) {
       logger.error('handleSelect processing failed:', err.message);
@@ -4027,6 +4037,7 @@ const triggerSetOutOfStock = (req, res) => {
   const ids = item_ids || (item_id ? [item_id] : []);
   if (!ids.length) return res.status(400).json({ error: 'Provide item_id or item_ids array' });
   for (const id of ids) forcedOutOfStockItems.add(String(id));
+  oosAutoFired = false; // re-arm auto-OOS
   logger.info('forcedOutOfStockItems set', { items: [...forcedOutOfStockItems] });
   res.json({ success: true, forcedOutOfStockItems: [...forcedOutOfStockItems] });
 };

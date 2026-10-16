@@ -7,5 +7,6 @@ router.use(resolveTenant);
 router.get('/', getOrders);
 router.get('/:order_id', getOrder);
 router.put('/:order_id/status', updateOrderStatus);
+router.put('/:order_id/workflow', require('../controllers/ondc.controller').setWorkflowProfile);
 
 module.exports = router;

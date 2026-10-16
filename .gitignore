@@ -7,3 +7,5 @@ dist/
 test-catalog.js
 dashboard/.env.development
 dashboard/.env.production
+.workbench-spec-reference/
+.igm-spec-reference/
