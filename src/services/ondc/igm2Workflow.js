@@ -148,6 +148,7 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
 
     s.actions.push(makeAction(s, 'RESOLUTION_PROPOSED', parentId));
     s.status = 'RESOLVED';
+    s.proposalSent = true;
     await emit(s, s.context, true);
     s.state = 'AWAITING_DECISION';
     await persist(s, 'in_progress');
