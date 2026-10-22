@@ -145,6 +145,7 @@ const buildInitTags = (vendor) => [{
     { code: 'np_type',               value: 'MSN'      },
     { code: 'tax_number',            value: vendor?.gst_number || process.env.ONDC_GST_NUMBER || '07AAACN0000A1Z5' },
     { code: 'provider_tax_number',   value: vendor?.pan_number || process.env.ONDC_PROVIDER_PAN || 'AAACN0000A' },
+    { code: 'accept_bap_terms',      value: 'Y'        },
   ],
 }];
 
@@ -281,13 +282,6 @@ const buildFulfillmentWithLocation = (f, vendor, stateCode, now) => {
       time: { range: { start: t24h, end: t48h }, timestamp: t48h },
     },
   };
-
-  // Add documents section for Order-picked-up (proof of pickup / invoice)
-  if (stateCode === 'Order-picked-up') {
-    result.documents = [
-      { url: 'https://ondc.cottkart.com/invoice/proforma_invoice.pdf', label: 'PROFORMA_INVOICE' },
-    ];
-  }
 
   return result;
 };
@@ -569,6 +563,20 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         ],
       };});
 
+      // Add a test item with price > maximum_value (needed for Catalog Rejection flow)
+      if (items.length > 0) {
+        const refItem = items[0];
+        items.push({
+          ...refItem,
+          id: `${refItem.id}-GCR`,
+          descriptor: { ...refItem.descriptor, name: `${refItem.descriptor.name} (Test)`, code: `5:${refItem.id}-GCR` },
+          price: {
+            currency: 'INR',
+            value:         String((parseFloat(String(refItem.price?.maximum_value || refItem.price?.value || '100')) * 1.1).toFixed(2)),
+            maximum_value: refItem.price?.maximum_value || refItem.price?.value || '100.00',
+          },
+        });
+      }
 
       // Ensure GPS has 6+ decimal places
       const rawGps = vendor.gps || '13.0827,80.2707';
@@ -2813,6 +2821,12 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
     );
   }
 
+  // Documents at order level for Order-picked-up, Out-for-delivery, Order-delivered
+  const docStates = ['Order-picked-up', 'Out-for-delivery', 'Order-delivered'];
+  const documents = docStates.includes(fulfillmentState) ? [
+    { url: 'https://ondc.cottkart.com/invoice/proforma_invoice.pdf', label: 'PROFORMA_INVOICE' },
+  ] : undefined;
+
   return {
     id:       order_id,
     state:    orderState,
@@ -2828,6 +2842,7 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
         ? (fulfillmentState === 'Order-delivered' || orderState === 'Completed' ? 'PAID' : 'NOT-PAID')
         : 'PAID',
     },
+    ...(documents ? { documents } : {}),
     tags:       ORDER_TAGS,
     created_at: order.created_at || now,
     updated_at: now,
@@ -3133,7 +3148,7 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
       { ref_id: origIssue.order_details?.id || origIssue.id || '', ref_type: 'ORDER' },
       ...(origIssue.order_details?.items || []).map(i => ({ ref_id: i.id || '', ref_type: 'ITEM' })),
     ],
-    // IGM actors — CONSUMER + INTERFACING_NP (BPP) + COUNTERPARTY_NP (BAP)
+    // IGM actors — CONSUMER + INTERFACING_NP (BAP, raises issue) + COUNTERPARTY_NP (BPP, seller)
     actors: (origIssue.actors && origIssue.actors.length > 0) ? origIssue.actors : [
       {
         id: origContext?.bap_id || origIssue.complainant_id || '',
@@ -3147,24 +3162,24 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
         },
       },
       {
-        id: bppSubscriberId,
-        type: 'INTERFACING_NP',
-        info: {
-          person: { name: 'Support Desk' },
-          contact: {
-            phone: process.env.SUPPORT_PHONE || '+919999999999',
-            email: process.env.SUPPORT_EMAIL || 'support@cottkart.com',
-          },
-        },
-      },
-      {
         id: origContext?.bap_id || origIssue.complainant_id || '',
-        type: 'COUNTERPARTY_NP',
+        type: 'INTERFACING_NP',
         info: {
           person: { name: origIssue.complainant_info?.person?.name || 'Buyer App' },
           contact: {
             phone: origIssue.complainant_info?.contact?.phone || '',
             email: origIssue.complainant_info?.contact?.email || '',
+          },
+        },
+      },
+      {
+        id: bppSubscriberId,
+        type: 'COUNTERPARTY_NP',
+        info: {
+          person: { name: 'Support Desk' },
+          contact: {
+            phone: process.env.SUPPORT_PHONE || '+919999999999',
+            email: process.env.SUPPORT_EMAIL || 'support@cottkart.com',
           },
         },
       },

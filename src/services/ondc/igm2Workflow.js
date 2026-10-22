@@ -39,9 +39,9 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
 
   const merge = (...groups) => [...new Map(groups.flat().filter(a => a?.id).map(a => [a.id, a])).values()];
 
-  const makeAction = (s, code, refId) => ({
+  const makeAction = (s, code, refId, extra = {}) => ({
     id: randomUUID(),
-    descriptor: { code, short_desc: code.replace(/_/g, ' ') },
+    descriptor: { code, short_desc: code.replace(/_/g, ' '), ...extra },
     updated_at: new Date().toISOString(),
     action_by: s.respondentId,
     actor_details: { name: 'Support Desk' },
@@ -89,7 +89,9 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
 
   // Send NEED-MORE-INFO with additional_info_required
   const sendNeedMoreInfo = async (s, desc) => {
-    s.actions.push(makeAction(s, 'NEED-MORE-INFO'));
+    s.infoRequestCount = (s.infoRequestCount || 0) + 1;
+    const infoName = s.infoRequestCount <= 1 ? 'INFO001' : `INFO${String(s.infoRequestCount).padStart(3, '0')}`;
+    s.actions.push(makeAction(s, 'NEED-MORE-INFO', undefined, { name: infoName }));
     await emit(s, s.context, true, 'on_issue', {
       additional_info_required: [{
         info_required: {
@@ -246,7 +248,7 @@ const createIgm2Workflow = ({ send, persist, onClose, getRefundAmount, schedule 
 
       // ── INFO_PROVIDED: send PROCESSING (ack), then defer RESOLUTION_PROPOSED
       } else if (code === 'INFO_PROVIDED' && s.state === 'AWAITING_INFO') {
-        s.actions.push(makeAction(s, 'PROCESSING', incoming.ref_id));
+        s.actions.push(makeAction(s, 'PROCESSING'));
         s.status = 'PROCESSING';
         await emit(s, context);
         s.state = 'PROPOSING';
