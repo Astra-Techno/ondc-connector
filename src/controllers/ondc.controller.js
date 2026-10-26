@@ -55,7 +55,8 @@ let lastConfirmedOrderId = null; // track most recent for /latest shortcut
 const cancelledOrders = new Set();
 // Forced out-of-stock items for Flow 5 testing (cleared after first OOS on_select)
 const forcedOutOfStockItems = new Set();
-let oosAutoFired = false; // one-shot flag: auto-OOS fires only once per server session
+// Per-transaction OOS tracking: prevents double-injection within the same OOS flow
+const oosInjectedTxns = new Set();
 
 // In-memory cache: issue_id → { issue, context } (for proactive on_issue_status)
 const issueCache = new Map();
@@ -874,18 +875,23 @@ const handleSelect = async (req, res) => {
         ? await buildQuote(items, tenantId)
         : { quote: { price: { currency: 'INR', value: '30' }, breakup: [], ttl: 'P1D' }, outOfStockItems: [] };
 
-      // Merge forced out-of-stock items (Flow 5 testing via /trigger/set-out-of-stock)
-      const outOfStockItems = [...dbOutOfStock];
-      for (const item of items) {
-        if (forcedOutOfStockItems.has(item.id) && !outOfStockItems.includes(item.id)) {
-          outOfStockItems.push(item.id);
+      // If this is the second select in a transaction where we already injected OOS,
+      // suppress any DB-detected OOS — the BAP is proceeding with remaining items.
+      const isOosRetrySelect = oosInjectedTxns.has(context.transaction_id);
+      const outOfStockItems = isOosRetrySelect ? [] : [...dbOutOfStock];
+      if (!isOosRetrySelect) {
+        for (const item of items) {
+          if (forcedOutOfStockItems.has(item.id) && !outOfStockItems.includes(item.id)) {
+            outOfStockItems.push(item.id);
+          }
         }
       }
 
-      // Auto-OOS for Workbench Flow 5: if no items are naturally OOS and auto-OOS
-      // hasn't fired yet this session, pick one random item as OOS.
-      // One-shot flag prevents other flows from being affected.
-      if (outOfStockItems.length === 0 && !oosAutoFired && isCertificationContext(context) && items.length > 0) {
+      // Auto-OOS for Workbench Flow 5: detect OOS flow by parent_item_id presence
+      // (variant items). Only inject on first select per transaction to avoid
+      // double-injection on the second select within the same OOS flow.
+      const hasVariantItems = items.some(i => i.parent_item_id);
+      if (outOfStockItems.length === 0 && hasVariantItems && !isOosRetrySelect && isCertificationContext(context) && items.length > 0) {
         const randomItem = items[Math.floor(Math.random() * items.length)];
         outOfStockItems.push(randomItem.id);
         logger.info('Auto-OOS: picked random item for Workbench OOS flow', { item_id: randomItem.id });
@@ -956,12 +962,11 @@ const handleSelect = async (req, res) => {
 
       await sendCallback(context.bap_uri, 'on_select', context, payload, tenant);
 
-      // Mark auto-OOS as fired and clear forced items so subsequent flows aren't affected.
-      // To re-arm: restart server or POST /trigger/set-out-of-stock.
+      // Track this transaction so second select in same OOS flow doesn't re-inject
       if (outOfStockItems.length > 0) {
-        oosAutoFired = true;
+        oosInjectedTxns.add(context.transaction_id);
         forcedOutOfStockItems.clear();
-        logger.info('OOS on_select sent; auto-OOS armed off for remaining session');
+        logger.info('OOS on_select sent for txn', { transaction_id: context.transaction_id });
       }
     } catch (err) {
       logger.error('handleSelect processing failed:', err.message);
@@ -4051,7 +4056,7 @@ const triggerSetOutOfStock = (req, res) => {
   const ids = item_ids || (item_id ? [item_id] : []);
   if (!ids.length) return res.status(400).json({ error: 'Provide item_id or item_ids array' });
   for (const id of ids) forcedOutOfStockItems.add(String(id));
-  oosAutoFired = false; // re-arm auto-OOS
+  oosInjectedTxns.clear(); // re-arm auto-OOS for all transactions
   logger.info('forcedOutOfStockItems set', { items: [...forcedOutOfStockItems] });
   res.json({ success: true, forcedOutOfStockItems: [...forcedOutOfStockItems] });
 };
