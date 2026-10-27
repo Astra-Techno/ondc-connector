@@ -569,7 +569,7 @@ const buildCatalog = async (tenantId, ondcConfig, contextCity) => {
         items.push({
           ...refItem,
           id: `${refItem.id}-GCR`,
-          descriptor: { ...refItem.descriptor, name: `${refItem.descriptor.name} (Test)`, code: `5:${refItem.id}-GCR` },
+          descriptor: { ...refItem.descriptor, name: `${refItem.descriptor.name} (Test)`, code: `5:${refItem.id.replace(/-/g, '')}GCR` },
           price: {
             currency: 'INR',
             value:         String((parseFloat(String(refItem.price?.maximum_value || refItem.price?.value || '100')) * 1.1).toFixed(2)),
