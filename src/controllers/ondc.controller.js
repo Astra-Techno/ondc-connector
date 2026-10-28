@@ -1223,7 +1223,7 @@ const handleConfirm = async (req, res) => {
           { fulfillmentState: 'Pending',            orderState: 'Accepted',    delayAfter: 2000  },
           { fulfillmentState: 'Packed',              orderState: 'In-progress', delayAfter: 2000  },
           { fulfillmentState: 'Agent-assigned',      orderState: 'In-progress', delayAfter: 2000  },
-          { fulfillmentState: 'Order-picked-up',     orderState: 'In-progress', delayAfter: 2000  },
+          { fulfillmentState: 'Order-picked-up',     orderState: 'In-progress', delayAfter: 5000  },
           { fulfillmentState: 'Out-for-delivery',    orderState: 'In-progress', delayAfter: 10000 },
           { fulfillmentState: 'Order-delivered',     orderState: 'Completed',   delayAfter: 2000  },
         ];
