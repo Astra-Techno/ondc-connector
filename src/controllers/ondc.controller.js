@@ -1045,10 +1045,13 @@ const handleInit = async (req, res) => {
         order: {
           ...initOrder,
           quote: stripBreakupItemQuantity(initOrder.quote),
-          fulfillments: (orderObj.fulfillments || []).map(f => ({
-            ...f,
-            tracking: true,
-          })),
+          fulfillments: (orderObj.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f => {
+            const built = buildFulfillmentWithLocation(f, initVendor, 'Serviceable', new Date().toISOString());
+            built.tracking = true;
+            // on_init: strip start.instructions (not expected per spec)
+            if (built.start) delete built.start.instructions;
+            return built;
+          }),
           payment: {
             ...order.payment,
             status: 'NOT-PAID',
@@ -2787,48 +2790,24 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
     };
 
     // Build items: stripped to {id, quantity, fulfillment_id}
+    // on_status for RTO: ALL items map to Delivery(count=0) + RTO(count=N), NO Cancel fulfillment
     const builtItems = [];
     for (const item of allItems) {
-      if (item.id === partCancelledId && allItems.length > 1) {
-        builtItems.push({ id: item.id, quantity: { count: 0 }, fulfillment_id: fid });
-        builtItems.push({ id: item.id, quantity: { count: item.quantity?.count || 1 }, fulfillment_id: 'c1' });
-      } else {
-        builtItems.push({ id: item.id, quantity: { count: 0 }, fulfillment_id: fid });
-        if ((item.quantity?.count || 0) > 0) {
-          builtItems.push({ id: item.id, quantity: { count: item.quantity.count }, fulfillment_id: 'rto1' });
-        }
+      builtItems.push({ id: item.id, quantity: { count: 0 }, fulfillment_id: fid });
+      const qty = item.quantity?.count || 0;
+      if (qty > 0) {
+        builtItems.push({ id: item.id, quantity: { count: qty }, fulfillment_id: 'rto1' });
       }
     }
     statusItems = builtItems;
 
-    // Cancel fulfillment with cancel_request + quote_trail tags
-    const cancelledPrice = parseFloat(
-      order.quote?.breakup?.find(b => b['@ondc/org/item_id'] === partCancelledId && b['@ondc/org/title_type'] === 'item')?.item?.price?.value || '0'
-    );
-    const cancelledQty = allItems[0]?.quantity?.count || 1;
-    const cancelFl = {
-      id: 'c1', type: 'Cancel', state: { descriptor: { code: 'Cancelled' } },
-      tags: [
-        { code: 'cancel_request', list: [
-          { code: 'reason_id', value: '002' }, { code: 'initiated_by', value: subscriberId },
-        ]},
-        { code: 'quote_trail', list: [
-          { code: 'type', value: 'item' }, { code: 'id', value: partCancelledId || '' },
-          { code: 'currency', value: 'INR' }, { code: 'value', value: `-${(cancelledPrice * cancelledQty).toFixed(2)}` },
-        ]},
-      ],
-    };
-
-    // RTO fulfillment
-    const rtoQuote = { ...order.quote, breakup: (order.quote?.breakup || []).filter(b =>
-      rtoOnlyItems.some(ri => ri.id === b['@ondc/org/item_id']) || !['item'].includes(b['@ondc/org/title_type'])
-    )};
-    const rtoFl = buildRtoFulfillment(fulfillmentState, '013', { ...order, quote: rtoQuote }, cancelledDelivery);
+    // RTO fulfillment — spec on_status only has Delivery(Cancelled) + RTO, no Cancel fulfillment
+    const rtoFl = buildRtoFulfillment(fulfillmentState, '013', { ...order, quote: order.quote }, cancelledDelivery);
     // For RTO-Delivered: add end.time.timestamp per spec
     if (fulfillmentState === 'RTO-Delivered') {
       rtoFl.end.time = { timestamp: now };
     }
-    fulfillments = [cancelledDelivery, cancelFl, rtoFl];
+    fulfillments = [cancelledDelivery, rtoFl];
 
     // Zero out quote for RTO states
     statusQuote = JSON.parse(JSON.stringify(order.quote || { price: { currency: 'INR', value: '0' }, breakup: [], ttl: 'P1D' }));
@@ -3257,9 +3236,21 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
   // Strip undefined top-level keys
   Object.keys(issueBody).forEach(k => issueBody[k] === undefined && delete issueBody[k]);
 
+  // IGM 1.0: strip IGM 2.0-only fields that aren't part of the V1 spec
+  const isV1 = !Array.isArray(origIssue.actions);
+  if (isV1) {
+    delete issueBody.actors;
+    delete issueBody.actions;
+    delete issueBody.last_action_id;
+    delete issueBody.refs;
+    delete issueBody.complainant_id;
+    delete issueBody.source_id;
+    delete issueBody.respondent_ids;
+    delete issueBody.level;
+  }
+
   return {
-    update_target: [{ path: 'issue', action: 'APPENDED' }],
-    level: 'ISSUE',
+    ...(isV1 ? {} : { update_target: [{ path: 'issue', action: 'APPENDED' }], level: 'ISSUE' }),
     issue: issueBody,
   };
 };
@@ -3397,9 +3388,10 @@ const handleIssue = async (req, res) => {
     const stage  = cached?.stage || 0;
     const now    = new Date().toISOString();
 
+    const igmDomain = context.domain || 'ONDC:RET10';
     const updatedBy = {
-      org:     { name: tenant.subscriber_id },
-      contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+      org:     { name: `${tenant.subscriber_id}::${igmDomain}` },
+      contact: { phone: process.env.SUPPORT_PHONE || '9450394140', email: process.env.SUPPORT_EMAIL || 'respondentapp@respond.com' },
       person:  { name: 'Support Desk' },
     };
 
@@ -3848,8 +3840,8 @@ const handleIssueStatus = async (req, res) => {
 
     const now       = new Date().toISOString();
     const updatedBy = {
-      org:     { name: tenant.subscriber_id },
-      contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+      org:     { name: `${tenant.subscriber_id}::ONDC:RET10` },
+      contact: { phone: process.env.SUPPORT_PHONE || '9450394140', email: process.env.SUPPORT_EMAIL || 'respondentapp@respond.com' },
       person:  { name: 'Support Desk' },
     };
 
@@ -3999,8 +3991,8 @@ const triggerIssueResolve = async (req, res) => {
 
     const now       = new Date().toISOString();
     const updatedBy = {
-      org:     { name: tenant.subscriber_id },
-      contact: { phone: process.env.SUPPORT_PHONE || '', email: process.env.SUPPORT_EMAIL || '' },
+      org:     { name: `${tenant.subscriber_id}::ONDC:RET10` },
+      contact: { phone: process.env.SUPPORT_PHONE || '9450394140', email: process.env.SUPPORT_EMAIL || 'respondentapp@respond.com' },
       person:  { name: 'Support Desk' },
     };
 
