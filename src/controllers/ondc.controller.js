@@ -146,6 +146,7 @@ const buildInitTags = (vendor) => [{
     { code: 'np_type',               value: 'MSN'      },
     { code: 'tax_number',            value: vendor?.gst_number || process.env.ONDC_GST_NUMBER || '07AAACN0000A1Z5' },
     { code: 'provider_tax_number',   value: vendor?.pan_number || process.env.ONDC_PROVIDER_PAN || 'AAACN0000A' },
+    { code: 'accept_bap_terms',      value: 'Y'         },
   ],
 }];
 
@@ -915,14 +916,16 @@ const handleSelect = async (req, res) => {
       }
 
       let providerName = '';
+      let selectVendor = null;
       try {
         const providerId = order.provider?.id;
         if (providerId) {
           const [vRows] = await pool.query(
-            `SELECT business_name FROM vendors WHERE tenant_id = ? AND (external_vendor_id = ? OR id = ?) LIMIT 1`,
+            `SELECT business_name, phone, email, gps, address, city, pincode, state FROM vendors WHERE tenant_id = ? AND (external_vendor_id = ? OR id = ?) LIMIT 1`,
             [tenantId, String(providerId), providerId]
           );
-          providerName = vRows[0]?.business_name || '';
+          selectVendor = vRows[0] || null;
+          providerName = selectVendor?.business_name || '';
         }
       } catch (_) {}
 
@@ -940,15 +943,34 @@ const handleSelect = async (req, res) => {
             location_id:    i.location_id,
           })),
           quote,
-          fulfillments: (fulfillments.length > 0 ? fulfillments : [{ id: 'f1', type: 'Delivery' }]).map(f => ({
-            id: f.id || 'f1',
-            type: f.type || 'Delivery',
-            state: { descriptor: { code: 'Serviceable' } },
-            '@ondc/org/TAT': 'PT24H',
-            '@ondc/org/category': f['@ondc/org/category'] || 'Grocery',
-            '@ondc/org/provider_name': f['@ondc/org/provider_name'] || providerName,
-            tracking: false,
-          })),
+          fulfillments: (fulfillments.length > 0 ? fulfillments : [{ id: 'f1', type: 'Delivery' }]).map(f => {
+            const vPhone = (selectVendor?.phone || '9999999999').replace(/^\+91/, '');
+            const vGps   = normalizeGps(selectVendor?.gps);
+            return {
+              id: f.id || 'f1',
+              type: f.type || 'Delivery',
+              state: { descriptor: { code: 'Serviceable' } },
+              '@ondc/org/TAT': 'PT24H',
+              '@ondc/org/category': f['@ondc/org/category'] || 'Grocery',
+              '@ondc/org/provider_name': f['@ondc/org/provider_name'] || providerName,
+              tracking: false,
+              start: {
+                location: {
+                  id: 'l1',
+                  gps: vGps,
+                  descriptor: { name: selectVendor?.business_name || 'Store' },
+                  address: {
+                    locality: selectVendor?.address || selectVendor?.city || 'Chennai',
+                    city:     selectVendor?.city    || 'Chennai',
+                    area_code: selectVendor?.pincode || '600001',
+                    state:    selectVendor?.state   || 'Tamil Nadu',
+                  },
+                },
+                contact: { phone: vPhone, email: selectVendor?.email || 'support@store.in' },
+              },
+              end: f.end || undefined,
+            };
+          }),
         },
       };
 
@@ -1223,7 +1245,7 @@ const handleConfirm = async (req, res) => {
           { fulfillmentState: 'Pending',            orderState: 'Accepted',    delayAfter: 2000  },
           { fulfillmentState: 'Packed',              orderState: 'In-progress', delayAfter: 2000  },
           { fulfillmentState: 'Agent-assigned',      orderState: 'In-progress', delayAfter: 2000  },
-          { fulfillmentState: 'Order-picked-up',     orderState: 'In-progress', delayAfter: 5000  },
+          { fulfillmentState: 'Order-picked-up',     orderState: 'In-progress', delayAfter: 10000 },
           { fulfillmentState: 'Out-for-delivery',    orderState: 'In-progress', delayAfter: 10000 },
           { fulfillmentState: 'Order-delivered',     orderState: 'Completed',   delayAfter: 2000  },
         ];
@@ -3153,30 +3175,9 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
       ...(origIssue.order_details?.items || []).map(i => ({ ref_id: i.id || '', ref_type: 'ITEM' })),
     ],
     // IGM actors — CONSUMER + INTERFACING_NP (BAP, raises issue) + COUNTERPARTY_NP (BPP, seller)
-    actors: (origIssue.actors && origIssue.actors.length > 0) ? origIssue.actors : [
-      {
-        id: origContext?.bap_id || origIssue.complainant_id || '',
-        type: 'CONSUMER',
-        info: {
-          person: { name: origIssue.complainant_info?.person?.name || 'Buyer' },
-          contact: {
-            phone: origIssue.complainant_info?.contact?.phone || '',
-            email: origIssue.complainant_info?.contact?.email || '',
-          },
-        },
-      },
-      {
-        id: origContext?.bap_id || origIssue.complainant_id || '',
-        type: 'INTERFACING_NP',
-        info: {
-          person: { name: origIssue.complainant_info?.person?.name || 'Buyer App' },
-          contact: {
-            phone: origIssue.complainant_info?.contact?.phone || '',
-            email: origIssue.complainant_info?.contact?.email || '',
-          },
-        },
-      },
-      {
+    // Always ensure COUNTERPARTY_NP uses the BPP subscriber ID (seller), never echo BAP's ID
+    actors: (() => {
+      const bppActor = {
         id: bppSubscriberId,
         type: 'COUNTERPARTY_NP',
         info: {
@@ -3186,8 +3187,38 @@ const buildIgmMessage = (origIssue, origContext, bppSubscriberId, allBppActions,
             email: process.env.SUPPORT_EMAIL || 'support@cottkart.com',
           },
         },
-      },
-    ],
+      };
+      if (origIssue.actors && origIssue.actors.length > 0) {
+        // Replace or append COUNTERPARTY_NP with correct BPP ID
+        const filtered = origIssue.actors.filter(a => a.type !== 'COUNTERPARTY_NP');
+        return [...filtered, bppActor];
+      }
+      return [
+        {
+          id: origContext?.bap_id || origIssue.complainant_id || '',
+          type: 'CONSUMER',
+          info: {
+            person: { name: origIssue.complainant_info?.person?.name || 'Buyer' },
+            contact: {
+              phone: origIssue.complainant_info?.contact?.phone || '',
+              email: origIssue.complainant_info?.contact?.email || '',
+            },
+          },
+        },
+        {
+          id: origContext?.bap_id || origIssue.complainant_id || '',
+          type: 'INTERFACING_NP',
+          info: {
+            person: { name: origIssue.complainant_info?.person?.name || 'Buyer App' },
+            contact: {
+              phone: origIssue.complainant_info?.contact?.phone || '',
+              email: origIssue.complainant_info?.contact?.email || '',
+            },
+          },
+        },
+        bppActor,
+      ];
+    })(),
     descriptor: origIssue.descriptor || {
       code:       origIssue.category || 'ITEM',
       short_desc: origIssue.description?.short_desc || 'Issue reported',
