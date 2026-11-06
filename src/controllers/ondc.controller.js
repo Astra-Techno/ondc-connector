@@ -943,17 +943,22 @@ const handleSelect = async (req, res) => {
           })),
           quote,
           fulfillments: (fulfillments.length > 0 ? fulfillments : [{ id: 'f1', type: 'Delivery' }]).map(f => {
+            const fType = f.type || 'Delivery';
+            const isBuyerDelivery = fType === 'Buyer-Delivery';
             const vPhone = (selectVendor?.phone || '9999999999').replace(/^\+91/, '');
             const vGps   = normalizeGps(selectVendor?.gps);
-            return {
+            const base = {
               id: f.id || 'f1',
-              type: f.type || 'Delivery',
+              type: fType,
               state: { descriptor: { code: 'Serviceable' } },
-              '@ondc/org/TAT': 'PT24H',
-              '@ondc/org/category': f['@ondc/org/category'] || 'Grocery',
+              '@ondc/org/TAT': isBuyerDelivery ? 'P2D' : 'PT24H',
+              '@ondc/org/category': f['@ondc/org/category'] || (isBuyerDelivery ? 'Standard Delivery' : 'Grocery'),
               '@ondc/org/provider_name': f['@ondc/org/provider_name'] || providerName,
-              tracking: false,
-              start: {
+              tracking: isBuyerDelivery ? true : false,
+            };
+            // Buyer-Delivery: no start/end in on_select per spec
+            if (!isBuyerDelivery) {
+              base.start = {
                 location: {
                   id: 'l1',
                   gps: vGps,
@@ -966,9 +971,10 @@ const handleSelect = async (req, res) => {
                   },
                 },
                 contact: { phone: vPhone, email: selectVendor?.email || 'support@store.in' },
-              },
-              end: f.end || undefined,
-            };
+              };
+              if (f.end) base.end = f.end;
+            }
+            return base;
           }),
         },
       };
@@ -1045,6 +1051,16 @@ const handleInit = async (req, res) => {
           ...initOrder,
           quote: stripBreakupItemQuantity(initOrder.quote),
           fulfillments: (orderObj.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f => {
+            const fType = f.type || 'Delivery';
+            // Buyer-Delivery: preserve type, keep end from BAP, no start per spec
+            if (fType === 'Buyer-Delivery') {
+              return {
+                id: f.id || 'f1',
+                type: 'Buyer-Delivery',
+                end: f.end || undefined,
+                tracking: true,
+              };
+            }
             const built = buildFulfillmentWithLocation(f, initVendor, 'Serviceable', new Date().toISOString());
             built.tracking = true;
             // on_init: strip start.instructions (not expected per spec)
@@ -1150,9 +1166,19 @@ const handleConfirm = async (req, res) => {
           provider:   order.provider,
           items:      order.items,
           billing:    order.billing,
-          fulfillments: (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
-            buildFulfillmentWithLocation(f, vendor, 'Pending', now)
-          ),
+          fulfillments: (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f => {
+            const fType = f.type || 'Delivery';
+            // Buyer-Delivery: preserve type, keep end from BAP, no start per spec
+            if (fType === 'Buyer-Delivery') {
+              return {
+                id: f.id || 'f1',
+                type: 'Buyer-Delivery',
+                end: f.end || undefined,
+                tracking: true,
+              };
+            }
+            return buildFulfillmentWithLocation(f, vendor, 'Pending', now);
+          }),
           quote: stripBreakupItemQuantity(quote),
           payment: {
             ...order.payment,
@@ -1485,14 +1511,7 @@ const handleConfirm = async (req, res) => {
           markRetailOrderCancelled(order.id);
           logger.info('Auto merchant RTO on_cancel ACK — proceeding with RTO sequence', { order_id: order.id });
 
-          // Auto-send RTO on_status sequence: RTO-Initiated → RTO-Delivered
-          await delay(1000);
-          const rtoInitPayload = buildStatusPayload(order.id, order, 'RTO-Initiated', 'Cancelled', vendor);
-          await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: rtoInitPayload }, tenant);
-          const e1 = confirmedOrderCache.get(order.id);
-          if (e1) e1.currentFulfillmentState = 'RTO-Initiated';
-          logger.info('Auto RTO-Initiated on_status sent', { order_id: order.id });
-
+          // Auto-send on_status RTO-Delivered after on_cancel (spec has no on_status RTO-Initiated step)
           await delay(2000);
           const rtoDelvPayload = buildStatusPayload(order.id, order, 'RTO-Delivered', 'Cancelled', vendor);
           await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: rtoDelvPayload }, tenant);
@@ -2655,19 +2674,11 @@ const triggerMerchantCancel = async (req, res) => {
     logger.info('Merchant on_cancel sent', { order_id, reason_id, rto });
     res.json({ success: true, message: 'on_cancel sent', order_id });
 
-    // For RTO flows: auto-send on_status RTO-Initiated → RTO-Delivered after on_cancel
-    // (avoids need for manual trigger/merchant-status-sequence a2 call)
+    // For RTO flows: auto-send on_status RTO-Delivered after on_cancel (spec has no on_status RTO-Initiated step)
     if (rto) {
       const rtoDelay = ms => new Promise(r => setTimeout(r, ms));
       setImmediate(async () => {
         try {
-          await rtoDelay(1000);
-          const rtoInitPayload = buildStatusPayload(order_id, order, 'RTO-Initiated', 'Cancelled', cachedVendor);
-          await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: rtoInitPayload }, tenant);
-          const e1 = confirmedOrderCache.get(order_id);
-          if (e1) e1.currentFulfillmentState = 'RTO-Initiated';
-          logger.info('Auto RTO-Initiated on_status sent', { order_id });
-
           await rtoDelay(2000);
           const rtoDelvPayload = buildStatusPayload(order_id, order, 'RTO-Delivered', 'Cancelled', cachedVendor);
           await sendCallback(context.bap_uri, 'on_status', { ...context, message_id: uuidv4() }, { order: rtoDelvPayload }, tenant);
@@ -2820,9 +2831,28 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
       }
     });
   } else {
-    fulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f =>
-      buildFulfillmentWithLocation(f, vendor, fulfillmentState, now)
-    );
+    fulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f => {
+      const fType = f.type || 'Delivery';
+      // Buyer-Delivery: preserve type, keep end from BAP, add state + tags
+      if (fType === 'Buyer-Delivery') {
+        const bdFl = {
+          id: f.id || 'f1',
+          type: 'Buyer-Delivery',
+          state: { descriptor: { code: fulfillmentState } },
+          end: f.end || undefined,
+          tracking: true,
+        };
+        // Packed state: add ready_to_ship + routing tags per spec
+        if (fulfillmentState === 'Packed') {
+          bdFl.tags = [
+            { code: 'state', list: [{ code: 'ready_to_ship', value: 'yes' }] },
+            { code: 'routing', list: [{ code: 'type', value: 'P2P' }] },
+          ];
+        }
+        return bdFl;
+      }
+      return buildFulfillmentWithLocation(f, vendor, fulfillmentState, now);
+    });
   }
 
   // Documents at order level for Order-picked-up, Out-for-delivery, Order-delivered
@@ -2897,9 +2927,8 @@ const triggerMerchantStatusSequence = async (req, res) => {
       'rto_delivered': [
         { fulfillmentState: 'RTO-Delivered', orderState: 'Cancelled' },
       ],
-      // Flow A2: RTO sequence after on_cancel (Initiated → Delivered)
+      // Flow A2: RTO-Delivered after on_cancel (on_cancel already has RTO-Initiated)
       'a2': [
-        { fulfillmentState: 'RTO-Initiated', orderState: 'Cancelled' },
         { fulfillmentState: 'RTO-Delivered', orderState: 'Cancelled' },
       ],
     };
