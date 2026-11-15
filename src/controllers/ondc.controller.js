@@ -1168,16 +1168,13 @@ const handleConfirm = async (req, res) => {
           billing:    order.billing,
           fulfillments: (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f => {
             const fType = f.type || 'Delivery';
-            // Buyer-Delivery: preserve type, keep end from BAP, no start per spec
+            // Buyer-Delivery on_confirm: full details with start, state, provider_name per spec
+            const built = buildFulfillmentWithLocation(f, vendor, 'Pending', now);
             if (fType === 'Buyer-Delivery') {
-              return {
-                id: f.id || 'f1',
-                type: 'Buyer-Delivery',
-                end: f.end || undefined,
-                tracking: true,
-              };
+              built.type = 'Buyer-Delivery';
+              built.tracking = true;
             }
-            return buildFulfillmentWithLocation(f, vendor, 'Pending', now);
+            return built;
           }),
           quote: stripBreakupItemQuantity(quote),
           payment: {
@@ -2833,25 +2830,21 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
   } else {
     fulfillments = (order.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f => {
       const fType = f.type || 'Delivery';
-      // Buyer-Delivery: preserve type, keep end from BAP, add state + tags
+      // Buyer-Delivery on_status: full details with start per spec, override type + tracking
+      const builtFl = buildFulfillmentWithLocation(f, vendor, fulfillmentState, now);
       if (fType === 'Buyer-Delivery') {
-        const bdFl = {
-          id: f.id || 'f1',
-          type: 'Buyer-Delivery',
-          state: { descriptor: { code: fulfillmentState } },
-          end: f.end || undefined,
-          tracking: true,
-        };
+        builtFl.type = 'Buyer-Delivery';
+        builtFl.tracking = true;
         // Packed state: add ready_to_ship + routing tags per spec
         if (fulfillmentState === 'Packed') {
-          bdFl.tags = [
+          builtFl.tags = [
+            ...(builtFl.tags || []),
             { code: 'state', list: [{ code: 'ready_to_ship', value: 'yes' }] },
             { code: 'routing', list: [{ code: 'type', value: 'P2P' }] },
           ];
         }
-        return bdFl;
       }
-      return buildFulfillmentWithLocation(f, vendor, fulfillmentState, now);
+      return builtFl;
     });
   }
 
