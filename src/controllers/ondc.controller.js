@@ -979,6 +979,24 @@ const handleSelect = async (req, res) => {
         },
       };
 
+      // Buyer-Delivery: add an additional Buyer-Delivery fulfillment option in certification context
+      // BAP /select doesn't specify the type, so we offer both; BAP mock picks the right one for /init
+      if (isCertificationContext(context)) {
+        const existingFls = payload.order.fulfillments;
+        const hasBuyerDelivery = existingFls.some(f => f.type === 'Buyer-Delivery');
+        if (!hasBuyerDelivery) {
+          existingFls.push({
+            id: 'f3',
+            type: 'Buyer-Delivery',
+            state: { descriptor: { code: 'Serviceable' } },
+            '@ondc/org/TAT': 'P2D',
+            '@ondc/org/category': 'Standard Delivery',
+            '@ondc/org/provider_name': providerName,
+            tracking: true,
+          });
+        }
+      }
+
       // Only include error block when items are actually out of stock (ONDC spec 40002)
       if (outOfStockItems.length > 0) {
         payload.error = makeError(SELLER.ITEM_QTY_UNAVAILABLE,
@@ -1173,6 +1191,8 @@ const handleConfirm = async (req, res) => {
             if (fType === 'Buyer-Delivery') {
               built.type = 'Buyer-Delivery';
               built.tracking = true;
+              built['@ondc/org/TAT'] = 'P2D';
+              built['@ondc/org/category'] = 'Standard Delivery';
             }
             return built;
           }),
@@ -2183,6 +2203,45 @@ const handleUpdate = async (req, res) => {
           }
 
         } else if (update_target === 'fulfillment' || update_target === 'item') {
+          // Buyer-Delivery: BAP sends update_target=fulfillment with update_state tags (NOT a Return)
+          const isBuyerDeliveryUpdate = (confirmedOrder.fulfillments || []).some(f => f.type === 'Buyer-Delivery')
+            && bapReturnFulfillments.length === 0;
+
+          if (isBuyerDeliveryUpdate) {
+            // Extract state from BAP's update_state tag
+            const bapUpdateFl = (order.fulfillments || [])[0] || {};
+            const updateStateTag = (bapUpdateFl.tags || []).find(t => t.code === 'update_state');
+            const deliveryState = updateStateTag?.list?.find(t => t.code === 'state')?.value || 'Order-picked-up';
+
+            // Build fulfillment: confirmed fulfillment + updated state + merged tags
+            const confirmedFl = confirmedOrder.fulfillments.find(f => f.type === 'Buyer-Delivery') || confirmedOrder.fulfillments[0];
+            const mergedFl = {
+              ...confirmedFl,
+              state: { descriptor: { code: deliveryState } },
+              tags: [
+                ...(confirmedFl.tags || []),
+                ...(bapUpdateFl.tags || []),
+              ],
+            };
+
+            const buyerDeliveryPayload = {
+              id:           fullOrder.id,
+              state:        deliveryState,
+              provider:     fullOrder.provider,
+              items:        fullOrder.items,
+              billing:      fullOrder.billing,
+              fulfillments: [mergedFl],
+              quote:        fullOrder.quote,
+              payment:      fullOrder.payment,
+              tags:         ORDER_TAGS,
+              created_at:   fullOrder.created_at || now,
+              updated_at:   confirmTimestamp || fullOrder.updated_at || now,
+            };
+
+            await sendCallback(fullContext.bap_uri, 'on_update', fullContext, { order: buyerDeliveryPayload }, tenant);
+            logger.info('on_update (Buyer-Delivery status) sent', { order_id: fullOrder.id, deliveryState });
+
+          } else {
           // Return request from BAP — two paths:
           //   Rejection (Flow 4B inst1): pendingReturnRejection flag set → send Return_Initiated → Return_Rejected
           //   Approval  (Flow 4B inst2): no flag → send Return_Initiated, then auto Return_Approved → Return_Picked
@@ -2236,6 +2295,7 @@ const handleUpdate = async (req, res) => {
             })();
             if (cached) cached.returnSequencePromise = autoSendPromise;
           }
+          } // end else (Return logic)
         }
 
         logger.info('handleUpdate complete', { order_id: fullOrder.id, update_target });
@@ -2835,6 +2895,8 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
       if (fType === 'Buyer-Delivery') {
         builtFl.type = 'Buyer-Delivery';
         builtFl.tracking = true;
+        builtFl['@ondc/org/TAT'] = 'P2D';
+        builtFl['@ondc/org/category'] = 'Standard Delivery';
         // Packed state: add ready_to_ship + routing tags per spec
         if (fulfillmentState === 'Packed') {
           builtFl.tags = [
