@@ -167,4 +167,46 @@ const getTransactions = async (req, res) => {
   }
 };
 
-module.exports = { getStats, getSyncLogs, getTransactions };
+// ─── IGM Demo: list recent IGM flows (grouped by transaction_id) ─────────────
+const IGM_ACTIONS = ['issue', 'on_issue', 'issue_status', 'on_issue_status', 'on_update', 'on_status'];
+
+const getIgmFlows = async (req, res) => {
+  try {
+    const [flows] = await pool.query(
+      `SELECT transaction_id,
+              MIN(created_at) as started_at,
+              MAX(created_at) as last_activity,
+              COUNT(*)        as step_count,
+              GROUP_CONCAT(DISTINCT action ORDER BY created_at) as actions
+       FROM ondc_transactions
+       WHERE tenant_id = ? AND action IN (?)
+       GROUP BY transaction_id
+       ORDER BY MAX(created_at) DESC
+       LIMIT 50`,
+      [req.tenant.id, IGM_ACTIONS]
+    );
+    return success(res, { flows });
+  } catch (err) {
+    return error(res, err.message);
+  }
+};
+
+// ─── IGM Demo: get all steps for a specific IGM flow ─────────────────────────
+const getIgmFlow = async (req, res) => {
+  try {
+    const { transaction_id } = req.params;
+    const [steps] = await pool.query(
+      `SELECT id, action, direction, transaction_id, message_id, bap_id, status,
+              request_payload as payload, response_payload as response, created_at
+       FROM ondc_transactions
+       WHERE tenant_id = ? AND transaction_id = ? AND action IN (?)
+       ORDER BY created_at ASC, id ASC`,
+      [req.tenant.id, transaction_id, IGM_ACTIONS]
+    );
+    return success(res, { steps, transaction_id });
+  } catch (err) {
+    return error(res, err.message);
+  }
+};
+
+module.exports = { getStats, getSyncLogs, getTransactions, getIgmFlows, getIgmFlow };

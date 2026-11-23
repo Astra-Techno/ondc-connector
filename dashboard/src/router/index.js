@@ -66,6 +66,12 @@ const routes = [
     meta: { requiresAuth: true, title: 'ONDC Transactions' },
   },
   {
+    path: '/igm-workflow',
+    name: 'IGMWorkflow',
+    component: () => import('../views/IGMDemo.vue'),
+    meta: { requiresAuth: true, title: 'IGM Workflow Logs' },
+  },
+  {
     path: '/sync-logs',
     name: 'SyncLogs',
     component: () => import('../views/SyncLogs.vue'),

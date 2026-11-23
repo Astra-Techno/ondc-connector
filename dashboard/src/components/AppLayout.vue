@@ -31,6 +31,7 @@ const navItems = [
   { to: '/orders',      label: 'Orders',      icon: ShoppingCart },
   { to: '/settlements', label: 'Settlements', icon: CreditCard },
   { to: '/igm',          label: 'IGM',          icon: MessageSquare },
+  { to: '/igm-workflow', label: 'IGM Workflow', icon: Shield },
   { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
   { to: '/sync-logs',    label: 'Sync Logs',    icon: RefreshCw },
   { to: '/webhooks',    label: 'Webhooks',    icon: Webhook },
