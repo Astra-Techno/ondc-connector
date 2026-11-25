@@ -73,34 +73,55 @@ const igm2Workflow = createIgm2Workflow({
     const rawPayload = { context: session.context, message: { issue: { ...session.issue, actions: session.actions,
       resolutions: session.resolutions, status: session.status } } };
     const parsed = parseIgm2Issue(rawPayload);
-    await pool.query(
-      `INSERT INTO issue_grievances
-        (tenant_id, transaction_id, issue_id, order_id, issue_type, category, sub_category,
-         description, status, descriptor_code, complainant_name, complainant_phone, complainant_email,
-         item_id, provider_id, fulfillment_id,
-         resolved_at, closed_at, raw_payload)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         status = VALUES(status), raw_payload = VALUES(raw_payload),
-         descriptor_code = COALESCE(VALUES(descriptor_code), descriptor_code),
-         category = COALESCE(VALUES(category), category),
-         complainant_name = COALESCE(VALUES(complainant_name), complainant_name),
-         complainant_phone = COALESCE(VALUES(complainant_phone), complainant_phone),
-         complainant_email = COALESCE(VALUES(complainant_email), complainant_email),
-         item_id = COALESCE(VALUES(item_id), item_id),
-         provider_id = COALESCE(VALUES(provider_id), provider_id),
-         fulfillment_id = COALESCE(VALUES(fulfillment_id), fulfillment_id),
-         resolved_at = COALESCE(VALUES(resolved_at), resolved_at),
-         closed_at = COALESCE(VALUES(closed_at), closed_at),
-         updated_at = NOW()`,
-      [session.tenant.id, parsed.transactionId, session.issue.id,
-        parsed.orderId, parsed.issueType, parsed.category, parsed.subCategory,
-        parsed.shortDesc || '', status, parsed.descriptorCode,
-        parsed.complainant?.name, parsed.complainant?.phone, parsed.complainant?.email,
-        parsed.itemId, parsed.providerId, parsed.fulfillmentId,
-        parsed.resolvedAt, parsed.closedAt,
-        JSON.stringify(rawPayload)]
-    ).catch(e => logger.warn('IGM persistence failed:', e.message));
+    const rawJson = JSON.stringify(rawPayload);
+    try {
+      await pool.query(
+        `INSERT INTO issue_grievances
+          (tenant_id, transaction_id, issue_id, order_id, issue_type, category, sub_category,
+           description, status, descriptor_code, complainant_name, complainant_phone, complainant_email,
+           item_id, provider_id, fulfillment_id,
+           resolved_at, closed_at, raw_payload)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           status = VALUES(status), raw_payload = VALUES(raw_payload),
+           descriptor_code = COALESCE(VALUES(descriptor_code), descriptor_code),
+           category = COALESCE(VALUES(category), category),
+           complainant_name = COALESCE(VALUES(complainant_name), complainant_name),
+           complainant_phone = COALESCE(VALUES(complainant_phone), complainant_phone),
+           complainant_email = COALESCE(VALUES(complainant_email), complainant_email),
+           item_id = COALESCE(VALUES(item_id), item_id),
+           provider_id = COALESCE(VALUES(provider_id), provider_id),
+           fulfillment_id = COALESCE(VALUES(fulfillment_id), fulfillment_id),
+           resolved_at = COALESCE(VALUES(resolved_at), resolved_at),
+           closed_at = COALESCE(VALUES(closed_at), closed_at),
+           updated_at = NOW()`,
+        [session.tenant.id, parsed.transactionId, session.issue.id,
+          parsed.orderId, parsed.issueType, parsed.category, parsed.subCategory,
+          parsed.shortDesc || '', status, parsed.descriptorCode,
+          parsed.complainant?.name, parsed.complainant?.phone, parsed.complainant?.email,
+          parsed.itemId, parsed.providerId, parsed.fulfillmentId,
+          parsed.resolvedAt, parsed.closedAt, rawJson]
+      );
+    } catch (e) {
+      logger.error('IGM persist FAILED (full):', e.message, { issue_id: session.issue.id, status });
+      // Fallback: try without newer columns in case migration hasn't run
+      try {
+        await pool.query(
+          `INSERT INTO issue_grievances
+            (tenant_id, transaction_id, issue_id, order_id, issue_type, category, sub_category,
+             description, status, raw_payload)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+             status = VALUES(status), raw_payload = VALUES(raw_payload), updated_at = NOW()`,
+          [session.tenant.id, parsed.transactionId, session.issue.id,
+            parsed.orderId, parsed.issueType, parsed.category, parsed.subCategory,
+            parsed.shortDesc || '', status, rawJson]
+        );
+        logger.info('IGM persist fallback succeeded', { issue_id: session.issue.id });
+      } catch (e2) {
+        logger.error('IGM persist fallback ALSO FAILED:', e2.message, { issue_id: session.issue.id });
+      }
+    }
   },
   getRefundAmount: session => {
     const orderId = session.issue.refs?.find(r => r.ref_type === 'ORDER')?.ref_id;
@@ -3466,39 +3487,56 @@ const handleIssue = async (req, res) => {
 
     try {
       const igm1Parsed = parseIgm2Issue(body);
-      await pool.query(`
-        INSERT INTO issue_grievances
-          (tenant_id, transaction_id, issue_id, order_id, issue_type, category,
-           sub_category, description, status, descriptor_code,
-           complainant_name, complainant_phone, complainant_email,
-           item_id, provider_id, fulfillment_id, raw_payload)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE status = 'open', raw_payload = VALUES(raw_payload),
-          descriptor_code = COALESCE(VALUES(descriptor_code), descriptor_code),
-          complainant_name = COALESCE(VALUES(complainant_name), complainant_name),
-          complainant_phone = COALESCE(VALUES(complainant_phone), complainant_phone),
-          complainant_email = COALESCE(VALUES(complainant_email), complainant_email),
-          updated_at = NOW()
-      `, [
-        tenant.id,
-        context.transaction_id,
-        issueId,
-        igm1Parsed.orderId,
-        igm1Parsed.issueType,
-        igm1Parsed.category,
-        igm1Parsed.subCategory,
-        igm1Parsed.shortDesc || '',
-        igm1Parsed.descriptorCode,
-        igm1Parsed.complainant?.name,
-        igm1Parsed.complainant?.phone,
-        igm1Parsed.complainant?.email,
-        igm1Parsed.itemId,
-        igm1Parsed.providerId,
-        igm1Parsed.fulfillmentId,
-        JSON.stringify(body),
-      ]);
+      try {
+        await pool.query(`
+          INSERT INTO issue_grievances
+            (tenant_id, transaction_id, issue_id, order_id, issue_type, category,
+             sub_category, description, status, descriptor_code,
+             complainant_name, complainant_phone, complainant_email,
+             item_id, provider_id, fulfillment_id, raw_payload)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE status = 'open', raw_payload = VALUES(raw_payload),
+            descriptor_code = COALESCE(VALUES(descriptor_code), descriptor_code),
+            complainant_name = COALESCE(VALUES(complainant_name), complainant_name),
+            complainant_phone = COALESCE(VALUES(complainant_phone), complainant_phone),
+            complainant_email = COALESCE(VALUES(complainant_email), complainant_email),
+            updated_at = NOW()
+        `, [
+          tenant.id,
+          context.transaction_id,
+          issueId,
+          igm1Parsed.orderId,
+          igm1Parsed.issueType,
+          igm1Parsed.category,
+          igm1Parsed.subCategory,
+          igm1Parsed.shortDesc || '',
+          igm1Parsed.descriptorCode,
+          igm1Parsed.complainant?.name,
+          igm1Parsed.complainant?.phone,
+          igm1Parsed.complainant?.email,
+          igm1Parsed.itemId,
+          igm1Parsed.providerId,
+          igm1Parsed.fulfillmentId,
+          JSON.stringify(body),
+        ]);
+      } catch (e1) {
+        logger.error('IGM 1.0 persist FAILED (full):', e1.message, { issue_id: issueId });
+        // Fallback without newer columns
+        await pool.query(`
+          INSERT INTO issue_grievances
+            (tenant_id, transaction_id, issue_id, order_id, issue_type, category,
+             sub_category, description, status, raw_payload)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+          ON DUPLICATE KEY UPDATE status = 'open', raw_payload = VALUES(raw_payload), updated_at = NOW()
+        `, [
+          tenant.id, context.transaction_id, issueId,
+          igm1Parsed.orderId, igm1Parsed.issueType, igm1Parsed.category,
+          igm1Parsed.subCategory, igm1Parsed.shortDesc || '', JSON.stringify(body),
+        ]);
+        logger.info('IGM 1.0 persist fallback succeeded', { issue_id: issueId });
+      }
     } catch (e) {
-      logger.warn('Issue save failed:', e.message);
+      logger.error('Issue save completely failed:', e.message, { issue_id: issueId });
     }
 
     const cached = issueCache.get(issueId);

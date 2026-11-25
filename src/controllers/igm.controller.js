@@ -333,4 +333,19 @@ const backfillIssues = async (req, res) => {
   }
 };
 
-module.exports = { getIssues, getIssue, getRawPayload, updateIssue, backfillIssues };
+// Diagnostic: show table columns and row count
+const diagTable = async (req, res) => {
+  try {
+    const [cols] = await pool.query(`SHOW COLUMNS FROM issue_grievances`);
+    const [[{ cnt }]] = await pool.query(
+      `SELECT COUNT(*) as cnt FROM issue_grievances WHERE tenant_id = ?`, [req.tenant.id]);
+    return success(res, {
+      columns: cols.map(c => ({ field: c.Field, type: c.Type, nullable: c.Null, key: c.Key })),
+      row_count: cnt,
+    });
+  } catch (err) {
+    return error(res, err.message);
+  }
+};
+
+module.exports = { getIssues, getIssue, getRawPayload, updateIssue, backfillIssues, diagTable };
