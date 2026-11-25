@@ -20,7 +20,7 @@ const igm2ClosedPayload = {
       ],
       actors: [
         { id: 'buyer-app.ondc.org', type: 'INTERFACING_NP', info: { person: { name: 'John Doe' }, contact: { phone: '9876543210', email: 'john@example.com' } } },
-        { id: 'seller-app.ondc.org', type: 'COUNTERPARTY_NP', info: { person: { name: 'Support Desk' }, contact: { phone: '1234567890', email: 'support@seller.com' } } },
+        { id: 'seller-app.ondc.org', type: 'COUNTERPARTY_NP', info: { org: { name: 'CottKart' }, person: { name: 'Support Desk' }, contact: { phone: '1234567890', email: 'support@seller.com' } } },
       ],
       actions: [
         { id: 'a1', descriptor: { code: 'OPEN', short_desc: 'Issue opened' }, updated_at: '2026-10-20T10:00:00Z', action_by: 'buyer-app.ondc.org' },
@@ -31,7 +31,12 @@ const igm2ClosedPayload = {
         { id: 'a6', descriptor: { code: 'RESOLUTION_PROPOSED' }, updated_at: '2026-10-20T10:00:08Z', action_by: 'seller-app.ondc.org', ref_id: 'R_PARENT' },
         { id: 'a7', descriptor: { code: 'RESOLUTION_ACCEPTED' }, updated_at: '2026-10-20T10:00:10Z', action_by: 'buyer-app.ondc.org', ref_id: 'R_NO_ACTION' },
         { id: 'a8', descriptor: { code: 'RESOLVED' }, updated_at: '2026-10-20T10:00:12Z', action_by: 'seller-app.ondc.org', ref_id: 'R_NO_ACTION' },
-        { id: 'a9', descriptor: { code: 'CLOSED' }, updated_at: '2026-10-20T10:00:15Z', action_by: 'buyer-app.ondc.org' },
+        { id: 'a9', descriptor: { code: 'CLOSED' }, updated_at: '2026-10-20T10:00:15Z', action_by: 'buyer-app.ondc.org',
+          tags: [{ descriptor: { code: 'CLOSURE_DETAILS' }, list: [
+            { descriptor: { code: 'RATING' }, value: 'THUMBS_UP' },
+            { descriptor: { code: 'REMARKS' }, value: 'Satisfied with resolution' },
+          ] }],
+        },
       ],
       resolutions: [
         { id: 'R_PARENT', descriptor: { code: 'PARENT', short_desc: 'Resolution options' }, proposed_by: 'seller-app.ondc.org' },
@@ -53,6 +58,7 @@ function test1_fullIgm2Closed() {
   assert.strictEqual(r.itemId, 'P001', 'item ref');
   assert.strictEqual(r.descriptorCode, 'ORD02', 'descriptor code');
   assert.strictEqual(r.shortDesc, 'Unsatisfactory order', 'short desc');
+  assert.strictEqual(r.longDesc, 'Quality issues with delivered items', 'long desc');
   assert.strictEqual(r.status, 'CLOSED', 'status');
   assert.strictEqual(r.isV2, true, 'isV2');
 
@@ -60,6 +66,16 @@ function test1_fullIgm2Closed() {
   assert.strictEqual(r.complainant.name, 'John Doe');
   assert.strictEqual(r.complainant.phone, '9876543210');
   assert.strictEqual(r.complainant.type, 'INTERFACING_NP');
+
+  // Respondent
+  assert.ok(r.respondent, 'has respondent');
+  assert.strictEqual(r.respondent.name, 'Support Desk');
+  assert.strictEqual(r.respondent.type, 'COUNTERPARTY_NP');
+
+  // Actors
+  assert.strictEqual(r.actors.length, 2, '2 actors');
+  assert.strictEqual(r.actors[0].type, 'INTERFACING_NP');
+  assert.strictEqual(r.actors[1].type, 'COUNTERPARTY_NP');
 
   // Actions
   assert.strictEqual(r.actions.length, 9, '9 actions');
@@ -73,6 +89,14 @@ function test1_fullIgm2Closed() {
   assert.ok(r.acceptedResolution, 'has accepted resolution');
   assert.strictEqual(r.acceptedResolution.code, 'NO-ACTION', 'accepted = NO-ACTION, NOT REFUND');
   assert.notStrictEqual(r.acceptedResolution.code, 'REFUND', 'must not confuse proposed REFUND with accepted');
+
+  // Refund details should be null (NO-ACTION accepted, not REFUND)
+  assert.strictEqual(r.refundDetails, null, 'no refund details when NO-ACTION');
+
+  // Closure feedback
+  assert.ok(r.closureFeedback, 'has closure feedback');
+  assert.strictEqual(r.closureFeedback.rating, 'THUMBS_UP', 'closure rating');
+  assert.strictEqual(r.closureFeedback.remarks, 'Satisfied with resolution', 'closure remarks');
 
   // Timestamps
   assert.strictEqual(r.resolvedAt, '2026-10-20T10:00:12Z', 'resolved timestamp');
@@ -90,10 +114,14 @@ function test2_missingFields() {
   assert.strictEqual(r.issueId, 'issue-1');
   assert.strictEqual(r.orderId, null, 'no order ref');
   assert.strictEqual(r.complainant, null, 'no complainant');
+  assert.strictEqual(r.respondent, null, 'no respondent');
   assert.strictEqual(r.acceptedResolution, null, 'no resolution');
+  assert.strictEqual(r.closureFeedback, null, 'no closure feedback');
+  assert.strictEqual(r.refundDetails, null, 'no refund details');
   assert.strictEqual(r.resolvedAt, null);
   assert.strictEqual(r.closedAt, null);
   assert.strictEqual(r.actions.length, 1);
+  assert.strictEqual(r.actors.length, 0);
   console.log('  PASS: test2_missingFields');
 }
 
@@ -121,6 +149,7 @@ function test3_igm10() {
   assert.strictEqual(r.isV2, false, 'IGM 1.0');
   assert.strictEqual(r.orderId, 'order-100', 'order from order_details');
   assert.strictEqual(r.complainant.name, 'Alice');
+  assert.strictEqual(r.respondent, null, 'no respondent in v1');
   assert.strictEqual(r.actions.length, 3, '3 actions total');
   // Sorted chronologically
   assert.strictEqual(r.actions[0].code, 'OPEN');
@@ -142,8 +171,6 @@ function test4_duplicateActions() {
       },
     },
   });
-  // parseIgm2Issue maps all actions as-is (dedup is in igm2Workflow via processed set)
-  // but it should not crash on duplicates
   assert.ok(r.actions.length >= 2, 'handles duplicates without crash');
   console.log('  PASS: test4_duplicateActions');
 }
@@ -153,6 +180,8 @@ function test5_nullInput() {
   const r1 = parseIgm2Issue(null);
   assert.strictEqual(r1.issueId, null);
   assert.deepStrictEqual(r1.actions, []);
+  assert.deepStrictEqual(r1.actors, []);
+  assert.strictEqual(r1.closureFeedback, null);
 
   const r2 = parseIgm2Issue({});
   assert.strictEqual(r2.issueId, null);
@@ -177,7 +206,49 @@ function test6_resolutionDistinction() {
   assert.strictEqual(r2.acceptedResolution.code, 'REFUND',
     'When BAP accepts REFUND, accepted resolution should be REFUND');
 
+  // Refund details should be populated
+  assert.ok(r2.refundDetails, 'has refund details when REFUND accepted');
+  assert.strictEqual(r2.refundDetails.amount, '100.00', 'refund amount');
+  assert.strictEqual(r2.refundDetails.item, 'P001', 'refund item');
+
   console.log('  PASS: test6_resolutionDistinction');
+}
+
+// ── Test 7: Actors extraction ──
+function test7_actors() {
+  const r = parseIgm2Issue(igm2ClosedPayload);
+  assert.strictEqual(r.actors.length, 2);
+  assert.strictEqual(r.actors[0].name, 'John Doe');
+  assert.strictEqual(r.actors[0].type, 'INTERFACING_NP');
+  assert.strictEqual(r.actors[1].name, 'Support Desk');
+  assert.strictEqual(r.actors[1].type, 'COUNTERPARTY_NP');
+  console.log('  PASS: test7_actors');
+}
+
+// ── Test 8: Closure feedback extraction ──
+function test8_closureFeedback() {
+  // Payload without closure feedback
+  const noFeedback = JSON.parse(JSON.stringify(igm2ClosedPayload));
+  delete noFeedback.message.issue.actions[8].tags;
+  const r1 = parseIgm2Issue(noFeedback);
+  assert.strictEqual(r1.closureFeedback, null, 'no feedback when no tags on CLOSED');
+
+  // Payload with THUMBS_DOWN
+  const thumbsDown = JSON.parse(JSON.stringify(igm2ClosedPayload));
+  thumbsDown.message.issue.actions[8].tags[0].list[0].value = 'THUMBS_DOWN';
+  const r2 = parseIgm2Issue(thumbsDown);
+  assert.strictEqual(r2.closureFeedback.rating, 'THUMBS_DOWN');
+
+  console.log('  PASS: test8_closureFeedback');
+}
+
+// ── Test 9: DB status mapping (via parseIgm2Issue category field) ──
+function test9_categoryAndType() {
+  const r = parseIgm2Issue(igm2ClosedPayload);
+  assert.strictEqual(r.category, 'ORDER', 'category from issue.category');
+  assert.strictEqual(r.descriptorCode, 'ORD02', 'descriptor code');
+  assert.strictEqual(r.issueType, 'ISSUE', 'default issue type');
+  console.log('  PASS: test9_categoryAndType');
 }
 
 // ── Run all ──
@@ -188,4 +259,7 @@ test3_igm10();
 test4_duplicateActions();
 test5_nullInput();
 test6_resolutionDistinction();
-console.log('\nAll tests passed!');
+test7_actors();
+test8_closureFeedback();
+test9_categoryAndType();
+console.log('\nAll 9 tests passed!');

@@ -77,8 +77,9 @@ const igm2Workflow = createIgm2Workflow({
       `INSERT INTO issue_grievances
         (tenant_id, transaction_id, issue_id, order_id, issue_type, category, sub_category,
          description, status, descriptor_code, complainant_name, complainant_phone, complainant_email,
+         item_id, provider_id, fulfillment_id,
          resolved_at, closed_at, raw_payload)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
          status = VALUES(status), raw_payload = VALUES(raw_payload),
          descriptor_code = COALESCE(VALUES(descriptor_code), descriptor_code),
@@ -86,6 +87,9 @@ const igm2Workflow = createIgm2Workflow({
          complainant_name = COALESCE(VALUES(complainant_name), complainant_name),
          complainant_phone = COALESCE(VALUES(complainant_phone), complainant_phone),
          complainant_email = COALESCE(VALUES(complainant_email), complainant_email),
+         item_id = COALESCE(VALUES(item_id), item_id),
+         provider_id = COALESCE(VALUES(provider_id), provider_id),
+         fulfillment_id = COALESCE(VALUES(fulfillment_id), fulfillment_id),
          resolved_at = COALESCE(VALUES(resolved_at), resolved_at),
          closed_at = COALESCE(VALUES(closed_at), closed_at),
          updated_at = NOW()`,
@@ -93,6 +97,7 @@ const igm2Workflow = createIgm2Workflow({
         parsed.orderId, parsed.issueType, parsed.category, parsed.subCategory,
         parsed.shortDesc || '', status, parsed.descriptorCode,
         parsed.complainant?.name, parsed.complainant?.phone, parsed.complainant?.email,
+        parsed.itemId, parsed.providerId, parsed.fulfillmentId,
         parsed.resolvedAt, parsed.closedAt,
         JSON.stringify(rawPayload)]
     ).catch(e => logger.warn('IGM persistence failed:', e.message));
@@ -3460,25 +3465,36 @@ const handleIssue = async (req, res) => {
     }
 
     try {
+      const igm1Parsed = parseIgm2Issue(body);
       await pool.query(`
         INSERT INTO issue_grievances
           (tenant_id, transaction_id, issue_id, order_id, issue_type, category,
-           sub_category, description, status,
-           complainant_name, complainant_phone, complainant_email, raw_payload)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE status = 'open', updated_at = NOW()
+           sub_category, description, status, descriptor_code,
+           complainant_name, complainant_phone, complainant_email,
+           item_id, provider_id, fulfillment_id, raw_payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE status = 'open', raw_payload = VALUES(raw_payload),
+          descriptor_code = COALESCE(VALUES(descriptor_code), descriptor_code),
+          complainant_name = COALESCE(VALUES(complainant_name), complainant_name),
+          complainant_phone = COALESCE(VALUES(complainant_phone), complainant_phone),
+          complainant_email = COALESCE(VALUES(complainant_email), complainant_email),
+          updated_at = NOW()
       `, [
         tenant.id,
         context.transaction_id,
         issueId,
-        issue.order_details?.id || issue.refs?.[0]?.ref_id,
-        issue.issue_type  || 'FULFILLMENT',
-        issue.category || issue.descriptor?.code,
-        issue.sub_category,
-        issue.description || issue.descriptor?.short_desc,
-        issue.complainant_info?.person?.name || issue.actors?.[0]?.info?.person?.name,
-        issue.complainant_info?.contact?.phone || issue.actors?.[0]?.info?.contact?.phone,
-        issue.complainant_info?.contact?.email || issue.actors?.[0]?.info?.contact?.email,
+        igm1Parsed.orderId,
+        igm1Parsed.issueType,
+        igm1Parsed.category,
+        igm1Parsed.subCategory,
+        igm1Parsed.shortDesc || '',
+        igm1Parsed.descriptorCode,
+        igm1Parsed.complainant?.name,
+        igm1Parsed.complainant?.phone,
+        igm1Parsed.complainant?.email,
+        igm1Parsed.itemId,
+        igm1Parsed.providerId,
+        igm1Parsed.fulfillmentId,
         JSON.stringify(body),
       ]);
     } catch (e) {

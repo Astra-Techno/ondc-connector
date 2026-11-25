@@ -446,6 +446,9 @@ const runMigrations = async () => {
   await addColumnIfMissing('issue_grievances', 'descriptor_code', "VARCHAR(50) NULL");
   await addColumnIfMissing('issue_grievances', 'resolved_at', "DATETIME NULL");
   await addColumnIfMissing('issue_grievances', 'closed_at', "DATETIME NULL");
+  await addColumnIfMissing('issue_grievances', 'item_id', "VARCHAR(200) NULL");
+  await addColumnIfMissing('issue_grievances', 'provider_id', "VARCHAR(200) NULL");
+  await addColumnIfMissing('issue_grievances', 'fulfillment_id', "VARCHAR(200) NULL");
 
   // Populate std_city_code from pincode for vendors that don't have it set
   try {

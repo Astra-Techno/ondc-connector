@@ -133,6 +133,64 @@ function parseIgm2Issue(rawPayload) {
   // ── Status ────────────────────────────────────────────────────────────────
   const status = issue.status || null;
 
+  // ── Actors (all) ────────────────────────────────────────────────────────
+  const actors = (issue.actors || []).map(a => ({
+    id:    a.id || null,
+    type:  a.type || null,
+    name:  a.info?.person?.name || a.info?.org?.name || null,
+    phone: a.info?.contact?.phone || null,
+    email: a.info?.contact?.email || null,
+  }));
+
+  // ── Respondent ──────────────────────────────────────────────────────────
+  let respondent = null;
+  if (isV2) {
+    const rActor = (issue.actors || []).find(a => a.type === 'COUNTERPARTY_NP');
+    if (rActor) {
+      respondent = {
+        name:  rActor.info?.person?.name || rActor.info?.org?.name || null,
+        phone: rActor.info?.contact?.phone || null,
+        email: rActor.info?.contact?.email || null,
+        type:  rActor.type,
+        id:    rActor.id || null,
+      };
+    }
+  }
+
+  // ── Closure feedback (CLOSURE_DETAILS rating from actions or tags) ──────
+  let closureFeedback = null;
+  const closedAct = (issue.actions || []).find(a =>
+    a.descriptor?.code === 'CLOSED');
+  if (closedAct) {
+    // Check tags on the CLOSED action
+    const closureTags = (closedAct.tags || []).find(t =>
+      t.descriptor?.code === 'CLOSURE_DETAILS');
+    if (closureTags) {
+      const rating = closureTags.list?.find(l =>
+        l.descriptor?.code === 'RATING')?.value || null;
+      const remarks = closureTags.list?.find(l =>
+        l.descriptor?.code === 'REMARKS')?.value || null;
+      closureFeedback = { rating, remarks };
+    }
+    // Also check closure_reason on the issue itself
+    if (!closureFeedback && issue.closure_reason) {
+      closureFeedback = { rating: issue.closure_reason.code || null, remarks: issue.closure_reason.short_desc || null };
+    }
+  }
+
+  // ── Refund details from accepted resolution tags ────────────────────────
+  let refundDetails = null;
+  if (acceptedResolution?.code === 'REFUND' && acceptedResolution.tags?.length) {
+    const detailTag = acceptedResolution.tags.find(t =>
+      t.descriptor?.code === 'RESOLUTION_DETAILS');
+    if (detailTag) {
+      refundDetails = {
+        item:   detailTag.list?.find(l => l.descriptor?.code === 'ITEM')?.value || null,
+        amount: detailTag.list?.find(l => l.descriptor?.code === 'REFUND_AMOUNT')?.value || null,
+      };
+    }
+  }
+
   return {
     issueId:       issue.id || null,
     transactionId: ctx.transaction_id || null,
@@ -148,9 +206,13 @@ function parseIgm2Issue(rawPayload) {
     subCategory,
     issueType,
     complainant,
+    respondent,
+    actors,
     actions,
     resolutions,
     acceptedResolution,
+    refundDetails,
+    closureFeedback,
     status,
     createdAt,
     resolvedAt,
