@@ -90,8 +90,27 @@ function test1_fullIgm2Closed() {
   assert.strictEqual(r.acceptedResolution.code, 'NO-ACTION', 'accepted = NO-ACTION, NOT REFUND');
   assert.notStrictEqual(r.acceptedResolution.code, 'REFUND', 'must not confuse proposed REFUND with accepted');
 
-  // Refund details should be null (NO-ACTION accepted, not REFUND)
-  assert.strictEqual(r.refundDetails, null, 'no refund details when NO-ACTION');
+  // Refund details extracted from REFUND resolution even when not accepted (UI shows "proposed but not issued")
+  assert.ok(r.refundDetails, 'refundDetails present even when NO-ACTION accepted (shows proposed refund)');
+  assert.strictEqual(r.refundDetails.isAccepted, false, 'refund NOT accepted (NO-ACTION was chosen)');
+  assert.strictEqual(r.refundDetails.amount, '100.00', 'proposed refund amount');
+  assert.strictEqual(r.refundDetails.item, 'P001', 'proposed refund item');
+
+  // Final resolution (new field) — prefers RESOLVED action ref, then ACCEPTED
+  assert.ok(r.finalResolution, 'has final resolution');
+  assert.strictEqual(r.finalResolution.code, 'NO-ACTION', 'final resolution = NO-ACTION');
+
+  // Resolution warning — should be null since ref_id R_NO_ACTION matches a resolution
+  assert.strictEqual(r.resolutionWarning, null, 'no warning when ref matches');
+
+  // GRO — not in this payload
+  assert.strictEqual(r.gro, null, 'no GRO actor in test payload');
+
+  // Actions have actor info and elapsed times
+  assert.strictEqual(r.actions[0].actorName, 'John Doe', 'first action actor name');
+  assert.strictEqual(r.actions[0].actorRole, 'Buyer NP (Interfacing)', 'first action actor role');
+  assert.strictEqual(r.actions[0].elapsedMs, null, 'first action has no elapsed');
+  assert.strictEqual(r.actions[1].elapsedMs, 1000, 'second action elapsed 1s');
 
   // Closure feedback
   assert.ok(r.closureFeedback, 'has closure feedback');
@@ -199,29 +218,40 @@ function test6_resolutionDistinction() {
   assert.strictEqual(r.acceptedResolution.code, 'NO-ACTION',
     'Must distinguish between proposed REFUND option and actually accepted NO-ACTION');
 
-  // Now test with REFUND accepted
+  // Now test with REFUND accepted (both RESOLUTION_ACCEPTED and RESOLVED point to REFUND)
   const refundPayload = JSON.parse(JSON.stringify(igm2ClosedPayload));
   refundPayload.message.issue.actions[6].ref_id = 'R_REFUND'; // RESOLUTION_ACCEPTED points to REFUND
+  refundPayload.message.issue.actions[7].ref_id = 'R_REFUND'; // RESOLVED also points to REFUND
   const r2 = parseIgm2Issue(refundPayload);
   assert.strictEqual(r2.acceptedResolution.code, 'REFUND',
     'When BAP accepts REFUND, accepted resolution should be REFUND');
 
-  // Refund details should be populated
+  // Refund details should be populated and marked as accepted
   assert.ok(r2.refundDetails, 'has refund details when REFUND accepted');
   assert.strictEqual(r2.refundDetails.amount, '100.00', 'refund amount');
   assert.strictEqual(r2.refundDetails.item, 'P001', 'refund item');
+  assert.strictEqual(r2.refundDetails.isAccepted, true, 'refund IS accepted');
+
+  // Final resolution for refund payload
+  assert.ok(r2.finalResolution, 'has final resolution');
+  assert.strictEqual(r2.finalResolution.code, 'REFUND', 'final resolution = REFUND');
 
   console.log('  PASS: test6_resolutionDistinction');
 }
 
-// ── Test 7: Actors extraction ──
+// ── Test 7: Actors extraction (with role labels) ──
 function test7_actors() {
   const r = parseIgm2Issue(igm2ClosedPayload);
   assert.strictEqual(r.actors.length, 2);
   assert.strictEqual(r.actors[0].name, 'John Doe');
   assert.strictEqual(r.actors[0].type, 'INTERFACING_NP');
+  assert.strictEqual(r.actors[0].roleLabel, 'Buyer NP (Interfacing)', 'role label for buyer NP');
+  assert.strictEqual(r.actors[0].personName, 'John Doe', 'person name');
+  assert.strictEqual(r.actors[0].phone, '9876543210', 'phone');
   assert.strictEqual(r.actors[1].name, 'Support Desk');
   assert.strictEqual(r.actors[1].type, 'COUNTERPARTY_NP');
+  assert.strictEqual(r.actors[1].roleLabel, 'Seller NP (Counterparty)', 'role label for seller NP');
+  assert.strictEqual(r.actors[1].orgName, 'CottKart', 'org name');
   console.log('  PASS: test7_actors');
 }
 

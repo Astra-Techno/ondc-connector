@@ -8,7 +8,8 @@ import {
   Search, ChevronRight, ArrowDownLeft, ArrowUpRight, Shield,
   FileText, ExternalLink, User, Package, Hash, Calendar,
   ChevronDown, ChevronUp, Zap, Copy, Filter, ArrowUpDown,
-  ThumbsUp, ThumbsDown, Info, Tag,
+  ThumbsUp, ThumbsDown, Info, Tag, AlertTriangle, Link,
+  Award, Eye, Paperclip, Building,
 } from 'lucide-vue-next'
 
 const toast   = useToast()
@@ -34,6 +35,7 @@ const rawPayload      = ref(null)
 const rawLoading      = ref(false)
 const showRaw         = ref(false)
 const copiedField     = ref(null)
+const protocolFilter  = ref('igm') // 'igm' or 'all'
 
 const statusConfig = {
   open:        { label: 'Open',        color: 'bg-red-100 text-red-700 ring-red-200',     icon: AlertCircle, dot: 'bg-red-500',    cardBg: 'bg-red-50' },
@@ -106,12 +108,19 @@ async function openDetail(issue) {
   detail.value        = null
   rawPayload.value    = null
   showRaw.value       = false
+  protocolFilter.value = 'igm'
 
   const { data, error: e } = await get(`/igm/${issue.id}`)
   if (e) { toast.error(e); showDetail.value = false }
   else { detail.value = data }
   detailLoading.value = false
 }
+
+const filteredProtocol = computed(() => {
+  if (!detail.value) return []
+  if (protocolFilter.value === 'igm') return detail.value.igmTimeline || []
+  return detail.value.protocolTimeline || []
+})
 
 async function loadRawPayload() {
   if (rawPayload.value || !detail.value) return
@@ -144,6 +153,19 @@ function formatTime(d) {
 function formatFullDate(d) {
   if (!d) return '—'
   return new Date(d).toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function formatElapsed(ms) {
+  if (!ms || ms < 0) return null
+  if (ms < 1000) return `${ms}ms`
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const rem = s % 60
+  if (m < 60) return rem > 0 ? `${m}m ${rem}s` : `${m}m`
+  const h = Math.floor(m / 60)
+  const remM = m % 60
+  return remM > 0 ? `${h}h ${remM}m` : `${h}h`
 }
 
 function applyFilters() { page.value = 1; fetchIssues() }
@@ -435,33 +457,37 @@ onMounted(fetchIssues)
               <!-- Content -->
               <div v-else-if="detail" class="p-5 md:p-6 space-y-5">
 
-                <!-- ── Issue Summary ───────────────────────────────────────── -->
+                <!-- ═══ 1. COMPLAINT HEADER ═══════════════════════════════════ -->
                 <div class="rounded-xl bg-gray-50 p-4 md:p-5 space-y-3 ring-1 ring-gray-100">
                   <div class="flex items-start justify-between gap-3">
                     <div class="min-w-0">
                       <div class="text-[10px] text-gray-400 uppercase tracking-wide mb-0.5">Issue ID</div>
                       <div class="font-mono text-sm text-gray-800 flex items-center gap-1.5 group">
-                        <span class="truncate">{{ detail.issue_id }}</span>
+                        <span class="truncate select-all">{{ detail.issue_id }}</span>
                         <button @click="copyText(detail.issue_id, 'issue-id')"
                           class="opacity-0 group-hover:opacity-100 shrink-0 text-gray-400 hover:text-gray-600 transition-opacity">
                           <Copy class="h-3.5 w-3.5" />
                         </button>
-                        <span v-if="copiedField === 'issue-id'" class="text-[10px] text-green-600">Copied</span>
+                        <span v-if="copiedField === 'issue-id'" class="text-[10px] text-green-600 shrink-0">Copied</span>
                       </div>
                     </div>
-                    <span :class="['flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ring-1 shrink-0',
-                      statusConfig[detail.status]?.color || 'bg-gray-100 text-gray-600 ring-gray-200']">
-                      <span class="h-1.5 w-1.5 rounded-full" :class="statusConfig[detail.status]?.dot || 'bg-gray-400'" />
-                      {{ statusConfig[detail.status]?.label || detail.status }}
-                    </span>
+                    <div class="flex items-center gap-2 shrink-0">
+                      <span v-if="detail.parsed?.isV2" class="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-600 font-semibold ring-1 ring-indigo-100">IGM v2.0</span>
+                      <span v-else-if="detail.parsed?.isV2 === false" class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 font-semibold">IGM v1.0</span>
+                      <span :class="['flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ring-1',
+                        statusConfig[detail.status]?.color || 'bg-gray-100 text-gray-600 ring-gray-200']">
+                        <span class="h-1.5 w-1.5 rounded-full" :class="statusConfig[detail.status]?.dot || 'bg-gray-400'" />
+                        {{ statusConfig[detail.status]?.label || detail.status }}
+                      </span>
+                    </div>
                   </div>
 
-                  <div class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                  <div class="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
                     <div>
                       <span class="text-[10px] text-gray-400 uppercase tracking-wide">Category</span>
-                      <div class="text-gray-800 font-medium flex items-center gap-1.5">
+                      <div class="text-gray-800 font-medium flex items-center gap-1.5 mt-0.5">
                         <span v-if="detail.parsed?.descriptorCode || detail.descriptor_code"
-                          class="rounded bg-blue-50 px-1.5 py-0.5 text-xs font-mono text-blue-700">
+                          class="rounded bg-blue-50 px-1.5 py-0.5 text-xs font-mono text-blue-700 ring-1 ring-blue-100">
                           {{ detail.parsed?.descriptorCode || detail.descriptor_code }}
                         </span>
                         <span class="text-xs text-gray-500">{{ categoryLabel(detail.parsed?.descriptorCode || detail.descriptor_code) }}</span>
@@ -469,17 +495,17 @@ onMounted(fetchIssues)
                     </div>
                     <div>
                       <span class="text-[10px] text-gray-400 uppercase tracking-wide">Order ID</span>
-                      <div class="flex items-center gap-1">
+                      <div class="flex items-center gap-1.5 mt-0.5">
                         <span class="font-mono text-gray-800 text-sm">{{ detail.parsed?.orderId || detail.order_id || '—' }}</span>
                         <button v-if="detail.linkedOrder" @click="goToOrder(detail.linkedOrder.id)"
-                          class="text-green-600 hover:text-green-700">
+                          class="text-green-600 hover:text-green-700" title="View order">
                           <ExternalLink class="h-3.5 w-3.5" />
                         </button>
                       </div>
                     </div>
                     <div>
                       <span class="text-[10px] text-gray-400 uppercase tracking-wide">Transaction ID</span>
-                      <div class="font-mono text-xs text-gray-600 truncate group flex items-center gap-1" :title="detail.transaction_id">
+                      <div class="font-mono text-xs text-gray-600 truncate group flex items-center gap-1 mt-0.5" :title="detail.transaction_id">
                         {{ detail.transaction_id || '—' }}
                         <button v-if="detail.transaction_id" @click="copyText(detail.transaction_id, 'txn-id')"
                           class="opacity-0 group-hover:opacity-100 shrink-0 text-gray-400 hover:text-gray-600">
@@ -489,46 +515,67 @@ onMounted(fetchIssues)
                     </div>
                     <div>
                       <span class="text-[10px] text-gray-400 uppercase tracking-wide">Type</span>
-                      <div class="text-gray-700 text-sm flex items-center gap-1.5">
+                      <div class="text-gray-700 text-sm mt-0.5">
                         {{ detail.parsed?.issueType || detail.issue_type || 'ISSUE' }}
-                        <span v-if="detail.parsed?.isV2" class="rounded bg-indigo-50 px-1 py-0.5 text-[10px] text-indigo-600 font-medium">v2.0</span>
-                        <span v-else-if="detail.parsed?.isV2 === false" class="rounded bg-gray-100 px-1 py-0.5 text-[10px] text-gray-500 font-medium">v1.0</span>
                       </div>
                     </div>
                   </div>
 
                   <!-- Description -->
-                  <div class="border-t border-gray-200 pt-2">
+                  <div class="border-t border-gray-200 pt-2.5">
                     <span class="text-[10px] text-gray-400 uppercase tracking-wide">Description</span>
                     <div class="text-gray-700 text-sm mt-0.5">{{ detail.parsed?.shortDesc || detail.description || '—' }}</div>
                     <div v-if="detail.parsed?.longDesc && detail.parsed?.longDesc !== detail.parsed?.shortDesc"
-                      class="text-xs text-gray-500 mt-1">{{ detail.parsed.longDesc }}</div>
+                      class="text-xs text-gray-500 mt-1 italic">{{ detail.parsed.longDesc }}</div>
+                  </div>
+
+                  <!-- References -->
+                  <div v-if="detail.parsed?.providerId || detail.parsed?.itemId || detail.parsed?.fulfillmentId"
+                    class="flex flex-wrap gap-1.5 border-t border-gray-200 pt-2.5">
+                    <span v-if="detail.parsed?.providerId"
+                      class="inline-flex items-center gap-1 rounded bg-gray-100 px-2 py-1 text-[11px] text-gray-600">
+                      <Building class="h-3 w-3 text-gray-400" /> Provider: <strong class="font-mono">{{ detail.parsed.providerId }}</strong>
+                    </span>
+                    <span v-if="detail.parsed?.itemId"
+                      class="inline-flex items-center gap-1 rounded bg-gray-100 px-2 py-1 text-[11px] text-gray-600">
+                      <Package class="h-3 w-3 text-gray-400" /> Item: <strong class="font-mono">{{ detail.parsed.itemId }}</strong>
+                    </span>
+                    <span v-if="detail.parsed?.fulfillmentId"
+                      class="inline-flex items-center gap-1 rounded bg-gray-100 px-2 py-1 text-[11px] text-gray-600">
+                      <Hash class="h-3 w-3 text-gray-400" /> Fulfillment: <strong class="font-mono">{{ detail.parsed.fulfillmentId }}</strong>
+                    </span>
                   </div>
 
                   <!-- Timestamps -->
-                  <div class="grid grid-cols-3 gap-3 text-xs border-t border-gray-200 pt-2">
+                  <div class="grid grid-cols-3 gap-3 text-xs border-t border-gray-200 pt-2.5">
                     <div>
                       <span class="text-[10px] text-gray-400 uppercase tracking-wide">Raised</span>
-                      <div class="text-gray-600">{{ formatDate(detail.parsed?.createdAt || detail.created_at) }}</div>
+                      <div class="text-gray-600 mt-0.5">{{ formatFullDate(detail.parsed?.createdAt || detail.created_at) }}</div>
                     </div>
                     <div>
                       <span class="text-[10px] text-gray-400 uppercase tracking-wide">Resolved</span>
-                      <div class="text-gray-600">{{ formatDate(detail.parsed?.resolvedAt || detail.resolved_at) }}</div>
+                      <div class="text-gray-600 mt-0.5">{{ formatFullDate(detail.parsed?.resolvedAt || detail.resolved_at) }}</div>
                     </div>
                     <div>
                       <span class="text-[10px] text-gray-400 uppercase tracking-wide">Closed</span>
-                      <div class="text-gray-600">{{ formatDate(detail.parsed?.closedAt || detail.closed_at) }}</div>
+                      <div class="text-gray-600 mt-0.5">{{ formatFullDate(detail.parsed?.closedAt || detail.closed_at) }}</div>
                     </div>
                   </div>
                 </div>
 
-                <!-- ── Linked Order ────────────────────────────────────────── -->
+                <!-- ═══ Linked Order ══════════════════════════════════════════ -->
                 <div v-if="detail.linkedOrder" class="rounded-xl bg-blue-50/50 p-4 ring-1 ring-blue-100">
-                  <div class="flex items-center gap-2 mb-2">
-                    <Package class="h-4 w-4 text-blue-600" />
-                    <span class="text-sm font-semibold text-blue-800">Linked Order</span>
+                  <div class="flex items-center justify-between mb-2">
+                    <div class="flex items-center gap-2">
+                      <Package class="h-4 w-4 text-blue-600" />
+                      <span class="text-sm font-semibold text-blue-800">Linked Order</span>
+                    </div>
+                    <button @click="goToOrder(detail.linkedOrder.id)"
+                      class="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 font-medium">
+                      View <ExternalLink class="h-3 w-3" />
+                    </button>
                   </div>
-                  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                  <div class="grid grid-cols-3 gap-3 text-xs">
                     <div>
                       <span class="text-blue-400">Order #</span>
                       <div class="font-mono text-blue-800">{{ detail.linkedOrder.ondc_order_id }}</div>
@@ -541,60 +588,48 @@ onMounted(fetchIssues)
                       <span class="text-blue-400">Amount</span>
                       <div class="text-blue-800 font-medium">₹{{ detail.linkedOrder.total_amount }}</div>
                     </div>
-                    <div>
-                      <span class="text-blue-400">Created</span>
-                      <div class="text-blue-800">{{ formatDate(detail.linkedOrder.created_at) }}</div>
-                    </div>
                   </div>
                 </div>
 
-                <!-- ── References (provider, item, fulfillment) ───────────── -->
-                <div v-if="detail.parsed?.providerId || detail.parsed?.itemId || detail.parsed?.fulfillmentId"
-                  class="rounded-xl bg-white p-4 ring-1 ring-gray-100">
-                  <div class="flex items-center gap-2 mb-3">
-                    <Hash class="h-4 w-4 text-gray-500" />
-                    <span class="text-sm font-semibold text-gray-700">References</span>
-                  </div>
-                  <div class="flex flex-wrap gap-2">
-                    <span v-if="detail.parsed?.providerId"
-                      class="inline-flex items-center gap-1.5 rounded-lg bg-gray-50 px-2.5 py-1.5 text-xs text-gray-600 ring-1 ring-gray-100">
-                      <Tag class="h-3 w-3 text-gray-400" /> Provider: <strong class="font-mono">{{ detail.parsed.providerId }}</strong>
-                    </span>
-                    <span v-if="detail.parsed?.itemId"
-                      class="inline-flex items-center gap-1.5 rounded-lg bg-gray-50 px-2.5 py-1.5 text-xs text-gray-600 ring-1 ring-gray-100">
-                      <Package class="h-3 w-3 text-gray-400" /> Item: <strong class="font-mono">{{ detail.parsed.itemId }}</strong>
-                    </span>
-                    <span v-if="detail.parsed?.fulfillmentId"
-                      class="inline-flex items-center gap-1.5 rounded-lg bg-gray-50 px-2.5 py-1.5 text-xs text-gray-600 ring-1 ring-gray-100">
-                      <Hash class="h-3 w-3 text-gray-400" /> Fulfillment: <strong class="font-mono">{{ detail.parsed.fulfillmentId }}</strong>
-                    </span>
-                  </div>
-                </div>
-
-                <!-- ── Complainant & Respondent ──────────────────────────── -->
-                <div v-if="detail.parsed?.complainant || detail.parsed?.respondent"
-                  class="rounded-xl bg-white p-4 ring-1 ring-gray-100">
+                <!-- ═══ 2. PARTIES ════════════════════════════════════════════ -->
+                <div v-if="detail.parsed?.actors?.length" class="rounded-xl bg-white p-4 ring-1 ring-gray-100">
                   <div class="flex items-center gap-2 mb-3">
                     <User class="h-4 w-4 text-gray-500" />
                     <span class="text-sm font-semibold text-gray-700">Parties</span>
+                    <span class="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-gray-500 font-medium">{{ detail.parsed.actors.length }}</span>
                   </div>
-                  <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div v-if="detail.parsed?.complainant" class="rounded-lg bg-orange-50/50 p-3 ring-1 ring-orange-100">
-                      <div class="text-[10px] text-orange-500 uppercase tracking-wide font-medium mb-1">Complainant</div>
-                      <div class="text-sm font-medium text-gray-800">{{ detail.parsed.complainant.name || '—' }}</div>
-                      <div class="text-xs text-gray-500 mt-0.5">{{ detail.parsed.complainant.type }}</div>
-                      <div v-if="detail.parsed.complainant.phone" class="text-xs text-gray-500 mt-0.5">{{ detail.complainant_phone || detail.parsed.complainant.phone }}</div>
-                      <div v-if="detail.parsed.complainant.email" class="text-xs text-gray-500">{{ detail.complainant_email || detail.parsed.complainant.email }}</div>
-                    </div>
-                    <div v-if="detail.parsed?.respondent" class="rounded-lg bg-green-50/50 p-3 ring-1 ring-green-100">
-                      <div class="text-[10px] text-green-500 uppercase tracking-wide font-medium mb-1">Respondent</div>
-                      <div class="text-sm font-medium text-gray-800">{{ detail.parsed.respondent.name || '—' }}</div>
-                      <div class="text-xs text-gray-500 mt-0.5">{{ detail.parsed.respondent.type }}</div>
+                  <div class="grid grid-cols-1 gap-2">
+                    <div v-for="actor in detail.parsed.actors" :key="actor.id"
+                      :class="['rounded-lg p-3 ring-1',
+                        actor.type === 'INTERFACING_NP' ? 'bg-orange-50/40 ring-orange-100' :
+                        actor.type === 'COUNTERPARTY_NP' ? 'bg-green-50/40 ring-green-100' :
+                        actor.type?.includes('GRO') ? 'bg-indigo-50/40 ring-indigo-100' :
+                        'bg-gray-50/40 ring-gray-100']">
+                      <div class="flex items-center justify-between">
+                        <div>
+                          <div class="text-sm font-medium text-gray-800">{{ actor.personName || actor.orgName || '—' }}</div>
+                          <div v-if="actor.orgName && actor.personName" class="text-[11px] text-gray-500 mt-0.5">
+                            <Building class="inline h-3 w-3 -mt-0.5 text-gray-400" /> {{ actor.orgName }}
+                          </div>
+                        </div>
+                        <span :class="['rounded px-1.5 py-0.5 text-[10px] font-medium',
+                          actor.type === 'INTERFACING_NP' ? 'bg-orange-100 text-orange-700' :
+                          actor.type === 'COUNTERPARTY_NP' ? 'bg-green-100 text-green-700' :
+                          actor.type?.includes('GRO') ? 'bg-indigo-100 text-indigo-700' :
+                          'bg-gray-100 text-gray-600']">
+                          {{ actor.roleLabel || actor.type }}
+                        </span>
+                      </div>
+                      <div v-if="actor.phone || actor.email" class="flex items-center gap-3 mt-1.5 text-[11px] text-gray-500">
+                        <span v-if="actor.phone">{{ actor.phone }}</span>
+                        <span v-if="actor.email">{{ actor.email }}</span>
+                      </div>
+                      <div class="font-mono text-[10px] text-gray-400 mt-1 truncate" :title="actor.id">{{ actor.id }}</div>
                     </div>
                   </div>
                 </div>
 
-                <!-- ── Action Timeline ─────────────────────────────────────── -->
+                <!-- ═══ 3. ACTION TIMELINE ════════════════════════════════════ -->
                 <div v-if="detail.parsed?.actions?.length" class="rounded-xl bg-white p-4 ring-1 ring-gray-100">
                   <div class="flex items-center gap-2 mb-4">
                     <Zap class="h-4 w-4 text-indigo-500" />
@@ -604,11 +639,15 @@ onMounted(fetchIssues)
                     </span>
                   </div>
                   <div class="relative pl-6 space-y-0">
-                    <!-- Vertical line -->
                     <div class="absolute left-[11px] top-2 bottom-2 w-px bg-gray-200" />
 
                     <div v-for="(act, idx) in detail.parsed.actions" :key="idx"
                       class="relative pb-3 last:pb-0">
+                      <!-- Elapsed badge between actions -->
+                      <div v-if="act.elapsedMs && act.elapsedMs > 0"
+                        class="absolute -left-[22px] -top-1.5 text-[9px] text-gray-400 bg-white px-0.5 z-10 whitespace-nowrap">
+                        +{{ formatElapsed(act.elapsedMs) }}
+                      </div>
                       <!-- Dot -->
                       <div :class="['absolute -left-[13px] top-1.5 h-3 w-3 rounded-full border-2 border-white shadow-sm', actionDot(act.code)]" />
 
@@ -620,63 +659,102 @@ onMounted(fetchIssues)
                         </div>
                         <div v-if="act.short_desc && act.short_desc !== act.code"
                           class="text-[11px] mt-0.5 opacity-80">{{ act.short_desc }}</div>
-                        <div class="flex items-center gap-2 mt-0.5">
-                          <span v-if="act.action_by" class="text-[10px] opacity-60 truncate max-w-[200px]" :title="act.action_by">
+                        <div class="flex items-center gap-2 mt-0.5 flex-wrap">
+                          <span v-if="act.actorName" class="text-[10px] opacity-70">
+                            by <strong>{{ act.actorName }}</strong>
+                            <span v-if="act.actorRole" class="opacity-60"> ({{ act.actorRole }})</span>
+                          </span>
+                          <span v-else-if="act.action_by" class="text-[10px] opacity-60 truncate max-w-[180px]" :title="act.action_by">
                             by {{ act.action_by }}
                           </span>
-                          <span v-if="act.ref_id" class="text-[10px] opacity-50 font-mono">
-                            ref: {{ act.ref_id }}
+                          <span v-if="act.ref_id" class="text-[10px] opacity-50 font-mono flex items-center gap-0.5">
+                            <Link class="h-2.5 w-2.5" /> {{ act.ref_id }}
                           </span>
+                        </div>
+                        <!-- Attachments -->
+                        <div v-if="act.attachments" class="flex flex-wrap gap-1.5 mt-1.5">
+                          <a v-for="(att, ai) in act.attachments" :key="ai"
+                            :href="att.url" target="_blank" rel="noopener noreferrer"
+                            class="inline-flex items-center gap-1 rounded bg-white/60 px-1.5 py-0.5 text-[10px] text-blue-600 ring-1 ring-blue-200 hover:bg-blue-50">
+                            <Paperclip class="h-2.5 w-2.5" /> {{ att.mimetype || 'attachment' }}
+                          </a>
                         </div>
                       </div>
                     </div>
                   </div>
                 </div>
 
-                <!-- ── Resolutions ─────────────────────────────────────────── -->
-                <div v-if="detail.parsed?.resolutions?.length" class="rounded-xl bg-white p-4 ring-1 ring-gray-100">
-                  <div class="flex items-center gap-2 mb-3">
-                    <FileText class="h-4 w-4 text-green-500" />
-                    <span class="text-sm font-semibold text-gray-700">Resolution Options</span>
+                <!-- ═══ 4. FINAL RESOLUTION ═══════════════════════════════════ -->
+                <div v-if="detail.parsed?.finalResolution || detail.parsed?.resolutions?.length"
+                  class="rounded-xl bg-white p-4 ring-1 ring-gray-100 space-y-3">
+
+                  <!-- Final outcome (prominent) -->
+                  <div v-if="detail.parsed?.finalResolution" class="rounded-lg bg-green-50 p-3 ring-1 ring-green-200">
+                    <div class="flex items-center gap-2 mb-1.5">
+                      <Award class="h-4 w-4 text-green-600" />
+                      <span class="text-sm font-semibold text-green-800">Final Resolution</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <span class="rounded-full bg-green-100 px-3 py-1 text-sm font-bold text-green-800 ring-1 ring-green-300">
+                        {{ detail.parsed.finalResolution.code }}
+                      </span>
+                      <span class="text-xs text-green-700">{{ detail.parsed.finalResolution.short_desc }}</span>
+                    </div>
+                    <!-- Show refund only if REFUND was the accepted resolution -->
+                    <div v-if="detail.parsed.refundDetails?.isAccepted"
+                      class="mt-2 pt-2 border-t border-green-200 text-xs">
+                      <span class="text-green-700 font-medium">Refund issued:</span>
+                      <span class="text-green-800 font-bold ml-1">₹{{ detail.parsed.refundDetails.amount }}</span>
+                      <span v-if="detail.parsed.refundDetails.item" class="text-green-600 ml-2">for item {{ detail.parsed.refundDetails.item }}</span>
+                    </div>
                   </div>
 
-                  <div class="space-y-2">
-                    <div v-for="res in detail.parsed.resolutions.filter(r => r.code !== 'PARENT')" :key="res.id"
-                      :class="[
-                        'rounded-lg border p-3 text-sm transition-colors',
-                        detail.parsed.acceptedResolution?.id === res.id
-                          ? 'border-green-300 bg-green-50 ring-1 ring-green-200'
-                          : 'border-gray-200 bg-gray-50'
-                      ]">
-                      <div class="flex items-center justify-between">
-                        <span class="font-medium text-gray-800">{{ res.code }}</span>
-                        <span v-if="detail.parsed.acceptedResolution?.id === res.id"
-                          class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-bold text-green-700 ring-1 ring-green-200">
-                          <CheckCircle class="h-3 w-3" /> Accepted
-                        </span>
-                        <span v-else class="text-[10px] text-gray-400 italic">Proposed</span>
-                      </div>
-                      <div class="text-xs text-gray-500 mt-1">{{ res.short_desc }}</div>
+                  <!-- Resolution warning -->
+                  <div v-if="detail.parsed?.resolutionWarning"
+                    class="flex items-start gap-2 rounded-lg bg-amber-50 p-2.5 ring-1 ring-amber-200 text-xs text-amber-700">
+                    <AlertTriangle class="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                    <span>{{ detail.parsed.resolutionWarning }}</span>
+                  </div>
 
-                      <!-- Refund details if present -->
-                      <div v-if="detail.parsed.acceptedResolution?.id === res.id && detail.parsed.refundDetails"
-                        class="mt-2 pt-2 border-t border-green-200 text-xs">
-                        <span class="text-green-700 font-medium">Refund:</span>
-                        <span class="text-green-800 font-bold ml-1">₹{{ detail.parsed.refundDetails.amount }}</span>
-                        <span v-if="detail.parsed.refundDetails.item" class="text-green-600 ml-2">Item: {{ detail.parsed.refundDetails.item }}</span>
+                  <!-- Proposed options -->
+                  <div v-if="detail.parsed?.resolutions?.filter(r => r.code !== 'PARENT').length">
+                    <div class="flex items-center gap-2 mb-2">
+                      <FileText class="h-4 w-4 text-gray-400" />
+                      <span class="text-sm font-medium text-gray-600">Proposed Options</span>
+                    </div>
+                    <div class="space-y-1.5">
+                      <div v-for="res in detail.parsed.resolutions.filter(r => r.code !== 'PARENT')" :key="res.id"
+                        :class="['rounded-lg border px-3 py-2 text-sm',
+                          detail.parsed.finalResolution?.id === res.id
+                            ? 'border-green-300 bg-green-50/50'
+                            : 'border-gray-200 bg-gray-50/50']">
+                        <div class="flex items-center justify-between">
+                          <span class="font-medium text-gray-700 text-xs">{{ res.code }}</span>
+                          <span v-if="detail.parsed.finalResolution?.id === res.id"
+                            class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-bold text-green-700">
+                            <CheckCircle class="h-3 w-3" /> Selected
+                          </span>
+                          <span v-else class="text-[10px] text-gray-400 italic">Proposed</span>
+                        </div>
+                        <div class="text-[11px] text-gray-500 mt-0.5">{{ res.short_desc }}</div>
+                        <!-- Proposed refund amount (not issued if NO-ACTION was selected) -->
+                        <div v-if="res.code === 'REFUND' && detail.parsed.refundDetails && !detail.parsed.refundDetails.isAccepted"
+                          class="text-[11px] text-gray-400 mt-1 italic">
+                          Proposed ₹{{ detail.parsed.refundDetails.amount }} (not issued)
+                        </div>
                       </div>
                     </div>
                   </div>
                 </div>
 
-                <!-- ── Closure Feedback ────────────────────────────────────── -->
+                <!-- ═══ 5. CLOSURE FEEDBACK ═══════════════════════════════════ -->
                 <div v-if="detail.parsed?.closureFeedback" class="rounded-xl bg-white p-4 ring-1 ring-gray-100">
                   <div class="flex items-center gap-2 mb-2">
                     <component :is="detail.parsed.closureFeedback.rating === 'THUMBS_UP' ? ThumbsUp : ThumbsDown"
                       :class="['h-4 w-4', detail.parsed.closureFeedback.rating === 'THUMBS_UP' ? 'text-green-500' : 'text-red-500']" />
                     <span class="text-sm font-semibold text-gray-700">Closure Feedback</span>
                   </div>
-                  <div class="flex items-center gap-2">
+                  <div class="flex items-center gap-2 flex-wrap">
                     <span :class="['rounded-full px-2.5 py-1 text-xs font-medium ring-1',
                       detail.parsed.closureFeedback.rating === 'THUMBS_UP'
                         ? 'bg-green-50 text-green-700 ring-green-200'
@@ -687,55 +765,82 @@ onMounted(fetchIssues)
                       {{ detail.parsed.closureFeedback.remarks }}
                     </span>
                   </div>
+                  <div class="text-[11px] text-gray-400 mt-2 flex items-center gap-3">
+                    <span v-if="detail.parsed.closureFeedback.closedByName">
+                      Closed by <strong>{{ detail.parsed.closureFeedback.closedByName }}</strong>
+                    </span>
+                    <span v-if="detail.parsed.closureFeedback.closedAt">
+                      {{ formatFullDate(detail.parsed.closureFeedback.closedAt) }}
+                    </span>
+                  </div>
                 </div>
 
-                <!-- ── Protocol Timeline ───────────────────────────────────── -->
+                <!-- ═══ 6. PROTOCOL LOG ═══════════════════════════════════════ -->
                 <div v-if="detail.protocolTimeline?.length" class="rounded-xl bg-white p-4 ring-1 ring-gray-100">
                   <div class="flex items-center justify-between mb-3">
                     <div class="flex items-center gap-2">
                       <MessageSquare class="h-4 w-4 text-gray-500" />
                       <span class="text-sm font-semibold text-gray-700">Protocol Log</span>
-                      <span class="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-gray-500 font-medium">
-                        {{ detail.protocolTimeline.length }}
-                      </span>
                     </div>
-                    <button v-if="detail.transaction_id" @click="goToWorkflow(detail.transaction_id)"
-                      class="flex items-center gap-1 text-xs text-green-600 hover:text-green-700 font-medium">
-                      Full timeline <ExternalLink class="h-3 w-3" />
-                    </button>
+                    <div class="flex items-center gap-2">
+                      <div class="flex rounded-lg bg-gray-100 p-0.5 text-[10px]">
+                        <button @click="protocolFilter = 'igm'"
+                          :class="['rounded-md px-2 py-0.5 font-medium transition-colors',
+                            protocolFilter === 'igm' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700']">
+                          IGM Only
+                        </button>
+                        <button @click="protocolFilter = 'all'"
+                          :class="['rounded-md px-2 py-0.5 font-medium transition-colors',
+                            protocolFilter === 'all' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700']">
+                          All Events
+                        </button>
+                      </div>
+                      <button v-if="detail.transaction_id" @click="goToWorkflow(detail.transaction_id)"
+                        class="flex items-center gap-1 text-xs text-green-600 hover:text-green-700 font-medium">
+                        <ExternalLink class="h-3 w-3" />
+                      </button>
+                    </div>
                   </div>
 
-                  <div class="space-y-1 max-h-56 overflow-y-auto pr-1">
-                    <div v-for="t in detail.protocolTimeline" :key="t.id"
-                      class="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs hover:bg-gray-50 transition-colors">
+                  <div class="space-y-0.5 max-h-64 overflow-y-auto pr-1">
+                    <div v-for="t in filteredProtocol" :key="t.id"
+                      :class="['flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs transition-colors',
+                        t.is_igm ? 'hover:bg-gray-50' : 'hover:bg-gray-50 opacity-60']">
                       <span :class="[
-                        'flex h-6 w-6 shrink-0 items-center justify-center rounded-md',
+                        'flex h-5 w-5 shrink-0 items-center justify-center rounded',
                         t.direction === 'inbound'
                           ? 'bg-blue-100 text-blue-600'
                           : 'bg-green-100 text-green-600'
                       ]">
-                        <component :is="t.direction === 'inbound' ? ArrowDownLeft : ArrowUpRight" class="h-3 w-3" />
+                        <component :is="t.direction === 'inbound' ? ArrowDownLeft : ArrowUpRight" class="h-2.5 w-2.5" />
                       </span>
-                      <span class="font-mono font-bold text-gray-700 w-24 shrink-0">{{ t.action }}</span>
+                      <span :class="['font-mono font-bold w-24 shrink-0', t.is_igm ? 'text-gray-700' : 'text-gray-500']">{{ t.action }}</span>
                       <span v-if="t.issue_status" :class="['rounded-full px-1.5 py-0.5 text-[10px] font-medium ring-1',
                         statusConfig[t.issue_status?.toLowerCase()]?.color || 'bg-gray-100 text-gray-600 ring-gray-200']">
                         {{ t.issue_status }}
                       </span>
-                      <span class="ml-auto text-gray-400 whitespace-nowrap">{{ formatTime(t.created_at) }}</span>
+                      <span v-if="t.ack_status" :class="['text-[9px] font-medium',
+                        t.ack_status === 'ACK' ? 'text-green-600' : t.ack_status === 'NACK' ? 'text-red-600' : 'text-gray-400']">
+                        {{ t.ack_status }}
+                      </span>
+                      <span class="ml-auto text-gray-400 whitespace-nowrap font-mono text-[10px]">{{ formatTime(t.created_at) }}</span>
                     </div>
+                  </div>
+                  <div class="text-[10px] text-gray-400 mt-2 text-right">
+                    {{ filteredProtocol.length }} of {{ detail.protocolTimeline.length }} events
                   </div>
                 </div>
 
-                <!-- ── Raw Payload (lazy-loaded, collapsed) ──────────────── -->
+                <!-- ═══ 7. RAW PAYLOAD ════════════════════════════════════════ -->
                 <div v-if="detail.has_raw_payload" class="rounded-xl bg-white ring-1 ring-gray-100 overflow-hidden">
                   <button @click="toggleRaw"
                     class="flex items-center justify-between w-full px-4 py-3 text-sm text-gray-600 hover:bg-gray-50 transition-colors">
                     <span class="flex items-center gap-2">
-                      <FileText class="h-4 w-4 text-gray-400" />
+                      <Eye class="h-4 w-4 text-gray-400" />
                       Raw ONDC Payload
                     </span>
                     <div class="flex items-center gap-2">
-                      <span v-if="rawLoading" class="text-[10px] text-gray-400">Loading...</span>
+                      <span v-if="rawLoading" class="text-[10px] text-gray-400 animate-pulse">Loading...</span>
                       <component :is="showRaw ? ChevronUp : ChevronDown" class="h-4 w-4 text-gray-400" />
                     </div>
                   </button>
@@ -744,13 +849,14 @@ onMounted(fetchIssues)
                     leave-active-class="transition-all duration-150" leave-from-class="opacity-100 max-h-[500px]" leave-to-class="opacity-0 max-h-0">
                     <div v-if="showRaw && rawPayload" class="border-t border-gray-100 relative">
                       <button @click="copyText(prettyJson(rawPayload), 'raw-json')"
-                        class="absolute top-2 right-2 z-10 rounded bg-gray-800/80 p-1.5 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors">
+                        class="absolute top-2 right-2 z-10 rounded bg-gray-800/80 p-1.5 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors"
+                        title="Copy JSON">
                         <Copy class="h-3.5 w-3.5" />
                       </button>
-                      <span v-if="copiedField === 'raw-json'" class="absolute top-2 right-10 z-10 text-[10px] text-green-400 bg-gray-800/80 rounded px-1.5 py-1">
+                      <span v-if="copiedField === 'raw-json'" class="absolute top-2.5 right-10 z-10 text-[10px] text-green-400 bg-gray-800/80 rounded px-1.5 py-0.5">
                         Copied!
                       </span>
-                      <pre class="p-4 text-[11px] font-mono whitespace-pre-wrap break-all max-h-80 overflow-y-auto bg-gray-900 text-green-300">{{ prettyJson(rawPayload) }}</pre>
+                      <pre class="p-4 text-[11px] font-mono whitespace-pre-wrap break-all max-h-80 overflow-y-auto bg-gray-900 text-green-300 select-text">{{ prettyJson(rawPayload) }}</pre>
                     </div>
                   </Transition>
                 </div>

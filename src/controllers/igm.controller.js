@@ -4,6 +4,12 @@ const logger = require('../utils/logger');
 const { parseIgm2Issue } = require('../services/ondc/parseIgm2Issue');
 
 const IGM_ACTIONS = ['issue', 'on_issue', 'issue_status', 'on_issue_status', 'on_update', 'on_status'];
+const ALL_ORDER_ACTIONS = [
+  'search', 'on_search', 'select', 'on_select', 'init', 'on_init',
+  'confirm', 'on_confirm', 'status', 'on_status', 'cancel', 'on_cancel',
+  'update', 'on_update', 'track', 'on_track', 'support', 'on_support',
+  'issue', 'on_issue', 'issue_status', 'on_issue_status',
+];
 
 // Mask PII for display — show first 2 + last 2 chars
 const maskPhone = (p) => p && p.length > 4 ? p.slice(0, 2) + '***' + p.slice(-2) : p;
@@ -151,8 +157,9 @@ const getIssue = async (req, res) => {
       }
     }
 
-    // Fetch protocol timeline from ondc_transactions
+    // Fetch protocol timeline from ondc_transactions (all order events for this txn)
     let protocolTimeline = [];
+    let igmTimeline = [];
     if (row.transaction_id) {
       const [txnRows] = await pool.query(
         `SELECT id, action, direction, message_id, status,
@@ -160,10 +167,11 @@ const getIssue = async (req, res) => {
          FROM ondc_transactions
          WHERE tenant_id = ? AND transaction_id = ? AND action IN (?)
          ORDER BY created_at ASC, id ASC`,
-        [req.tenant.id, row.transaction_id, IGM_ACTIONS]
+        [req.tenant.id, row.transaction_id, ALL_ORDER_ACTIONS]
       );
-      protocolTimeline = txnRows.map(t => {
+      const mapRow = (t) => {
         let issueStatus = null;
+        let ackStatus = t.status || null;
         try {
           const p = typeof t.request_payload === 'string' ? JSON.parse(t.request_payload) : t.request_payload;
           issueStatus = p?.message?.issue?.status || null;
@@ -173,11 +181,14 @@ const getIssue = async (req, res) => {
           action: t.action,
           direction: t.direction,
           message_id: t.message_id,
-          status: t.status,
+          ack_status: ackStatus,
           issue_status: issueStatus,
+          is_igm: IGM_ACTIONS.includes(t.action),
           created_at: t.created_at,
         };
-      });
+      };
+      protocolTimeline = txnRows.map(mapRow);
+      igmTimeline = protocolTimeline.filter(t => t.is_igm);
     }
 
     // Fetch linked order summary (if exists)
@@ -213,6 +224,7 @@ const getIssue = async (req, res) => {
       ...rowWithoutRaw,
       parsed,
       protocolTimeline,
+      igmTimeline,
       linkedOrder,
       has_raw_payload: !!raw_payload,
     });
