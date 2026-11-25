@@ -439,6 +439,11 @@ const runMigrations = async () => {
     logger.warn('ondc_transactions.direction migration:', e.message);
   }
 
+  // IGM: add parsed fields to issue_grievances (additive, safe)
+  await addColumnIfMissing('issue_grievances', 'descriptor_code', "VARCHAR(50) NULL");
+  await addColumnIfMissing('issue_grievances', 'resolved_at', "DATETIME NULL");
+  await addColumnIfMissing('issue_grievances', 'closed_at', "DATETIME NULL");
+
   // Populate std_city_code from pincode for vendors that don't have it set
   try {
     await pool.query(`

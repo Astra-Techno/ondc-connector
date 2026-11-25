@@ -64,19 +64,37 @@ let lastIssueId = null;
 const { FLOWS, getWorkflowProfile, isMerchantRto, isCertificationContext } = require('../services/ondc/workflowPolicy');
 const { createIgm2Workflow } = require('../services/ondc/igm2Workflow');
 const { affectedItem, buildIgmOrderUpdate } = require('../services/ondc/igmOrderUpdate');
+const { parseIgm2Issue } = require('../services/ondc/parseIgm2Issue');
 
 const igm2Workflow = createIgm2Workflow({
   send: sendCallback,
   log: message => logger.error('IGM 2.0 workflow:', message),
   persist: async (session, status) => {
+    const rawPayload = { context: session.context, message: { issue: { ...session.issue, actions: session.actions,
+      resolutions: session.resolutions, status: session.status } } };
+    const parsed = parseIgm2Issue(rawPayload);
     await pool.query(
-      `INSERT INTO issue_grievances (tenant_id, transaction_id, issue_id, order_id, description, status, raw_payload)
-       VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE status = VALUES(status), raw_payload = VALUES(raw_payload), updated_at = NOW()`,
-      [session.tenant.id, session.context.transaction_id, session.issue.id,
-        session.issue.refs?.find(r => r.ref_type === 'ORDER')?.ref_id || null,
-        session.issue.descriptor?.short_desc || '', status,
-        JSON.stringify({ context: session.context, message: { issue: { ...session.issue, actions: session.actions,
-          resolutions: session.resolutions, status: session.status } } })]
+      `INSERT INTO issue_grievances
+        (tenant_id, transaction_id, issue_id, order_id, issue_type, category, sub_category,
+         description, status, descriptor_code, complainant_name, complainant_phone, complainant_email,
+         resolved_at, closed_at, raw_payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         status = VALUES(status), raw_payload = VALUES(raw_payload),
+         descriptor_code = COALESCE(VALUES(descriptor_code), descriptor_code),
+         category = COALESCE(VALUES(category), category),
+         complainant_name = COALESCE(VALUES(complainant_name), complainant_name),
+         complainant_phone = COALESCE(VALUES(complainant_phone), complainant_phone),
+         complainant_email = COALESCE(VALUES(complainant_email), complainant_email),
+         resolved_at = COALESCE(VALUES(resolved_at), resolved_at),
+         closed_at = COALESCE(VALUES(closed_at), closed_at),
+         updated_at = NOW()`,
+      [session.tenant.id, parsed.transactionId, session.issue.id,
+        parsed.orderId, parsed.issueType, parsed.category, parsed.subCategory,
+        parsed.shortDesc || '', status, parsed.descriptorCode,
+        parsed.complainant?.name, parsed.complainant?.phone, parsed.complainant?.email,
+        parsed.resolvedAt, parsed.closedAt,
+        JSON.stringify(rawPayload)]
     ).catch(e => logger.warn('IGM persistence failed:', e.message));
   },
   getRefundAmount: session => {
