@@ -51,6 +51,9 @@ const {
 const app  = express();
 const PORT = process.env.PORT || 4000;
 
+// Trust first proxy (Nginx) — required for express-rate-limit behind reverse proxy
+app.set('trust proxy', 1);
+
 // ─── Middleware ───────────────────────────────────────────────────────────────
 const limiter = rateLimit({ windowMs: 60 * 1000, max: 300, message: { error: 'Too many requests' } });
 
