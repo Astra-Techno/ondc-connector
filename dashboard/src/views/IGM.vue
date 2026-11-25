@@ -542,8 +542,8 @@ onMounted(fetchIssues)
                       <div class="text-blue-800 font-medium">₹{{ detail.linkedOrder.total_amount }}</div>
                     </div>
                     <div>
-                      <span class="text-blue-400">Buyer</span>
-                      <div class="text-blue-800">{{ detail.linkedOrder.buyer_name || '—' }}</div>
+                      <span class="text-blue-400">Created</span>
+                      <div class="text-blue-800">{{ formatDate(detail.linkedOrder.created_at) }}</div>
                     </div>
                   </div>
                 </div>

@@ -185,7 +185,7 @@ const getIssue = async (req, res) => {
     const lookupOrderId = row.order_id || parsed?.orderId;
     if (lookupOrderId) {
       const [orderRows] = await pool.query(
-        `SELECT id, ondc_order_id, status, total_amount, buyer_name, created_at
+        `SELECT id, ondc_order_id, status, total_amount, created_at
          FROM ondc_orders
          WHERE tenant_id = ? AND (ondc_order_id = ? OR id = ?)
          LIMIT 1`,
@@ -197,7 +197,6 @@ const getIssue = async (req, res) => {
           ondc_order_id: orderRows[0].ondc_order_id,
           status:        orderRows[0].status,
           total_amount:  orderRows[0].total_amount,
-          buyer_name:    orderRows[0].buyer_name,
           created_at:    orderRows[0].created_at,
         };
       }
