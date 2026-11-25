@@ -107,7 +107,11 @@ const igm2Workflow = createIgm2Workflow({
           parsed.resolvedAt, parsed.closedAt, rawJson]
       );
     } catch (e) {
-      logger.error('IGM persist FAILED (full):', e.message, { issue_id: session.issue.id, status });
+      logger.error(`IGM persist FAILED: ${e.message}`, {
+        issue_id: session.issue.id, status, sql_code: e.code || null, sql_errno: e.errno || null,
+        tenant_id: session.tenant.id, issue_type: parsed.issueType,
+        mapped_issue_type: mapIssueTypeToDb(parsed.issueType),
+      });
       // Fallback: try without newer columns in case migration hasn't run
       try {
         await pool.query(
@@ -121,9 +125,11 @@ const igm2Workflow = createIgm2Workflow({
             parsed.orderId, mapIssueTypeToDb(parsed.issueType), parsed.category, parsed.subCategory,
             parsed.shortDesc || '', status, rawJson]
         );
-        logger.info('IGM persist fallback succeeded', { issue_id: session.issue.id });
+        logger.info(`IGM persist fallback succeeded for issue ${session.issue.id}`);
       } catch (e2) {
-        logger.error('IGM persist fallback ALSO FAILED:', e2.message, { issue_id: session.issue.id });
+        logger.error(`IGM persist fallback ALSO FAILED: ${e2.message}`, {
+          issue_id: session.issue.id, sql_code: e2.code || null, sql_errno: e2.errno || null,
+        });
       }
     }
   },
@@ -3524,7 +3530,10 @@ const handleIssue = async (req, res) => {
           JSON.stringify(body),
         ]);
       } catch (e1) {
-        logger.error('IGM 1.0 persist FAILED (full):', e1.message, { issue_id: issueId });
+        logger.error(`IGM 1.0 persist FAILED: ${e1.message}`, {
+          issue_id: issueId, sql_code: e1.code || null, sql_errno: e1.errno || null,
+          issue_type: igm1Parsed.issueType, mapped_issue_type: mapIssueTypeToDb(igm1Parsed.issueType),
+        });
         // Fallback without newer columns
         await pool.query(`
           INSERT INTO issue_grievances
@@ -3537,10 +3546,12 @@ const handleIssue = async (req, res) => {
           igm1Parsed.orderId, mapIssueTypeToDb(igm1Parsed.issueType), igm1Parsed.category,
           igm1Parsed.subCategory, igm1Parsed.shortDesc || '', JSON.stringify(body),
         ]);
-        logger.info('IGM 1.0 persist fallback succeeded', { issue_id: issueId });
+        logger.info(`IGM 1.0 persist fallback succeeded for issue ${issueId}`);
       }
     } catch (e) {
-      logger.error('Issue save completely failed:', e.message, { issue_id: issueId });
+      logger.error(`Issue save completely failed: ${e.message}`, {
+        issue_id: issueId, sql_code: e.code || null, sql_errno: e.errno || null,
+      });
     }
 
     const cached = issueCache.get(issueId);
