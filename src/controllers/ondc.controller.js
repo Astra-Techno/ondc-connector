@@ -66,6 +66,10 @@ const { createIgm2Workflow } = require('../services/ondc/igm2Workflow');
 const { affectedItem, buildIgmOrderUpdate } = require('../services/ondc/igmOrderUpdate');
 const { parseIgm2Issue } = require('../services/ondc/parseIgm2Issue');
 
+// Map IGM issue_type to DB enum values
+const ISSUE_TYPE_DB_MAP = { item: 'item', fulfillment: 'fulfillment', payment: 'payment' };
+const mapIssueTypeToDb = (t) => ISSUE_TYPE_DB_MAP[(t || '').toLowerCase()] || 'other';
+
 const igm2Workflow = createIgm2Workflow({
   send: sendCallback,
   log: message => logger.error('IGM 2.0 workflow:', message),
@@ -96,7 +100,7 @@ const igm2Workflow = createIgm2Workflow({
            closed_at = COALESCE(VALUES(closed_at), closed_at),
            updated_at = NOW()`,
         [session.tenant.id, parsed.transactionId, session.issue.id,
-          parsed.orderId, parsed.issueType, parsed.category, parsed.subCategory,
+          parsed.orderId, mapIssueTypeToDb(parsed.issueType), parsed.category, parsed.subCategory,
           parsed.shortDesc || '', status, parsed.descriptorCode,
           parsed.complainant?.name, parsed.complainant?.phone, parsed.complainant?.email,
           parsed.itemId, parsed.providerId, parsed.fulfillmentId,
@@ -114,7 +118,7 @@ const igm2Workflow = createIgm2Workflow({
            ON DUPLICATE KEY UPDATE
              status = VALUES(status), raw_payload = VALUES(raw_payload), updated_at = NOW()`,
           [session.tenant.id, parsed.transactionId, session.issue.id,
-            parsed.orderId, parsed.issueType, parsed.category, parsed.subCategory,
+            parsed.orderId, mapIssueTypeToDb(parsed.issueType), parsed.category, parsed.subCategory,
             parsed.shortDesc || '', status, rawJson]
         );
         logger.info('IGM persist fallback succeeded', { issue_id: session.issue.id });
@@ -3506,7 +3510,7 @@ const handleIssue = async (req, res) => {
           context.transaction_id,
           issueId,
           igm1Parsed.orderId,
-          igm1Parsed.issueType,
+          mapIssueTypeToDb(igm1Parsed.issueType),
           igm1Parsed.category,
           igm1Parsed.subCategory,
           igm1Parsed.shortDesc || '',
@@ -3530,7 +3534,7 @@ const handleIssue = async (req, res) => {
           ON DUPLICATE KEY UPDATE status = 'open', raw_payload = VALUES(raw_payload), updated_at = NOW()
         `, [
           tenant.id, context.transaction_id, issueId,
-          igm1Parsed.orderId, igm1Parsed.issueType, igm1Parsed.category,
+          igm1Parsed.orderId, mapIssueTypeToDb(igm1Parsed.issueType), igm1Parsed.category,
           igm1Parsed.subCategory, igm1Parsed.shortDesc || '', JSON.stringify(body),
         ]);
         logger.info('IGM 1.0 persist fallback succeeded', { issue_id: issueId });
