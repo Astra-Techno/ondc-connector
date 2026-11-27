@@ -287,6 +287,8 @@ const updateOrderStatus = async (req, res) => {
 };
 
 // Save incoming ONDC order and notify tenant
+// Supports both DB schemas: live (buyer_info JSON, no transaction_id column)
+// and extended (flat buyer columns, transaction_id column)
 const saveONDCOrder = async (tenantId, orderData, rawPayload) => {
   try {
     const order = orderData.message?.order;
@@ -301,35 +303,75 @@ const saveONDCOrder = async (tenantId, orderData, rawPayload) => {
       [tenantId]
     );
 
-    const [result] = await pool.query(`
-      INSERT INTO ondc_orders 
-        (tenant_id, vendor_id, ondc_order_id, ondc_transaction_id, ondc_message_id,
-         bap_id, bap_uri, status, total_amount, currency,
-         buyer_name, buyer_phone, buyer_email, delivery_address,
-         delivery_city, delivery_pincode, items, fulfillment, payment, quote, raw_payload)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, 'INR', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE status = 'confirmed', updated_at = NOW()
-    `, [
-      tenantId,
-      vendor.length ? vendor[0].id : null,
-      order.id,
-      context?.transaction_id,
-      context?.message_id,
-      context?.bap_id,
-      context?.bap_uri,
-      order.quote?.price?.value || 0,
-      order.billing?.name,
-      order.billing?.phone,
-      order.billing?.email,
-      JSON.stringify(order.fulfillments?.[0]?.end?.location?.address),
-      order.fulfillments?.[0]?.end?.location?.address?.city,
-      order.fulfillments?.[0]?.end?.location?.address?.area_code,
-      JSON.stringify(order.items),
-      JSON.stringify(order.fulfillments),
-      JSON.stringify(order.payment),
-      JSON.stringify(order.quote),
-      JSON.stringify(rawPayload)
-    ]);
+    // Detect schema: check if ondc_transaction_id column exists
+    let hasExtendedSchema = false;
+    try {
+      const [cols] = await pool.query(
+        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ondc_orders' AND COLUMN_NAME = 'ondc_transaction_id'"
+      );
+      hasExtendedSchema = cols.length > 0;
+    } catch {}
+
+    if (hasExtendedSchema) {
+      await pool.query(`
+        INSERT INTO ondc_orders
+          (tenant_id, vendor_id, ondc_order_id, ondc_transaction_id, ondc_message_id,
+           bap_id, bap_uri, status, total_amount, currency,
+           buyer_name, buyer_phone, buyer_email, delivery_address,
+           delivery_city, delivery_pincode, items, fulfillment, payment, quote, raw_payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, 'INR', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE status = 'confirmed', updated_at = NOW()
+      `, [
+        tenantId,
+        vendor.length ? vendor[0].id : null,
+        order.id,
+        context?.transaction_id,
+        context?.message_id,
+        context?.bap_id,
+        context?.bap_uri,
+        order.quote?.price?.value || 0,
+        order.billing?.name,
+        order.billing?.phone,
+        order.billing?.email,
+        JSON.stringify(order.fulfillments?.[0]?.end?.location?.address),
+        order.fulfillments?.[0]?.end?.location?.address?.city,
+        order.fulfillments?.[0]?.end?.location?.address?.area_code,
+        JSON.stringify(order.items),
+        JSON.stringify(order.fulfillments),
+        JSON.stringify(order.payment),
+        JSON.stringify(order.quote),
+        JSON.stringify(rawPayload)
+      ]);
+    } else {
+      // Live schema: buyer_info JSON column, no transaction/message/bap columns
+      const buyerInfo = order.billing ? {
+        name: order.billing.name,
+        phone: order.billing.phone,
+        email: order.billing.email,
+        address: order.fulfillments?.[0]?.end?.location?.address,
+      } : null;
+
+      await pool.query(`
+        INSERT INTO ondc_orders
+          (tenant_id, vendor_id, ondc_order_id, status, total_amount,
+           buyer_info, items, fulfillment, payment, raw_payload)
+        VALUES (?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE status = 'confirmed', updated_at = NOW(),
+          buyer_info = VALUES(buyer_info), items = VALUES(items),
+          fulfillment = VALUES(fulfillment), payment = VALUES(payment),
+          raw_payload = VALUES(raw_payload)
+      `, [
+        tenantId,
+        vendor.length ? vendor[0].id : null,
+        order.id,
+        order.quote?.price?.value || 0,
+        JSON.stringify(buyerInfo),
+        JSON.stringify(order.items),
+        JSON.stringify(order.fulfillments),
+        JSON.stringify(order.payment),
+        JSON.stringify(rawPayload)
+      ]);
+    }
 
     // Send webhook to tenant
     await sendWebhook(tenantId, 'order.confirmed', {
