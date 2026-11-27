@@ -280,6 +280,27 @@ const stripBreakupItemQuantity = (quote) => {
   };
 };
 
+// Buyer-Delivery: remap breakup fulfillment refs from f1 → bdId, zero delivery/packing/misc charges
+const remapBreakupForBuyerDelivery = (quote, bdFulfillmentId) => {
+  if (!quote?.breakup || !bdFulfillmentId) return quote;
+  const patched = JSON.parse(JSON.stringify(quote));
+  for (const b of patched.breakup) {
+    if (b['@ondc/org/item_id'] === 'f1') {
+      b['@ondc/org/item_id'] = bdFulfillmentId;
+      const ttype = b['@ondc/org/title_type'];
+      if (['delivery', 'packing', 'misc'].includes(ttype)) {
+        b.price = { currency: 'INR', value: '0.00' };
+      }
+      if (ttype === 'tax' && b.item?.tags) {
+        b.price = { currency: 'INR', value: '0.00' };
+      }
+    }
+  }
+  const total = patched.breakup.reduce((s, b) => s + parseFloat(b.price?.value || '0'), 0);
+  patched.price.value = total.toFixed(2);
+  return patched;
+};
+
 // Normalize GPS to at least 6 decimal places
 const normalizeGps = (gps) => {
   if (!gps) return '12.914082,77.638980';
@@ -1033,8 +1054,11 @@ const handleSelect = async (req, res) => {
         },
       };
 
-      // Buyer-Delivery: add an additional Buyer-Delivery fulfillment option in certification context
-      // BAP /select doesn't specify the type, so we offer both; BAP mock picks the right one for /init
+      // Buyer-Delivery: add Buyer-Delivery fulfillment option in certification context.
+      // Both regular and BD flows override item fulfillment_id in their /init code,
+      // so assigning items to f3 here is safe — regular flow resets to f1.
+      // The Workbench infra validates that init items' fulfillment_id matches on_select items',
+      // so items MUST be tied to f3 for the BD flow to pass.
       if (isCertificationContext(context)) {
         const existingFls = payload.order.fulfillments;
         const hasBuyerDelivery = existingFls.some(f => f.type === 'Buyer-Delivery');
@@ -1048,6 +1072,12 @@ const handleSelect = async (req, res) => {
             '@ondc/org/provider_name': providerName,
             tracking: true,
           });
+          // Assign items to Buyer-Delivery fulfillment
+          for (const item of payload.order.items) {
+            item.fulfillment_id = 'f3';
+          }
+          // Remap breakup delivery/packing/misc references to f3 with zero charges
+          payload.order.quote = remapBreakupForBuyerDelivery(payload.order.quote, 'f3');
         }
       }
 
@@ -1118,10 +1148,15 @@ const handleInit = async (req, res) => {
       // on_init must NOT include order.id or order.state (Pramaan validation)
       const { id: _initId, state: _initState, ...initOrder } = orderObj;
 
+      // Buyer-Delivery: detect from BAP fulfillments and fix breakup references
+      const bdFl = (order.fulfillments || []).find(f => f.type === 'Buyer-Delivery');
+      let initQuote = stripBreakupItemQuantity(initOrder.quote);
+      if (bdFl) initQuote = remapBreakupForBuyerDelivery(initQuote, bdFl.id || 'f3');
+
       await sendCallback(context.bap_uri, 'on_init', context, {
         order: {
           ...initOrder,
-          quote: stripBreakupItemQuantity(initOrder.quote),
+          quote: initQuote,
           fulfillments: (orderObj.fulfillments || [{ id: 'f1', type: 'Delivery' }]).map(f => {
             const fType = f.type || 'Delivery';
             // Buyer-Delivery: preserve type, keep end from BAP, no start per spec
@@ -1231,6 +1266,11 @@ const handleConfirm = async (req, res) => {
       const bapStaticTerms = bapTermsTag?.list?.find(l => l.code === 'static_terms')?.value;
       const bapTaxNumber   = bapTermsTag?.list?.find(l => l.code === 'tax_number')?.value;
 
+      // Buyer-Delivery: detect from confirm fulfillments and fix breakup references
+      const confirmBdFl = (order.fulfillments || []).find(f => f.type === 'Buyer-Delivery');
+      let confirmQuote = stripBreakupItemQuantity(quote);
+      if (confirmBdFl) confirmQuote = remapBreakupForBuyerDelivery(confirmQuote, confirmBdFl.id || 'f3');
+
       const confirmationMessage = {
         order: {
           id:         order.id,
@@ -1250,7 +1290,7 @@ const handleConfirm = async (req, res) => {
             }
             return built;
           }),
-          quote: stripBreakupItemQuantity(quote),
+          quote: confirmQuote,
           payment: {
             ...order.payment,
             '@ondc/org/buyer_app_finder_fee_type':   'percent',
@@ -1274,7 +1314,7 @@ const handleConfirm = async (req, res) => {
       const confirmUpdatedAt = order.updated_at || now;
       const cached = runEntry;
       // Set directly on the closure-captured order object (used by autoStatusSequence)
-      order.quote = stripBreakupItemQuantity(quote);
+      order.quote = confirmQuote;
       if (cached) {
         cached.confirmTimestamp = confirmUpdatedAt;
       }
