@@ -1161,10 +1161,11 @@ const handleInit = async (req, res) => {
         tenant
       );
 
-      // Fetch vendor for tags (tax_number, provider_tax_number)
+      // Fetch vendor for tags (tax_number, provider_tax_number, provider_name)
       const initVendor = tenantId
         ? await fetchVendorForOrder(tenantId, order.provider?.id).catch(() => null)
         : null;
+      const providerName = initVendor?.business_name || order.provider?.descriptor?.name || '';
 
       // on_init must NOT include order.id or order.state (Pramaan validation)
       const { id: _initId, state: _initState, ...initOrder } = orderObj;
