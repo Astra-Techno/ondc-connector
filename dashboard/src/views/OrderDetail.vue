@@ -3,14 +3,14 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { get, put } from '@/utils/api'
 import { useToast } from '@/stores/toast'
-import { ArrowLeft, AlertCircle, Loader2, RefreshCw, Truck, Package } from 'lucide-vue-next'
+import { ArrowLeft, AlertCircle, Loader2, RefreshCw, Truck, Package, Copy, Check } from 'lucide-vue-next'
 
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
 const loading = ref(true)
 const updating = ref(false)
-const error = ref(null)
+const err = ref(null)
 const order = ref(null)
 const newStatus = ref('')
 const trackingId = ref('')
@@ -19,6 +19,7 @@ const protocolLogs = ref([])
 const showLogs = ref(false)
 const expandedLog = ref(null)
 const loadingTimeline = ref(false)
+const copied = ref(null)
 
 const statusOptions = ['confirmed', 'packed', 'shipped', 'delivered', 'cancelled']
 
@@ -36,9 +37,12 @@ const fulfillmentBadge = {
 }
 
 const fulfillmentStateBadge = {
+  'Pending':           'bg-gray-100 text-gray-600',
+  'Serviceable':       'bg-gray-100 text-gray-500',
   'Created':           'bg-gray-100 text-gray-600',
   'Accepted':          'bg-blue-50 text-blue-600',
   'Packed':            'bg-yellow-50 text-yellow-700',
+  'Agent-assigned':    'bg-blue-100 text-blue-700',
   'Order-picked-up':   'bg-orange-50 text-orange-700',
   'Out-for-delivery':  'bg-orange-100 text-orange-700',
   'Order-delivered':   'bg-green-50 text-green-700',
@@ -53,9 +57,9 @@ const fulfillmentStateBadge = {
 
 async function fetchOrder() {
   loading.value = true
-  error.value = null
-  const { data, error: err } = await get(`/orders/${route.params.id}`)
-  if (err) { error.value = err }
+  err.value = null
+  const { data, error: e } = await get(`/orders/${route.params.id}`)
+  if (e) { err.value = e }
   else {
     order.value = data
     newStatus.value = data.status
@@ -85,9 +89,9 @@ async function updateStatus() {
   updating.value = true
   const payload = { status: newStatus.value }
   if (newStatus.value === 'shipped' && trackingId.value) payload.tracking_id = trackingId.value
-  const { error: err } = await put(`/orders/${route.params.id}/status`, payload)
-  if (err) {
-    toast.error('Failed to update status: ' + err)
+  const { error: e } = await put(`/orders/${route.params.id}/status`, payload)
+  if (e) {
+    toast.error('Failed to update status: ' + e)
   } else {
     toast.success('Order status updated')
     order.value.status = newStatus.value
@@ -96,18 +100,20 @@ async function updateStatus() {
 }
 
 function getItems() {
-  if (!order.value) return []
-  try { return typeof order.value.items === 'string' ? JSON.parse(order.value.items) : (order.value.items || []) } catch { return [] }
+  return order.value?.items_parsed || []
 }
 
-function getAddress() {
-  if (!order.value) return {}
-  try { return typeof order.value.delivery_address === 'string' ? JSON.parse(order.value.delivery_address) : (order.value.delivery_address || {}) } catch { return {} }
+async function copyText(text, label) {
+  try {
+    await navigator.clipboard.writeText(text)
+    copied.value = label
+    setTimeout(() => { copied.value = null }, 1500)
+  } catch {}
 }
 
-function getPayment() {
-  if (!order.value) return {}
-  try { return typeof order.value.payment === 'string' ? JSON.parse(order.value.payment) : (order.value.payment || {}) } catch { return {} }
+function formatAddress(addr) {
+  if (!addr) return '—'
+  return [addr.name || addr.door, addr.building, addr.street || addr.locality, addr.city, addr.state, addr.area_code].filter(Boolean).join(', ')
 }
 
 function formatCurrency(v) {
@@ -142,8 +148,8 @@ onMounted(() => {
       <div v-for="i in 3" :key="i" class="h-40 animate-pulse rounded-xl bg-gray-200" />
     </div>
 
-    <div v-else-if="error" class="flex items-center gap-3 rounded-lg bg-red-50 p-4 text-red-700">
-      <AlertCircle class="h-5 w-5 shrink-0" /> {{ error }}
+    <div v-else-if="err" class="flex items-center gap-3 rounded-lg bg-red-50 p-4 text-red-700">
+      <AlertCircle class="h-5 w-5 shrink-0" /> {{ err }}
     </div>
 
     <template v-else-if="order">
@@ -160,12 +166,15 @@ onMounted(() => {
           </div>
           <p class="text-sm text-gray-500 mt-0.5">{{ formatDate(order.created_at) }}</p>
         </div>
-        <div class="flex items-center gap-3">
+        <div class="flex items-center gap-3 flex-wrap">
           <span :class="['rounded-full px-3 py-1 text-sm font-semibold capitalize', statusBadge[order.status] || 'bg-gray-100 text-gray-600']">
             {{ order.status }}
           </span>
           <span v-if="order.fulfillment_status" :class="['rounded-full px-3 py-1 text-sm font-semibold', fulfillmentStateBadge[order.fulfillment_status] || 'bg-gray-100 text-gray-600']">
             {{ order.fulfillment_status }}
+          </span>
+          <span v-if="order.fulfillment_id" class="rounded-full bg-gray-100 px-3 py-1 text-sm font-mono text-gray-700">
+            {{ order.fulfillment_id }}
           </span>
         </div>
       </div>
@@ -174,19 +183,30 @@ onMounted(() => {
       <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <div class="rounded-lg bg-gray-50 p-3 space-y-1">
           <p class="text-[10px] font-medium uppercase text-gray-400">Transaction ID</p>
-          <p class="font-mono text-xs text-gray-700 break-all">{{ order.ondc_transaction_id || '—' }}</p>
+          <div class="flex items-center gap-1">
+            <p class="font-mono text-xs text-gray-700 break-all">{{ order.transaction_id || '—' }}</p>
+            <button v-if="order.transaction_id" @click="copyText(order.transaction_id, 'txn')" class="shrink-0 rounded p-0.5 text-gray-400 hover:text-gray-600">
+              <Check v-if="copied === 'txn'" class="h-3 w-3 text-green-500" /><Copy v-else class="h-3 w-3" />
+            </button>
+          </div>
         </div>
         <div class="rounded-lg bg-gray-50 p-3 space-y-1">
           <p class="text-[10px] font-medium uppercase text-gray-400">BAP ID</p>
-          <p class="font-mono text-xs text-gray-700">{{ order.bap_id || '—' }}</p>
+          <div class="flex items-center gap-1">
+            <p class="font-mono text-xs text-gray-700">{{ order.bap_id || '—' }}</p>
+            <button v-if="order.bap_id" @click="copyText(order.bap_id, 'bap')" class="shrink-0 rounded p-0.5 text-gray-400 hover:text-gray-600">
+              <Check v-if="copied === 'bap'" class="h-3 w-3 text-green-500" /><Copy v-else class="h-3 w-3" />
+            </button>
+          </div>
         </div>
         <div class="rounded-lg bg-gray-50 p-3 space-y-1">
+          <p class="text-[10px] font-medium uppercase text-gray-400">Provider</p>
+          <p class="font-mono text-xs text-gray-700">{{ order.provider_id || '—' }}</p>
+          <p v-if="order.provider_name" class="text-[10px] text-gray-500">{{ order.provider_name }}</p>
+        </div>
+        <div v-if="order.cottkart_order_id" class="rounded-lg bg-gray-50 p-3 space-y-1">
           <p class="text-[10px] font-medium uppercase text-gray-400">CottKart ID</p>
-          <p class="font-mono text-xs text-gray-700">{{ order.cottkart_order_id || '—' }}</p>
-        </div>
-        <div class="rounded-lg bg-gray-50 p-3 space-y-1">
-          <p class="text-[10px] font-medium uppercase text-gray-400">Message ID</p>
-          <p class="font-mono text-xs text-gray-700 break-all">{{ order.ondc_message_id || '—' }}</p>
+          <p class="font-mono text-xs text-gray-700">{{ order.cottkart_order_id }}</p>
         </div>
       </div>
 
@@ -205,8 +225,7 @@ onMounted(() => {
         <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-gray-100 space-y-2">
           <h2 class="font-semibold text-gray-800">Delivery Address</h2>
           <p class="text-sm text-gray-700 leading-relaxed">
-            {{ [getAddress().door, getAddress().building, getAddress().street].filter(Boolean).join(', ') }}<br v-if="getAddress().door || getAddress().building" />
-            {{ [getAddress().city, getAddress().state, getAddress().area_code].filter(Boolean).join(', ') || order.delivery_city || '—' }}
+            {{ formatAddress(order.delivery_address_parsed) }}
           </p>
         </div>
 
@@ -214,8 +233,8 @@ onMounted(() => {
         <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-gray-100 space-y-2">
           <h2 class="font-semibold text-gray-800">Payment</h2>
           <div class="text-sm space-y-1">
-            <p><span class="text-gray-500">Type:</span> <span class="text-gray-800 capitalize">{{ getPayment().type || order.payment_type || '—' }}</span></p>
-            <p><span class="text-gray-500">Status:</span> <span class="text-gray-800 capitalize">{{ getPayment().status || order.payment_status || '—' }}</span></p>
+            <p><span class="text-gray-500">Type:</span> <span class="text-gray-800">{{ order.payment_type || '—' }}</span></p>
+            <p><span class="text-gray-500">Status:</span> <span class="text-gray-800">{{ order.payment_status || '—' }}</span></p>
             <p><span class="text-gray-500">Amount:</span> <span class="font-semibold text-gray-900">{{ formatCurrency(order.total_amount) }}</span></p>
           </div>
         </div>
@@ -223,19 +242,29 @@ onMounted(() => {
 
       <!-- Order items -->
       <div class="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-100">
-        <div class="border-b border-gray-100 px-5 py-4 font-semibold text-gray-800">Order Items</div>
+        <div class="flex items-center justify-between border-b border-gray-100 px-5 py-4">
+          <span class="font-semibold text-gray-800">Order Items</span>
+          <span v-if="getItems().length" class="text-xs text-gray-500">
+            {{ order.items_count }} distinct / {{ order.items_units }} units
+          </span>
+        </div>
         <div class="overflow-x-auto">
           <table class="w-full text-sm">
             <thead class="bg-gray-50 text-xs text-gray-500">
               <tr>
                 <th class="px-5 py-3 text-left font-medium">Item ID</th>
+                <th class="px-5 py-3 text-left font-medium">Name</th>
                 <th class="px-5 py-3 text-right font-medium">Qty</th>
                 <th class="px-5 py-3 text-right font-medium">Price</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-gray-50">
+              <tr v-if="!getItems().length">
+                <td colspan="4" class="px-5 py-6 text-center text-sm text-gray-400">No item data available</td>
+              </tr>
               <tr v-for="item in getItems()" :key="item.id" class="hover:bg-gray-50/50">
                 <td class="px-5 py-3 font-mono text-xs text-gray-700">{{ item.id }}</td>
+                <td class="px-5 py-3 text-gray-700">{{ item.descriptor?.name || '—' }}</td>
                 <td class="px-5 py-3 text-right text-gray-600">{{ item.quantity?.count || item.quantity || 1 }}</td>
                 <td class="px-5 py-3 text-right font-medium text-gray-900">{{ item.price?.value ? formatCurrency(item.price.value) : '—' }}</td>
               </tr>
@@ -268,11 +297,16 @@ onMounted(() => {
               <span v-if="evt.order_state" class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">
                 Order: {{ evt.order_state }}
               </span>
+              <span v-if="evt.fulfillment_id" class="rounded bg-gray-50 px-1 py-0.5 text-[10px] font-mono text-gray-400">
+                {{ evt.fulfillment_id }}
+              </span>
             </div>
             <p class="text-xs text-gray-400 mt-0.5">{{ formatDateTime(evt.timestamp) }}</p>
           </div>
         </div>
-        <p v-else class="text-sm text-gray-400">No timeline data available</p>
+        <div v-else class="rounded-lg bg-yellow-50 p-3 text-sm text-yellow-700">
+          No timeline events could be extracted. Check protocol logs below for raw data.
+        </div>
       </div>
 
       <!-- Protocol Logs -->
@@ -284,7 +318,7 @@ onMounted(() => {
             {{ showLogs ? 'Hide' : 'Show' }} Logs
           </button>
         </div>
-        <div v-if="showLogs && protocolLogs.length" class="space-y-2">
+        <div v-if="showLogs && protocolLogs.length" class="space-y-2 max-h-[500px] overflow-y-auto">
           <div v-for="log in protocolLogs" :key="log.id"
             class="rounded-lg border border-gray-100 overflow-hidden">
             <button @click="toggleLog(log.id)"
@@ -303,11 +337,11 @@ onMounted(() => {
             <div v-if="expandedLog === log.id" class="border-t border-gray-100 bg-gray-50 px-4 py-3">
               <div class="mb-2">
                 <p class="text-[10px] font-semibold text-gray-500 mb-1">Request Payload</p>
-                <pre class="max-h-64 overflow-auto rounded bg-white p-3 text-[11px] text-gray-700 ring-1 ring-gray-200">{{ JSON.stringify(log.request_payload, null, 2) }}</pre>
+                <pre class="max-h-64 overflow-auto rounded bg-white p-3 text-[11px] text-gray-700 ring-1 ring-gray-200 whitespace-pre-wrap break-all">{{ JSON.stringify(log.request_payload, null, 2) }}</pre>
               </div>
               <div v-if="log.response_payload">
                 <p class="text-[10px] font-semibold text-gray-500 mb-1">Response</p>
-                <pre class="max-h-40 overflow-auto rounded bg-white p-3 text-[11px] text-gray-700 ring-1 ring-gray-200">{{ JSON.stringify(log.response_payload, null, 2) }}</pre>
+                <pre class="max-h-40 overflow-auto rounded bg-white p-3 text-[11px] text-gray-700 ring-1 ring-gray-200 whitespace-pre-wrap break-all">{{ JSON.stringify(log.response_payload, null, 2) }}</pre>
               </div>
             </div>
           </div>

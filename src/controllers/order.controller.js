@@ -3,36 +3,46 @@ const { success, error, ack, nack } = require('../utils/response');
 const logger = require('../utils/logger');
 const fetch = require('node-fetch');
 
-// Helper: extract fulfillment type/status from JSON fulfillment column
+// ── Helpers: parse JSON columns (MySQL JSON type returns objects, TEXT returns strings) ──
+
+const safeParseJSON = (val) => {
+  if (!val) return null;
+  if (typeof val === 'object') return val; // already parsed (MySQL JSON column)
+  try { return JSON.parse(val); } catch { return null; }
+};
+
+// Extract fulfillment type and status from the fulfillment JSON column
 const parseFulfillment = (row) => {
   try {
-    const ff = typeof row.fulfillment === 'string' ? JSON.parse(row.fulfillment) : row.fulfillment;
+    const ff = safeParseJSON(row.fulfillment);
     if (Array.isArray(ff) && ff.length) {
       const primary = ff.find(f => f.type === 'Buyer-Delivery') || ff[0];
       return {
         fulfillment_type: primary.type || 'Delivery',
+        fulfillment_id: primary.id || null,
         fulfillment_status: primary.state?.descriptor?.code || null,
+        fulfillments: ff,
       };
     }
   } catch {}
-  return { fulfillment_type: 'Delivery', fulfillment_status: null };
+  return { fulfillment_type: 'Delivery', fulfillment_id: null, fulfillment_status: null, fulfillments: [] };
 };
 
-// Helper: extract payment type/status from JSON payment column
+// Extract payment type and status
 const parsePayment = (row) => {
   try {
-    const p = typeof row.payment === 'string' ? JSON.parse(row.payment) : row.payment;
+    const p = safeParseJSON(row.payment);
     if (p) return { payment_type: p.type || null, payment_status: p.status || p.collected_by || null };
   } catch {}
   return { payment_type: null, payment_status: null };
 };
 
-// Helper: normalize buyer info — handles both flat columns and buyer_info JSON
+// Normalize buyer info — handles both flat columns and buyer_info JSON
 const parseBuyer = (row) => {
-  if (row.buyer_name) return {}; // flat columns already present
+  if (row.buyer_name) return {};
   if (!row.buyer_info) return {};
   try {
-    const b = typeof row.buyer_info === 'string' ? JSON.parse(row.buyer_info) : row.buyer_info;
+    const b = safeParseJSON(row.buyer_info);
     return {
       buyer_name: b?.name || null,
       buyer_phone: b?.phone || null,
@@ -42,7 +52,79 @@ const parseBuyer = (row) => {
   return {};
 };
 
-// Get all orders
+// Extract items as an array (handles both JSON object and string)
+const parseItems = (row) => {
+  const items = safeParseJSON(row.items);
+  return Array.isArray(items) ? items : [];
+};
+
+// Extract identifiers from raw_payload.context (transaction_id, bap_id, provider, etc.)
+const parseContext = (row) => {
+  try {
+    const raw = safeParseJSON(row.raw_payload);
+    const ctx = raw?.context || {};
+    const order = raw?.message?.order || {};
+    return {
+      transaction_id: row.ondc_transaction_id || ctx.transaction_id || null,
+      bap_id: row.bap_id || ctx.bap_id || null,
+      bap_uri: row.bap_uri || ctx.bap_uri || null,
+      provider_id: order.provider?.id || null,
+      provider_name: order.provider?.descriptor?.name || null,
+    };
+  } catch {}
+  return { transaction_id: null, bap_id: null, bap_uri: null, provider_id: null, provider_name: null };
+};
+
+// Extract delivery address from fulfillment[].end.location.address
+const parseDeliveryAddress = (row) => {
+  try {
+    const ff = safeParseJSON(row.fulfillment);
+    if (Array.isArray(ff) && ff.length) {
+      const primary = ff.find(f => f.type === 'Buyer-Delivery') || ff[0];
+      const addr = primary?.end?.location?.address;
+      if (addr) return addr;
+    }
+    // Fallback: delivery_address column (extended schema)
+    if (row.delivery_address) return safeParseJSON(row.delivery_address);
+  } catch {}
+  return null;
+};
+
+// Enrich a raw DB row into the full API response shape
+const enrichOrder = (row) => {
+  const items = parseItems(row);
+  const ctx = parseContext(row);
+  const ff = parseFulfillment(row);
+  const pay = parsePayment(row);
+  const buyer = parseBuyer(row);
+  const address = parseDeliveryAddress(row);
+
+  return {
+    ...row,
+    // Parsed fields
+    items_parsed: items,
+    items_count: items.length,
+    items_units: items.reduce((s, i) => s + (i.quantity?.count || i.quantity || 1), 0),
+    // Context / identifiers
+    transaction_id: ctx.transaction_id,
+    bap_id: ctx.bap_id,
+    bap_uri: ctx.bap_uri,
+    provider_id: ctx.provider_id,
+    provider_name: ctx.provider_name,
+    // Fulfillment
+    ...ff,
+    // Payment
+    ...pay,
+    // Buyer
+    ...buyer,
+    // Address
+    delivery_address_parsed: address,
+  };
+};
+
+// ── API Handlers ──
+
+// GET /orders — list all orders with filters
 const getOrders = async (req, res) => {
   try {
     const tenant = req.tenant;
@@ -74,20 +156,54 @@ const getOrders = async (req, res) => {
     const [rows] = await pool.query(query, params);
     const [[{ count }]] = await pool.query(countQuery, countParams);
 
-    // Enrich each order with parsed fulfillment/payment/buyer info
-    let orders = rows.map(row => ({
-      ...row,
-      ...parseFulfillment(row),
-      ...parsePayment(row),
-      ...parseBuyer(row),
-    }));
+    // Batch-resolve latest fulfillment status from ondc_transactions to avoid N+1
+    // Collect all order IDs that have raw_payload with transaction_id
+    const txnMap = {};
+    for (const row of rows) {
+      const ctx = parseContext(row);
+      if (ctx.transaction_id) txnMap[ctx.transaction_id] = [];
+    }
+    const txnIds = Object.keys(txnMap);
+    if (txnIds.length) {
+      try {
+        const placeholders = txnIds.map(() => '?').join(',');
+        const [txnRows] = await pool.query(
+          `SELECT transaction_id,
+                  JSON_UNQUOTE(JSON_EXTRACT(request_payload, '$.message.order.fulfillments[0].state.descriptor.code')) as ff_state,
+                  JSON_UNQUOTE(JSON_EXTRACT(request_payload, '$.message.order.state')) as order_state,
+                  created_at
+           FROM ondc_transactions
+           WHERE tenant_id = ? AND transaction_id IN (${placeholders})
+             AND direction = 'outbound'
+             AND JSON_EXTRACT(request_payload, '$.message.order.fulfillments[0].state.descriptor.code') IS NOT NULL
+           ORDER BY created_at ASC`,
+          [tenant.id, ...txnIds]
+        );
+        for (const t of txnRows) {
+          if (!txnMap[t.transaction_id]) txnMap[t.transaction_id] = [];
+          txnMap[t.transaction_id].push({ ff_state: t.ff_state, order_state: t.order_state });
+        }
+      } catch (e) {
+        logger.warn(`Batch fulfillment status lookup failed: ${e.message}`);
+      }
+    }
+
+    let orders = rows.map(row => {
+      const enriched = enrichOrder(row);
+      // Override fulfillment_status with the latest from transactions
+      const ctx = parseContext(row);
+      if (ctx.transaction_id && txnMap[ctx.transaction_id]?.length) {
+        const events = txnMap[ctx.transaction_id];
+        enriched.fulfillment_status = events[events.length - 1].ff_state;
+      }
+      return enriched;
+    });
 
     // Client-side filter for fulfillment_type (stored in JSON, not a SQL column)
     if (fulfillment_type) {
       orders = orders.filter(o => o.fulfillment_type === fulfillment_type);
     }
 
-    // Calculate revenue from returned rows
     const revenue = rows.reduce((sum, r) => sum + parseFloat(r.total_amount || 0), 0);
 
     return success(res, { orders, total: count, revenue, page: parseInt(page), limit: realLimit });
@@ -96,7 +212,7 @@ const getOrders = async (req, res) => {
   }
 };
 
-// Get single order (enriched with parsed fulfillment/payment)
+// GET /orders/:order_id — single order detail
 const getOrder = async (req, res) => {
   try {
     const tenant = req.tenant;
@@ -105,23 +221,34 @@ const getOrder = async (req, res) => {
       [tenant.id, req.params.order_id]
     );
     if (!rows.length) return error(res, 'Order not found', 404);
-    const row = rows[0];
-    return success(res, {
-      ...row,
-      ...parseFulfillment(row),
-      ...parsePayment(row),
-      ...parseBuyer(row),
-    });
+    const enriched = enrichOrder(rows[0]);
+
+    // Resolve latest fulfillment status from transactions
+    if (enriched.transaction_id) {
+      try {
+        const [txnRows] = await pool.query(
+          `SELECT JSON_UNQUOTE(JSON_EXTRACT(request_payload, '$.message.order.fulfillments[0].state.descriptor.code')) as ff_state
+           FROM ondc_transactions
+           WHERE tenant_id = ? AND transaction_id = ?
+             AND direction = 'outbound'
+             AND JSON_EXTRACT(request_payload, '$.message.order.fulfillments[0].state.descriptor.code') IS NOT NULL
+           ORDER BY created_at DESC LIMIT 1`,
+          [tenant.id, enriched.transaction_id]
+        );
+        if (txnRows.length && txnRows[0].ff_state) {
+          enriched.fulfillment_status = txnRows[0].ff_state;
+        }
+      } catch {}
+    }
+
+    return success(res, enriched);
   } catch (err) {
     return error(res, err.message);
   }
 };
 
-// Resolve transaction_id for an order — handles both schema variants:
-// 1. ondc_orders.ondc_transaction_id column (if present)
-// 2. Fallback: extract from raw_payload JSON or look up via ondc_transactions table
+// Resolve transaction_id for an order — handles both schema variants
 const resolveTransactionId = async (tenantId, ondcOrderId) => {
-  // Try direct column first (may not exist on older schemas)
   const [orderRows] = await pool.query(
     'SELECT * FROM ondc_orders WHERE tenant_id = ? AND ondc_order_id = ? LIMIT 1',
     [tenantId, ondcOrderId]
@@ -129,28 +256,30 @@ const resolveTransactionId = async (tenantId, ondcOrderId) => {
   if (!orderRows.length) return { order: null, txnId: null };
   const order = orderRows[0];
 
-  // 1. Direct column
+  // 1. Direct column (extended schema)
   if (order.ondc_transaction_id) return { order, txnId: order.ondc_transaction_id };
 
   // 2. Extract from raw_payload JSON
   try {
-    const raw = typeof order.raw_payload === 'string' ? JSON.parse(order.raw_payload) : order.raw_payload;
+    const raw = safeParseJSON(order.raw_payload);
     if (raw?.context?.transaction_id) return { order, txnId: raw.context.transaction_id };
   } catch {}
 
   // 3. Look up from ondc_transactions by order ID in payload
-  const [txnRows] = await pool.query(
-    `SELECT transaction_id FROM ondc_transactions
-     WHERE tenant_id = ? AND JSON_EXTRACT(request_payload, '$.message.order.id') = ?
-     LIMIT 1`,
-    [tenantId, ondcOrderId]
-  );
-  if (txnRows.length) return { order, txnId: txnRows[0].transaction_id };
+  try {
+    const [txnRows] = await pool.query(
+      `SELECT transaction_id FROM ondc_transactions
+       WHERE tenant_id = ? AND JSON_UNQUOTE(JSON_EXTRACT(request_payload, '$.message.order.id')) = ?
+       LIMIT 1`,
+      [tenantId, ondcOrderId]
+    );
+    if (txnRows.length) return { order, txnId: txnRows[0].transaction_id };
+  } catch {}
 
   return { order, txnId: null };
 };
 
-// Get order fulfillment timeline from ondc_transactions
+// GET /orders/:order_id/timeline — fulfillment timeline from ondc_transactions
 const getOrderTimeline = async (req, res) => {
   try {
     const tenant = req.tenant;
@@ -160,11 +289,13 @@ const getOrderTimeline = async (req, res) => {
 
     const [logs] = await pool.query(
       `SELECT action, direction, message_id, status, created_at,
-              JSON_EXTRACT(request_payload, '$.message.order.state') as order_state,
-              JSON_EXTRACT(request_payload, '$.message.order.fulfillments[0].state.descriptor.code') as fulfillment_state
+              JSON_UNQUOTE(JSON_EXTRACT(request_payload, '$.message.order.state')) as order_state,
+              JSON_UNQUOTE(JSON_EXTRACT(request_payload, '$.message.order.fulfillments[0].state.descriptor.code')) as fulfillment_state,
+              JSON_UNQUOTE(JSON_EXTRACT(request_payload, '$.message.order.fulfillments[0].id')) as fulfillment_id,
+              JSON_UNQUOTE(JSON_EXTRACT(request_payload, '$.message.order.fulfillments[0].type')) as fulfillment_type
        FROM ondc_transactions
        WHERE tenant_id = ? AND transaction_id = ?
-       ORDER BY created_at ASC`,
+       ORDER BY created_at ASC, id ASC`,
       [tenant.id, txnId]
     );
 
@@ -172,10 +303,16 @@ const getOrderTimeline = async (req, res) => {
       action: log.action,
       direction: log.direction,
       status: log.status,
-      order_state: log.order_state ? JSON.parse(log.order_state) : null,
-      fulfillment_state: log.fulfillment_state ? JSON.parse(log.fulfillment_state) : null,
+      order_state: log.order_state || null,
+      fulfillment_state: log.fulfillment_state || null,
+      fulfillment_id: log.fulfillment_id || null,
+      fulfillment_type: log.fulfillment_type || null,
       timestamp: log.created_at,
     }));
+
+    if (!timeline.length && txnId) {
+      return success(res, [], 'No timeline events found despite having transaction_id — possible payload structure mismatch');
+    }
 
     return success(res, timeline);
   } catch (err) {
@@ -189,13 +326,11 @@ const sanitizePayload = (payload) => {
   try {
     const obj = typeof payload === 'string' ? JSON.parse(payload) : JSON.parse(JSON.stringify(payload));
 
-    // Redact signing keys and auth headers from context
     if (obj?.context) {
       if (obj.context.signing_private_key) obj.context.signing_private_key = '***';
       if (obj.context.authorization) obj.context.authorization = '***';
     }
 
-    // Redact settlement bank details from payment
     const payment = obj?.message?.order?.payment;
     if (payment) {
       const details = payment['@ondc/org/settlement_details'];
@@ -209,11 +344,9 @@ const sanitizePayload = (payload) => {
           if (d.upi_address) d.upi_address = '***';
         }
       }
-      // Redact payment transaction_id
       if (payment.params?.transaction_id) payment.params.transaction_id = '***';
     }
 
-    // Mask billing PII (keep first initial + last 4 of phone for debugging)
     const billing = obj?.message?.order?.billing;
     if (billing) {
       if (billing.email) billing.email = billing.email.replace(/^(.{2}).*(@.*)$/, '$1***$2');
@@ -225,7 +358,7 @@ const sanitizePayload = (payload) => {
   } catch { return null; }
 };
 
-// Get sanitized protocol logs for an order
+// GET /orders/:order_id/logs — sanitized protocol logs
 const getOrderLogs = async (req, res) => {
   try {
     const tenant = req.tenant;
@@ -237,7 +370,7 @@ const getOrderLogs = async (req, res) => {
       `SELECT id, action, direction, message_id, status, created_at, request_payload, response_payload
        FROM ondc_transactions
        WHERE tenant_id = ? AND transaction_id = ?
-       ORDER BY created_at ASC`,
+       ORDER BY created_at ASC, id ASC`,
       [tenant.id, txnId]
     );
 
@@ -258,7 +391,7 @@ const getOrderLogs = async (req, res) => {
   }
 };
 
-// Update order status
+// PUT /orders/:order_id/status — update order status
 const updateOrderStatus = async (req, res) => {
   try {
     const tenant = req.tenant;
@@ -268,11 +401,6 @@ const updateOrderStatus = async (req, res) => {
     if (!validStatuses.includes(status)) {
       return error(res, `Invalid status. Valid values: ${validStatuses.join(', ')}`, 400);
     }
-
-    const updateFields = { status, updated_at: new Date() };
-    if (status === 'delivered') updateFields.delivered_at = new Date();
-    if (status === 'cancelled') updateFields.cancelled_at = new Date();
-    if (status === 'shipped') updateFields.shipped_at = new Date();
 
     await pool.query(
       'UPDATE ondc_orders SET status = ?, updated_at = NOW() WHERE tenant_id = ? AND ondc_order_id = ?',
@@ -286,9 +414,7 @@ const updateOrderStatus = async (req, res) => {
   }
 };
 
-// Save incoming ONDC order and notify tenant
-// Supports both DB schemas: live (buyer_info JSON, no transaction_id column)
-// and extended (flat buyer columns, transaction_id column)
+// Save incoming ONDC order — supports both live and extended DB schemas
 const saveONDCOrder = async (tenantId, orderData, rawPayload) => {
   try {
     const order = orderData.message?.order;
@@ -296,14 +422,12 @@ const saveONDCOrder = async (tenantId, orderData, rawPayload) => {
 
     if (!order) return;
 
-    // Get vendor
-    const firstItem = order.items?.[0];
     const [vendor] = await pool.query(
       'SELECT * FROM vendors WHERE tenant_id = ? LIMIT 1',
       [tenantId]
     );
 
-    // Detect schema: check if ondc_transaction_id column exists
+    // Detect schema
     let hasExtendedSchema = false;
     try {
       const [cols] = await pool.query(
@@ -343,7 +467,6 @@ const saveONDCOrder = async (tenantId, orderData, rawPayload) => {
         JSON.stringify(rawPayload)
       ]);
     } else {
-      // Live schema: buyer_info JSON column, no transaction/message/bap columns
       const buyerInfo = order.billing ? {
         name: order.billing.name,
         phone: order.billing.phone,

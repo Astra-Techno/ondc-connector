@@ -8,4 +8,5 @@ test-catalog.js
 dashboard/.env.development
 dashboard/.env.production
 .workbench-spec-reference/
+.mcp.json
 .igm-spec-reference/

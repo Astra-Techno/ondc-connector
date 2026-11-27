@@ -3,13 +3,13 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { get, put } from '@/utils/api'
 import { useToast } from '@/stores/toast'
-import { ShoppingCart, AlertCircle, ChevronLeft, ChevronRight, RefreshCw, X, Truck, Package } from 'lucide-vue-next'
+import { ShoppingCart, AlertCircle, ChevronLeft, ChevronRight, RefreshCw, X, Truck, Package, Copy, Check } from 'lucide-vue-next'
 
 const router = useRouter()
 const toast  = useToast()
 
 const loading = ref(true)
-const error   = ref(null)
+const err     = ref(null)
 const orders  = ref([])
 const total   = ref(0)
 const revenue = ref(0)
@@ -33,6 +33,7 @@ const protocolLogs = ref([])
 const showLogs    = ref(false)
 const loadingTimeline = ref(false)
 const expandedLog = ref(null)
+const copied = ref(null)
 
 const statusOptions = [
   { value: '',          label: 'All Status' },
@@ -66,9 +67,12 @@ const fulfillmentBadge = {
 }
 
 const fulfillmentStateBadge = {
+  'Pending':           'bg-gray-100 text-gray-600',
+  'Serviceable':       'bg-gray-100 text-gray-500',
   'Created':           'bg-gray-100 text-gray-600',
   'Accepted':          'bg-blue-50 text-blue-600',
   'Packed':            'bg-yellow-50 text-yellow-700',
+  'Agent-assigned':    'bg-blue-100 text-blue-700',
   'Order-picked-up':   'bg-orange-50 text-orange-700',
   'Out-for-delivery':  'bg-orange-100 text-orange-700',
   'Order-delivered':   'bg-green-50 text-green-700',
@@ -83,10 +87,14 @@ const fulfillmentStateBadge = {
 
 const totalPages = computed(() => Math.ceil(total.value / perPage))
 
+function getItems(o) {
+  return o.items_parsed || []
+}
+
 async function fetchOrders() {
   loading.value = true
-  error.value   = null
-  const { data, error: err } = await get('/orders', {
+  err.value     = null
+  const { data, error: e } = await get('/orders', {
     status:           statusFilter.value      || undefined,
     fulfillment_type: fulfillmentFilter.value  || undefined,
     from:             dateFrom.value           || undefined,
@@ -94,7 +102,7 @@ async function fetchOrders() {
     page:             page.value,
     limit:            perPage,
   })
-  if (err) { error.value = err }
+  if (e) { err.value = e }
   else {
     orders.value  = data?.orders  || []
     total.value   = data?.total   || 0
@@ -112,7 +120,6 @@ async function openDetail(order) {
   timeline.value = []
   protocolLogs.value = []
 
-  // Fetch timeline
   if (order.ondc_order_id) {
     loadingTimeline.value = true
     const { data } = await get(`/orders/${order.ondc_order_id}/timeline`)
@@ -141,8 +148,8 @@ function closeDetail() {
 async function saveStatus() {
   if (!selected.value || newStatus.value === selected.value.status) return
   updatingStatus.value = true
-  const { error: err } = await put(`/orders/${selected.value.ondc_order_id}/status`, { status: newStatus.value })
-  if (err) { toast.error(err) }
+  const { error: e } = await put(`/orders/${selected.value.ondc_order_id}/status`, { status: newStatus.value })
+  if (e) { toast.error(e) }
   else {
     toast.success('Order status updated')
     selected.value.status = newStatus.value
@@ -152,12 +159,17 @@ async function saveStatus() {
   updatingStatus.value = false
 }
 
-function getItems(order) {
-  try { return JSON.parse(order.items || '[]') } catch { return [] }
+async function copyText(text, label) {
+  try {
+    await navigator.clipboard.writeText(text)
+    copied.value = label
+    setTimeout(() => { copied.value = null }, 1500)
+  } catch {}
 }
 
-function getAddress(order) {
-  try { return JSON.parse(order.delivery_address || '{}') } catch { return {} }
+function formatAddress(addr) {
+  if (!addr) return '—'
+  return [addr.name || addr.door, addr.building, addr.street || addr.locality, addr.city, addr.state, addr.area_code].filter(Boolean).join(', ')
 }
 
 function formatCurrency(v) {
@@ -218,8 +230,8 @@ onUnmounted(() => clearInterval(timer))
         class="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-green-500" />
     </div>
 
-    <div v-if="error" class="flex items-center gap-3 rounded-lg bg-red-50 p-4 text-sm text-red-700">
-      <AlertCircle class="h-5 w-5 shrink-0" /> {{ error }}
+    <div v-if="err" class="flex items-center gap-3 rounded-lg bg-red-50 p-4 text-sm text-red-700">
+      <AlertCircle class="h-5 w-5 shrink-0" /> {{ err }}
     </div>
 
     <div class="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-100">
@@ -256,7 +268,9 @@ onUnmounted(() => clearInterval(timer))
                   <div class="text-xs text-gray-400">{{ o.buyer_phone || '' }}</div>
                 </td>
                 <td class="px-4 py-3 text-gray-600">
-                  {{ getItems(o).length }} item{{ getItems(o).length !== 1 ? 's' : '' }}
+                  <span class="font-medium">{{ o.items_count || 0 }}</span>
+                  <span class="text-gray-400 text-xs ml-1">item{{ o.items_count !== 1 ? 's' : '' }}</span>
+                  <span v-if="o.items_units && o.items_units !== o.items_count" class="text-gray-400 text-xs ml-1">/ {{ o.items_units }} units</span>
                 </td>
                 <td class="px-4 py-3 text-right font-semibold text-gray-900">{{ formatCurrency(o.total_amount) }}</td>
                 <td class="px-4 py-3">
@@ -275,7 +289,7 @@ onUnmounted(() => clearInterval(timer))
                   <span :class="['inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium', fulfillmentBadge[o.fulfillment_type] || 'bg-gray-100 text-gray-500']">
                     <Truck v-if="o.fulfillment_type === 'Delivery'" class="h-3 w-3" />
                     <Package v-else class="h-3 w-3" />
-                    {{ o.fulfillment_type === 'Buyer-Delivery' ? 'BD' : 'Del' }}
+                    {{ o.fulfillment_type || 'Delivery' }}
                   </span>
                 </td>
                 <td class="px-4 py-3 text-gray-500 whitespace-nowrap">{{ formatDate(o.created_at) }}</td>
@@ -329,28 +343,48 @@ onUnmounted(() => clearInterval(timer))
             </div>
 
             <div v-if="selected" class="p-6 space-y-5">
-              <!-- IDs -->
-              <div class="grid grid-cols-2 gap-4 text-sm">
+              <!-- IDs with copy buttons -->
+              <div class="grid grid-cols-2 gap-3 text-sm">
                 <div class="space-y-1 rounded-lg bg-gray-50 p-3">
                   <p class="text-xs text-gray-500">ONDC Order ID</p>
-                  <p class="font-mono text-xs font-medium text-gray-800 break-all">{{ selected.ondc_order_id || '—' }}</p>
+                  <div class="flex items-center gap-1.5">
+                    <p class="font-mono text-xs font-medium text-gray-800 break-all">{{ selected.ondc_order_id || '—' }}</p>
+                    <button v-if="selected.ondc_order_id" @click.stop="copyText(selected.ondc_order_id, 'oid')" class="shrink-0 rounded p-0.5 text-gray-400 hover:text-gray-600">
+                      <Check v-if="copied === 'oid'" class="h-3 w-3 text-green-500" /><Copy v-else class="h-3 w-3" />
+                    </button>
+                  </div>
                 </div>
                 <div class="space-y-1 rounded-lg bg-gray-50 p-3">
                   <p class="text-xs text-gray-500">Transaction ID</p>
-                  <p class="font-mono text-xs text-gray-600 break-all">{{ selected.ondc_transaction_id || '—' }}</p>
+                  <div class="flex items-center gap-1.5">
+                    <p class="font-mono text-xs text-gray-600 break-all">{{ selected.transaction_id || '—' }}</p>
+                    <button v-if="selected.transaction_id" @click.stop="copyText(selected.transaction_id, 'txn')" class="shrink-0 rounded p-0.5 text-gray-400 hover:text-gray-600">
+                      <Check v-if="copied === 'txn'" class="h-3 w-3 text-green-500" /><Copy v-else class="h-3 w-3" />
+                    </button>
+                  </div>
                 </div>
                 <div class="space-y-1 rounded-lg bg-gray-50 p-3">
                   <p class="text-xs text-gray-500">BAP ID</p>
-                  <p class="font-mono text-xs text-gray-600">{{ selected.bap_id || '—' }}</p>
+                  <div class="flex items-center gap-1.5">
+                    <p class="font-mono text-xs text-gray-600">{{ selected.bap_id || '—' }}</p>
+                    <button v-if="selected.bap_id" @click.stop="copyText(selected.bap_id, 'bap')" class="shrink-0 rounded p-0.5 text-gray-400 hover:text-gray-600">
+                      <Check v-if="copied === 'bap'" class="h-3 w-3 text-green-500" /><Copy v-else class="h-3 w-3" />
+                    </button>
+                  </div>
                 </div>
                 <div class="space-y-1 rounded-lg bg-gray-50 p-3">
+                  <p class="text-xs text-gray-500">Provider</p>
+                  <p class="font-mono text-xs font-medium text-gray-800">{{ selected.provider_id || '—' }}</p>
+                  <p v-if="selected.provider_name" class="text-xs text-gray-500">{{ selected.provider_name }}</p>
+                </div>
+                <div v-if="selected.cottkart_order_id" class="space-y-1 rounded-lg bg-gray-50 p-3">
                   <p class="text-xs text-gray-500">CottKart Order ID</p>
-                  <p class="font-mono text-xs font-medium text-gray-800">{{ selected.cottkart_order_id || '—' }}</p>
+                  <p class="font-mono text-xs font-medium text-gray-800">{{ selected.cottkart_order_id }}</p>
                 </div>
               </div>
 
               <!-- Order + Fulfillment Status -->
-              <div class="flex items-center gap-4">
+              <div class="flex items-center gap-4 flex-wrap">
                 <div>
                   <p class="text-xs text-gray-500 mb-1">Order Status</p>
                   <span :class="['rounded-full px-3 py-1 text-sm font-semibold capitalize', statusBadge[selected.status] || 'bg-gray-100 text-gray-600']">
@@ -362,6 +396,10 @@ onUnmounted(() => clearInterval(timer))
                   <span :class="['rounded-full px-3 py-1 text-sm font-semibold', fulfillmentStateBadge[selected.fulfillment_status] || 'bg-gray-100 text-gray-600']">
                     {{ selected.fulfillment_status }}
                   </span>
+                </div>
+                <div v-if="selected.fulfillment_id">
+                  <p class="text-xs text-gray-500 mb-1">Fulfillment ID</p>
+                  <span class="rounded-full bg-gray-100 px-3 py-1 text-sm font-mono text-gray-700">{{ selected.fulfillment_id }}</span>
                 </div>
               </div>
 
@@ -375,19 +413,28 @@ onUnmounted(() => clearInterval(timer))
                   <div v-for="(evt, idx) in timeline" :key="idx" class="relative">
                     <div class="absolute -left-[27px] top-1 h-3 w-3 rounded-full border-2 border-white"
                       :class="evt.direction === 'outbound' ? 'bg-green-500' : 'bg-blue-500'"></div>
-                    <div class="flex items-baseline gap-2">
+                    <div class="flex items-baseline gap-2 flex-wrap">
                       <span class="font-mono text-xs font-semibold" :class="evt.direction === 'outbound' ? 'text-green-700' : 'text-blue-700'">
                         {{ evt.action }}
                       </span>
                       <span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">{{ evt.direction }}</span>
-                      <span v-if="evt.fulfillment_state" class="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">
+                      <span v-if="evt.fulfillment_state"
+                        :class="['rounded px-1.5 py-0.5 text-[10px] font-medium', fulfillmentStateBadge[evt.fulfillment_state] || 'bg-indigo-50 text-indigo-600']">
                         {{ evt.fulfillment_state }}
+                      </span>
+                      <span v-if="evt.order_state" class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">
+                        Order: {{ evt.order_state }}
+                      </span>
+                      <span v-if="evt.fulfillment_id" class="rounded bg-gray-50 px-1 py-0.5 text-[10px] font-mono text-gray-400">
+                        {{ evt.fulfillment_id }}
                       </span>
                     </div>
                     <p class="text-[11px] text-gray-400 mt-0.5">{{ formatDateTime(evt.timestamp) }}</p>
                   </div>
                 </div>
-                <p v-else class="text-sm text-gray-400">No timeline data available</p>
+                <div v-else class="rounded-lg bg-yellow-50 p-3 text-sm text-yellow-700">
+                  No timeline events could be extracted. Check protocol logs below for raw data.
+                </div>
               </div>
 
               <!-- Buyer -->
@@ -400,22 +447,30 @@ onUnmounted(() => clearInterval(timer))
                 </div>
                 <div class="mt-2 text-sm">
                   <p class="text-xs text-gray-400">Delivery Address</p>
-                  <p class="text-gray-700">
-                    {{ [getAddress(selected).street || getAddress(selected).building, getAddress(selected).city, getAddress(selected).state, getAddress(selected).area_code].filter(Boolean).join(', ') || selected.delivery_city || '—' }}
-                  </p>
+                  <p class="text-gray-700">{{ formatAddress(selected.delivery_address_parsed) }}</p>
                 </div>
               </div>
 
               <!-- Items -->
               <div>
-                <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Items Ordered</h3>
+                <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Items Ordered
+                  <span v-if="getItems(selected).length" class="ml-2 font-normal normal-case text-gray-400">
+                    {{ selected.items_count }} distinct / {{ selected.items_units }} units
+                  </span>
+                </h3>
                 <div class="divide-y divide-gray-100 rounded-lg border border-gray-100">
                   <div v-if="!getItems(selected).length" class="py-3 text-center text-sm text-gray-400">No item data</div>
                   <div v-for="(item, idx) in getItems(selected)" :key="idx"
                     class="flex items-center justify-between px-4 py-2.5 text-sm">
-                    <span class="font-mono text-xs text-gray-500">{{ item.id }}</span>
-                    <span class="text-gray-700">&times; {{ item.quantity?.count || item.quantity || 1 }}</span>
-                    <span class="font-medium text-gray-900">{{ item.price?.value ? formatCurrency(item.price.value) : '—' }}</span>
+                    <div>
+                      <span class="font-mono text-xs font-medium text-gray-700">{{ item.id }}</span>
+                      <span v-if="item.descriptor?.name" class="ml-2 text-gray-600">{{ item.descriptor.name }}</span>
+                    </div>
+                    <div class="flex items-center gap-4">
+                      <span class="text-gray-500">&times; {{ item.quantity?.count || item.quantity || 1 }}</span>
+                      <span v-if="item.price?.value" class="font-medium text-gray-900 w-20 text-right">{{ formatCurrency(item.price.value) }}</span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -428,8 +483,8 @@ onUnmounted(() => clearInterval(timer))
                 </div>
                 <div class="text-right">
                   <p class="text-xs text-gray-500">Payment</p>
-                  <p class="text-sm font-medium capitalize text-gray-700">{{ selected.payment_type || '—' }}</p>
-                  <p class="text-xs text-gray-500">{{ selected.payment_status || '' }}</p>
+                  <p class="text-sm font-medium text-gray-700">{{ selected.payment_type || '—' }}</p>
+                  <p v-if="selected.payment_status" class="text-xs text-gray-500">{{ selected.payment_status }}</p>
                 </div>
               </div>
 
@@ -439,7 +494,7 @@ onUnmounted(() => clearInterval(timer))
                   class="flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50">
                   {{ showLogs ? 'Hide' : 'Show' }} Protocol Logs ({{ protocolLogs.length || '...' }})
                 </button>
-                <div v-if="showLogs && protocolLogs.length" class="mt-3 space-y-2">
+                <div v-if="showLogs && protocolLogs.length" class="mt-3 space-y-2 max-h-[400px] overflow-y-auto">
                   <div v-for="log in protocolLogs" :key="log.id"
                     class="rounded-lg border border-gray-100 overflow-hidden">
                     <button @click="toggleLog(log.id)"
@@ -458,11 +513,11 @@ onUnmounted(() => clearInterval(timer))
                     <div v-if="expandedLog === log.id" class="border-t border-gray-100 bg-gray-50 px-4 py-3">
                       <div class="mb-2">
                         <p class="text-[10px] font-semibold text-gray-500 mb-1">Request Payload</p>
-                        <pre class="max-h-48 overflow-auto rounded bg-white p-2 text-[11px] text-gray-700 ring-1 ring-gray-200">{{ JSON.stringify(log.request_payload, null, 2) }}</pre>
+                        <pre class="max-h-48 overflow-auto rounded bg-white p-2 text-[11px] text-gray-700 ring-1 ring-gray-200 whitespace-pre-wrap break-all">{{ JSON.stringify(log.request_payload, null, 2) }}</pre>
                       </div>
                       <div v-if="log.response_payload">
                         <p class="text-[10px] font-semibold text-gray-500 mb-1">Response</p>
-                        <pre class="max-h-32 overflow-auto rounded bg-white p-2 text-[11px] text-gray-700 ring-1 ring-gray-200">{{ JSON.stringify(log.response_payload, null, 2) }}</pre>
+                        <pre class="max-h-32 overflow-auto rounded bg-white p-2 text-[11px] text-gray-700 ring-1 ring-gray-200 whitespace-pre-wrap break-all">{{ JSON.stringify(log.response_payload, null, 2) }}</pre>
                       </div>
                     </div>
                   </div>

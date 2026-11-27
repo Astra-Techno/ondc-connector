@@ -280,6 +280,23 @@ const stripBreakupItemQuantity = (quote) => {
   };
 };
 
+// Buyer-Delivery: build order_details tags (weight + dimensions) required by ONDC spec
+const buildBuyerDeliveryTags = (existingTags) => {
+  const orderDetailsTags = [
+    { code: 'weight_unit', value: 'kilogram' },
+    { code: 'weight_value', value: '3.0' },
+    { code: 'dim_unit', value: 'centimeter' },
+    { code: 'length', value: '1.0' },
+    { code: 'breadth', value: '1.0' },
+    { code: 'height', value: '1.0' },
+  ];
+  const tags = [...(existingTags || [])];
+  // Remove any existing order_details tag to avoid duplicates
+  const filtered = tags.filter(t => t.code !== 'order_details');
+  filtered.push({ code: 'order_details', list: orderDetailsTags });
+  return filtered;
+};
+
 // Buyer-Delivery: remap breakup fulfillment refs from f1 → bdId, zero delivery/packing/misc charges
 const remapBreakupForBuyerDelivery = (quote, bdFulfillmentId) => {
   if (!quote?.breakup || !bdFulfillmentId) return quote;
@@ -1031,7 +1048,10 @@ const handleSelect = async (req, res) => {
               '@ondc/org/provider_name': f['@ondc/org/provider_name'] || providerName,
               tracking: isBuyerDelivery ? true : false,
             };
-            // Buyer-Delivery: no start/end in on_select per spec
+            // Buyer-Delivery: add order_details tags, no start/end in on_select per spec
+            if (isBuyerDelivery) {
+              base.tags = buildBuyerDeliveryTags(f.tags);
+            }
             if (!isBuyerDelivery) {
               base.start = {
                 location: {
@@ -1071,6 +1091,7 @@ const handleSelect = async (req, res) => {
             '@ondc/org/category': 'Standard Delivery',
             '@ondc/org/provider_name': providerName,
             tracking: true,
+            tags: buildBuyerDeliveryTags(),
           });
           // Assign items to Buyer-Delivery fulfillment
           for (const item of payload.order.items) {
@@ -1166,6 +1187,10 @@ const handleInit = async (req, res) => {
                 type: 'Buyer-Delivery',
                 end: f.end || undefined,
                 tracking: true,
+                '@ondc/org/TAT': 'P2D',
+                '@ondc/org/category': 'Standard Delivery',
+                '@ondc/org/provider_name': providerName || '',
+                tags: buildBuyerDeliveryTags(f.tags),
               };
             }
             const built = buildFulfillmentWithLocation(f, initVendor, 'Serviceable', new Date().toISOString());
@@ -1287,6 +1312,7 @@ const handleConfirm = async (req, res) => {
               built.tracking = true;
               built['@ondc/org/TAT'] = 'P2D';
               built['@ondc/org/category'] = 'Standard Delivery';
+              built.tags = buildBuyerDeliveryTags(built.tags);
             }
             return built;
           }),
@@ -2991,13 +3017,14 @@ const buildStatusPayload = (order_id, order, fulfillmentState, orderState, vendo
         builtFl.tracking = true;
         builtFl['@ondc/org/TAT'] = 'P2D';
         builtFl['@ondc/org/category'] = 'Standard Delivery';
+        // Always include order_details tags for Buyer-Delivery
+        builtFl.tags = buildBuyerDeliveryTags(builtFl.tags);
         // Packed state: add ready_to_ship + routing tags per spec
         if (fulfillmentState === 'Packed') {
-          builtFl.tags = [
-            ...(builtFl.tags || []),
+          builtFl.tags.push(
             { code: 'state', list: [{ code: 'ready_to_ship', value: 'yes' }] },
             { code: 'routing', list: [{ code: 'type', value: 'P2P' }] },
-          ];
+          );
         }
       }
       return builtFl;
