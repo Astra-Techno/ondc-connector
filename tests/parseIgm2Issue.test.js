@@ -281,6 +281,74 @@ function test9_categoryAndType() {
   console.log('  PASS: test9_categoryAndType');
 }
 
+// ── Test 10: Workflow classification ──
+function test10_workflowClassification() {
+  // Standard workflow (no rejection/escalation)
+  const r = parseIgm2Issue(igm2ClosedPayload);
+  assert.strictEqual(r.workflow, 'Standard', 'standard workflow');
+  assert.strictEqual(r.hasRejection, false, 'no rejection');
+  assert.strictEqual(r.hasEscalation, false, 'no escalation');
+  assert.strictEqual(r.finalOutcome, 'NO-ACTION', 'final outcome = NO-ACTION');
+
+  // Rejection + Escalation workflow
+  const rejEsc = JSON.parse(JSON.stringify(igm2ClosedPayload));
+  rejEsc.message.issue.actions.splice(3, 0,
+    { id: 'rej1', descriptor: { code: 'RESOLUTION_REJECTED' }, updated_at: '2026-10-20T10:00:04Z', action_by: 'buyer-app.ondc.org' },
+    { id: 'esc1', descriptor: { code: 'ESCALATED' }, updated_at: '2026-10-20T10:00:04.5Z', action_by: 'buyer-app.ondc.org' },
+  );
+  const r2 = parseIgm2Issue(rejEsc);
+  assert.strictEqual(r2.workflow, 'Rejection + Escalation', 'rejection+escalation workflow');
+  assert.strictEqual(r2.hasRejection, true, 'has rejection');
+  assert.strictEqual(r2.hasEscalation, true, 'has escalation');
+  assert.strictEqual(r2.rejectionCount, 1);
+  assert.strictEqual(r2.escalationCount, 1);
+
+  console.log('  PASS: test10_workflowClassification');
+}
+
+// ── Test 11: Evidence extraction ──
+function test11_evidenceExtraction() {
+  // Add images to descriptor
+  const withEvidence = JSON.parse(JSON.stringify(igm2ClosedPayload));
+  withEvidence.message.issue.descriptor.images = [
+    { url: 'https://example.com/photo1.jpg', size_type: 'xs' },
+  ];
+  withEvidence.message.issue.descriptor.media = [
+    { url: 'https://example.com/photo2.png' },
+  ];
+  const r = parseIgm2Issue(withEvidence);
+  assert.strictEqual(r.hasEvidence, true, 'has evidence');
+  assert.strictEqual(r.issueEvidence.length, 2, '2 issue-level images');
+  assert.strictEqual(r.issueEvidence[0].url, 'https://example.com/photo1.jpg');
+  assert.strictEqual(r.issueEvidence[0].source, 'issue_creation');
+  assert.strictEqual(r.actionEvidence.length, 0, 'no action-level evidence');
+
+  // No evidence
+  const r2 = parseIgm2Issue(igm2ClosedPayload);
+  assert.strictEqual(r2.hasEvidence, false, 'no evidence in base payload');
+  assert.strictEqual(r2.issueEvidence.length, 0);
+
+  console.log('  PASS: test11_evidenceExtraction');
+}
+
+// ── Test 12: Refund wording accuracy ──
+function test12_refundAccuracy() {
+  // NO-ACTION accepted — refund should show as proposed, not issued
+  const r = parseIgm2Issue(igm2ClosedPayload);
+  assert.strictEqual(r.refundDetails.isAccepted, false, 'refund NOT accepted');
+  assert.strictEqual(r.finalOutcome, 'NO-ACTION');
+
+  // REFUND accepted
+  const refundPayload = JSON.parse(JSON.stringify(igm2ClosedPayload));
+  refundPayload.message.issue.actions[6].ref_id = 'R_REFUND';
+  refundPayload.message.issue.actions[7].ref_id = 'R_REFUND';
+  const r2 = parseIgm2Issue(refundPayload);
+  assert.strictEqual(r2.refundDetails.isAccepted, true, 'refund IS accepted');
+  assert.strictEqual(r2.finalOutcome, 'REFUND');
+
+  console.log('  PASS: test12_refundAccuracy');
+}
+
 // ── Run all ──
 console.log('parseIgm2Issue tests:');
 test1_fullIgm2Closed();
@@ -292,4 +360,7 @@ test6_resolutionDistinction();
 test7_actors();
 test8_closureFeedback();
 test9_categoryAndType();
-console.log('\nAll 9 tests passed!');
+test10_workflowClassification();
+test11_evidenceExtraction();
+test12_refundAccuracy();
+console.log('\nAll 12 tests passed!');

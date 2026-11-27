@@ -266,6 +266,68 @@ function parseIgm2Issue(rawPayload) {
     }
   }
 
+  // ── Workflow classification ─────────────────────────────────────────────
+  const hasRejection  = actions.some(a => a.code === 'RESOLUTION_REJECTED');
+  const hasEscalation = actions.some(a => a.code === 'ESCALATED');
+  const rejectionCount  = actions.filter(a => a.code === 'RESOLUTION_REJECTED').length;
+  const escalationCount = actions.filter(a => a.code === 'ESCALATED').length;
+  let workflow = 'Standard';
+  if (hasRejection && hasEscalation) workflow = 'Rejection + Escalation';
+  else if (hasRejection) workflow = 'Rejection';
+  else if (hasEscalation) workflow = 'Escalation';
+
+  // Final outcome for listing display
+  let finalOutcome = 'Pending';
+  if (finalResolution) {
+    finalOutcome = finalResolution.code; // e.g. 'NO-ACTION', 'REFUND'
+  } else if (status === 'CLOSED' || status === 'RESOLVED') {
+    finalOutcome = 'Resolved';
+  }
+
+  // ── Evidence extraction (issue-level + action-level) ────────────────────
+  const issueEvidence = []; // images at issue creation
+  const actionEvidence = []; // images during actions (e.g. info requests)
+
+  // Issue-level: descriptor.images and descriptor.media
+  const descImages = issue.descriptor?.images || [];
+  const descMedia  = issue.descriptor?.media || [];
+  const seenUrls = new Set();
+  for (const img of [...descImages, ...descMedia]) {
+    const url = img.url || img.uri;
+    if (url && /^https?:\/\//i.test(url) && !seenUrls.has(url)) {
+      seenUrls.add(url);
+      issueEvidence.push({
+        url,
+        sizeType: img.size_type || null,
+        mimetype: img.mimetype || null,
+        source: 'issue_creation',
+        timestamp: createdAt,
+      });
+    }
+  }
+
+  // Action-level: check each action's descriptor.media and descriptor.images
+  for (const a of (issue.actions || [])) {
+    const actionCode = a.descriptor?.code;
+    const actionMedia = a.descriptor?.media || [];
+    const actionImages = a.descriptor?.images || [];
+    for (const m of [...actionMedia, ...actionImages]) {
+      const url = m.url || m.uri;
+      if (url && /^https?:\/\//i.test(url) && !seenUrls.has(url)) {
+        seenUrls.add(url);
+        actionEvidence.push({
+          url,
+          sizeType: m.size_type || null,
+          mimetype: m.mimetype || null,
+          source: actionCode || 'action',
+          timestamp: a.updated_at || null,
+        });
+      }
+    }
+  }
+
+  const hasEvidence = issueEvidence.length > 0 || actionEvidence.length > 0;
+
   return {
     issueId:       issue.id || null,
     transactionId: ctx.transaction_id || null,
@@ -292,6 +354,15 @@ function parseIgm2Issue(rawPayload) {
     resolutionWarning,
     refundDetails,
     closureFeedback,
+    workflow,
+    finalOutcome,
+    hasRejection,
+    hasEscalation,
+    rejectionCount,
+    escalationCount,
+    issueEvidence,
+    actionEvidence,
+    hasEvidence,
     status,
     createdAt,
     resolvedAt,

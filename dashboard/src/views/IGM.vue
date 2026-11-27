@@ -21,8 +21,10 @@ const total   = ref(0)
 const page    = ref(1)
 const perPage = ref(50)
 const summary = ref({ open: 0, in_progress: 0, resolved: 0, closed: 0 })
+const analytics = ref({ rejection_cases: 0, escalated_cases: 0, evidence_cases: 0, is_filtered: false })
 const categories = ref([])
-const filters = ref({ status: '', search: '', category: '', date_from: '', date_to: '' })
+const filters = ref({ status: '', search: '', category: '', date_from: '', date_to: '', has_rejection: false, has_escalation: false, has_evidence: false, final_outcome: '' })
+const imagePreview = ref(null)
 const sortBy  = ref('created_at')
 const sortDir = ref('DESC')
 const showFilters = ref(false)
@@ -94,9 +96,16 @@ async function fetchIssues() {
   const { data, error: e } = await get('/igm', params)
   if (e) { err.value = e }
   else {
-    issues.value     = data?.issues || []
+    let rows = data?.issues || []
+    // Client-side filters for parsed fields
+    if (filters.value.has_rejection) rows = rows.filter(r => r.has_rejection)
+    if (filters.value.has_escalation) rows = rows.filter(r => r.has_escalation)
+    if (filters.value.has_evidence) rows = rows.filter(r => r.has_evidence)
+    if (filters.value.final_outcome) rows = rows.filter(r => r.final_outcome === filters.value.final_outcome)
+    issues.value     = rows
     total.value      = data?.total || 0
     summary.value    = data?.summary || { open: 0, in_progress: 0, resolved: 0, closed: 0 }
+    analytics.value  = data?.analytics || { rejection_cases: 0, escalated_cases: 0, evidence_cases: 0, is_filtered: false }
     categories.value = data?.categories || []
   }
   loading.value = false
@@ -171,7 +180,7 @@ function formatElapsed(ms) {
 function applyFilters() { page.value = 1; fetchIssues() }
 
 function clearFilters() {
-  filters.value = { status: '', search: '', category: '', date_from: '', date_to: '' }
+  filters.value = { status: '', search: '', category: '', date_from: '', date_to: '', has_rejection: false, has_escalation: false, has_evidence: false, final_outcome: '' }
   applyFilters()
 }
 
@@ -209,8 +218,25 @@ function prettyJson(raw) {
 }
 
 const hasActiveFilters = computed(() =>
-  filters.value.category || filters.value.date_from || filters.value.date_to
+  filters.value.category || filters.value.date_from || filters.value.date_to ||
+  filters.value.has_rejection || filters.value.has_escalation || filters.value.has_evidence ||
+  filters.value.final_outcome
 )
+
+const workflowColors = {
+  'Standard': 'bg-gray-100 text-gray-600',
+  'Rejection': 'bg-pink-100 text-pink-700',
+  'Escalation': 'bg-purple-100 text-purple-700',
+  'Rejection + Escalation': 'bg-red-100 text-red-700',
+}
+
+const outcomeColors = {
+  'NO-ACTION': 'bg-gray-100 text-gray-600',
+  'REFUND': 'bg-green-100 text-green-700',
+  'REPLACEMENT': 'bg-blue-100 text-blue-700',
+  'Pending': 'bg-yellow-100 text-yellow-600',
+  'Resolved': 'bg-emerald-100 text-emerald-600',
+}
 
 onMounted(fetchIssues)
 </script>
@@ -252,6 +278,38 @@ onMounted(fetchIssues)
         <span class="text-xs font-medium text-gray-500">{{ cfg.label }}</span>
       </button>
     </div>
+
+    <!-- Analytics Cards -->
+    <div class="grid grid-cols-3 gap-3">
+      <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-gray-100 flex items-center gap-3">
+        <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-pink-100 text-pink-600">
+          <AlertTriangle class="h-4 w-4" />
+        </span>
+        <div>
+          <div class="text-lg font-bold text-gray-900">{{ analytics.rejection_cases }}</div>
+          <div class="text-[11px] text-gray-500">Rejection Cases</div>
+        </div>
+      </div>
+      <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-gray-100 flex items-center gap-3">
+        <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-100 text-purple-600">
+          <Zap class="h-4 w-4" />
+        </span>
+        <div>
+          <div class="text-lg font-bold text-gray-900">{{ analytics.escalated_cases }}</div>
+          <div class="text-[11px] text-gray-500">Escalated Cases</div>
+        </div>
+      </div>
+      <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-gray-100 flex items-center gap-3">
+        <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-100 text-blue-600">
+          <Paperclip class="h-4 w-4" />
+        </span>
+        <div>
+          <div class="text-lg font-bold text-gray-900">{{ analytics.evidence_cases }}</div>
+          <div class="text-[11px] text-gray-500">With Evidence</div>
+        </div>
+      </div>
+    </div>
+    <div v-if="analytics.is_filtered" class="text-[10px] text-gray-400 -mt-3 ml-1">Counts reflect current page results</div>
 
     <!-- Search + Filters Bar -->
     <div class="rounded-xl bg-white p-3 md:p-4 shadow-sm ring-1 ring-gray-100 space-y-3">
@@ -304,6 +362,33 @@ onMounted(fetchIssues)
             <input type="date" v-model="filters.date_to" @change="applyFilters"
               class="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-green-500" />
           </div>
+          <div class="flex flex-col gap-1">
+            <label class="text-[10px] text-gray-400 font-medium uppercase tracking-wide">Outcome</label>
+            <select v-model="filters.final_outcome" @change="applyFilters"
+              class="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-green-500">
+              <option value="">All</option>
+              <option value="NO-ACTION">NO-ACTION</option>
+              <option value="REFUND">REFUND</option>
+              <option value="Pending">Pending</option>
+            </select>
+          </div>
+          <div class="flex items-end gap-3 pb-0.5">
+            <label class="inline-flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" v-model="filters.has_rejection" @change="applyFilters"
+                class="rounded border-gray-300 text-pink-600 focus:ring-pink-500" />
+              <span class="text-xs text-gray-600">Rejection</span>
+            </label>
+            <label class="inline-flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" v-model="filters.has_escalation" @change="applyFilters"
+                class="rounded border-gray-300 text-purple-600 focus:ring-purple-500" />
+              <span class="text-xs text-gray-600">Escalated</span>
+            </label>
+            <label class="inline-flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" v-model="filters.has_evidence" @change="applyFilters"
+                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+              <span class="text-xs text-gray-600">Evidence</span>
+            </label>
+          </div>
         </div>
       </Transition>
     </div>
@@ -346,6 +431,8 @@ onMounted(fetchIssues)
               <th class="px-3 md:px-4 py-3 text-left font-medium hidden md:table-cell">Description</th>
               <th class="px-3 md:px-4 py-3 text-left font-medium hidden xl:table-cell">Item</th>
               <th class="px-3 md:px-4 py-3 text-left font-medium hidden lg:table-cell">Complainant</th>
+              <th class="px-3 md:px-4 py-3 text-left font-medium hidden xl:table-cell">Workflow</th>
+              <th class="px-3 md:px-4 py-3 text-left font-medium hidden md:table-cell">Outcome</th>
               <th class="px-3 md:px-4 py-3 text-left font-medium cursor-pointer select-none"
                 @click="toggleSort('status')">
                 <span class="flex items-center gap-1">Status
@@ -397,6 +484,18 @@ onMounted(fetchIssues)
               </td>
               <td class="px-3 md:px-4 py-3 text-gray-600 text-xs hidden lg:table-cell">
                 {{ issue.complainant_name || '—' }}
+              </td>
+              <td class="px-3 md:px-4 py-3 hidden xl:table-cell">
+                <span v-if="issue.workflow && issue.workflow !== 'Standard'"
+                  :class="['rounded-full px-2 py-0.5 text-[10px] font-medium', workflowColors[issue.workflow] || 'bg-gray-100 text-gray-600']">
+                  {{ issue.workflow }}
+                </span>
+                <span v-else class="text-[10px] text-gray-400">Standard</span>
+              </td>
+              <td class="px-3 md:px-4 py-3 hidden md:table-cell">
+                <span :class="['rounded-full px-2 py-0.5 text-[10px] font-medium', outcomeColors[issue.final_outcome] || 'bg-gray-100 text-gray-600']">
+                  {{ issue.final_outcome || 'Pending' }}
+                </span>
               </td>
               <td class="px-3 md:px-4 py-3">
                 <span :class="['inline-flex items-center gap-1 w-fit rounded-full px-2 py-0.5 text-[11px] font-medium ring-1',
@@ -591,6 +690,87 @@ onMounted(fetchIssues)
                   </div>
                 </div>
 
+                <!-- ═══ LIFECYCLE SUMMARY ═══════════════════════════════════════ -->
+                <div v-if="detail.parsed?.workflow && detail.parsed.workflow !== 'Standard'"
+                  class="rounded-xl bg-white p-4 ring-1 ring-gray-100">
+                  <div class="flex items-center gap-2 mb-3">
+                    <Zap class="h-4 w-4 text-indigo-500" />
+                    <span class="text-sm font-semibold text-gray-700">Lifecycle Summary</span>
+                  </div>
+                  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                    <div>
+                      <span class="text-[10px] text-gray-400 uppercase tracking-wide">Workflow</span>
+                      <div :class="['mt-0.5 rounded px-2 py-0.5 text-xs font-medium w-fit', workflowColors[detail.parsed.workflow] || 'bg-gray-100 text-gray-600']">
+                        {{ detail.parsed.workflow }}
+                      </div>
+                    </div>
+                    <div v-if="detail.parsed.rejectionCount">
+                      <span class="text-[10px] text-gray-400 uppercase tracking-wide">Rejections</span>
+                      <div class="text-pink-700 font-bold mt-0.5">{{ detail.parsed.rejectionCount }}</div>
+                    </div>
+                    <div v-if="detail.parsed.escalationCount">
+                      <span class="text-[10px] text-gray-400 uppercase tracking-wide">Escalations</span>
+                      <div class="text-purple-700 font-bold mt-0.5">{{ detail.parsed.escalationCount }}</div>
+                    </div>
+                    <div>
+                      <span class="text-[10px] text-gray-400 uppercase tracking-wide">Final Outcome</span>
+                      <div :class="['mt-0.5 rounded px-2 py-0.5 text-xs font-medium w-fit', outcomeColors[detail.parsed.finalOutcome] || 'bg-gray-100 text-gray-600']">
+                        {{ detail.parsed.finalOutcome }}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- ═══ EVIDENCE IMAGES ═══════════════════════════════════════ -->
+                <div v-if="detail.parsed?.hasEvidence" class="rounded-xl bg-white p-4 ring-1 ring-gray-100 space-y-3">
+                  <div class="flex items-center gap-2 mb-2">
+                    <Paperclip class="h-4 w-4 text-blue-500" />
+                    <span class="text-sm font-semibold text-gray-700">Evidence Images</span>
+                  </div>
+
+                  <!-- Issue Creation Evidence -->
+                  <div v-if="detail.parsed.issueEvidence?.length">
+                    <div class="text-[10px] text-gray-400 uppercase tracking-wide mb-1.5">Issue Creation Evidence</div>
+                    <div class="flex flex-wrap gap-2">
+                      <div v-for="(ev, i) in detail.parsed.issueEvidence" :key="'ie-'+i"
+                        class="relative group rounded-lg ring-1 ring-gray-200 overflow-hidden bg-gray-50 cursor-pointer hover:ring-blue-300 transition-colors"
+                        @click="imagePreview = ev.url">
+                        <img :src="ev.url" :alt="'Evidence ' + (i+1)" class="h-16 w-16 object-cover"
+                          @error="$event.target.src = ''; $event.target.alt = 'Failed to load'" />
+                        <div class="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
+                          <Eye class="h-4 w-4 text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                        </div>
+                      </div>
+                    </div>
+                    <div class="text-[10px] text-gray-400 mt-1">{{ formatFullDate(detail.parsed.issueEvidence[0]?.timestamp) }}</div>
+                  </div>
+
+                  <!-- Action-level Evidence -->
+                  <div v-if="detail.parsed.actionEvidence?.length">
+                    <div class="text-[10px] text-gray-400 uppercase tracking-wide mb-1.5">Additional Information Evidence</div>
+                    <div class="flex flex-wrap gap-2">
+                      <div v-for="(ev, i) in detail.parsed.actionEvidence" :key="'ae-'+i"
+                        class="relative group rounded-lg ring-1 ring-gray-200 overflow-hidden bg-gray-50 cursor-pointer hover:ring-blue-300 transition-colors"
+                        @click="imagePreview = ev.url">
+                        <img :src="ev.url" :alt="ev.source + ' evidence'" class="h-16 w-16 object-cover"
+                          @error="$event.target.src = ''; $event.target.alt = 'Failed to load'" />
+                        <div class="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
+                          <Eye class="h-4 w-4 text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                        </div>
+                      </div>
+                    </div>
+                    <div class="text-[10px] text-gray-400 mt-1">
+                      Source: {{ detail.parsed.actionEvidence[0]?.source }} · {{ formatFullDate(detail.parsed.actionEvidence[0]?.timestamp) }}
+                    </div>
+                  </div>
+
+                  <!-- No action-level evidence -->
+                  <div v-if="!detail.parsed.actionEvidence?.length && detail.parsed.issueEvidence?.length"
+                    class="text-[10px] text-gray-400 italic">
+                    No additional information evidence received during this complaint lifecycle.
+                  </div>
+                </div>
+
                 <!-- ═══ 2. PARTIES ════════════════════════════════════════════ -->
                 <div v-if="detail.parsed?.actors?.length" class="rounded-xl bg-white p-4 ring-1 ring-gray-100">
                   <div class="flex items-center gap-2 mb-3">
@@ -700,21 +880,26 @@ onMounted(fetchIssues)
                       </span>
                       <span class="text-xs text-green-700">{{ detail.parsed.finalResolution.short_desc }}</span>
                     </div>
-                    <!-- Show refund only if REFUND was the accepted resolution -->
+                    <!-- Show refund — wording depends on whether we have verified payment data -->
                     <div v-if="detail.parsed.refundDetails?.isAccepted"
                       class="mt-2 pt-2 border-t border-green-200 text-xs">
-                      <span class="text-green-700 font-medium">Refund issued:</span>
+                      <span class="text-green-700 font-medium">Refund resolution recorded:</span>
                       <span class="text-green-800 font-bold ml-1">₹{{ detail.parsed.refundDetails.amount }}</span>
                       <span v-if="detail.parsed.refundDetails.item" class="text-green-600 ml-2">for item {{ detail.parsed.refundDetails.item }}</span>
+                      <div class="text-[10px] text-green-600/70 mt-0.5 italic">Based on IGM resolution data only. Verify actual payment refund separately.</div>
                     </div>
                   </div>
 
-                  <!-- Resolution warning -->
-                  <div v-if="detail.parsed?.resolutionWarning"
-                    class="flex items-start gap-2 rounded-lg bg-amber-50 p-2.5 ring-1 ring-amber-200 text-xs text-amber-700">
-                    <AlertTriangle class="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                    <span>{{ detail.parsed.resolutionWarning }}</span>
-                  </div>
+                  <!-- Technical Validation (collapsible) -->
+                  <details v-if="detail.parsed?.resolutionWarning" class="rounded-lg bg-amber-50 ring-1 ring-amber-200">
+                    <summary class="flex items-center gap-2 px-3 py-2 cursor-pointer text-xs text-amber-700 font-medium select-none">
+                      <AlertTriangle class="h-3.5 w-3.5 shrink-0" />
+                      Technical Validation — Protocol Reference Mismatch
+                    </summary>
+                    <div class="px-3 pb-2.5 text-[11px] text-amber-600">
+                      {{ detail.parsed.resolutionWarning }}
+                    </div>
+                  </details>
 
                   <!-- Proposed options -->
                   <div v-if="detail.parsed?.resolutions?.filter(r => r.code !== 'PARENT').length">
@@ -864,6 +1049,30 @@ onMounted(fetchIssues)
               </div>
             </div>
           </Transition>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Image Preview Modal -->
+    <Teleport to="body">
+      <Transition enter-active-class="transition-opacity duration-150" enter-from-class="opacity-0"
+        leave-active-class="transition-opacity duration-100" leave-to-class="opacity-0">
+        <div v-if="imagePreview" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm"
+          @click.self="imagePreview = null">
+          <div class="relative max-w-3xl max-h-[85vh] rounded-xl overflow-hidden shadow-2xl bg-white">
+            <button @click="imagePreview = null"
+              class="absolute top-2 right-2 z-10 rounded-full bg-black/50 p-1.5 text-white hover:bg-black/70 transition-colors">
+              <X class="h-4 w-4" />
+            </button>
+            <img :src="imagePreview" alt="Evidence preview" class="max-h-[85vh] object-contain"
+              @error="$event.target.alt = 'Failed to load image'" />
+            <div class="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-3">
+              <a :href="imagePreview" target="_blank" rel="noopener noreferrer"
+                class="text-[11px] text-white/80 hover:text-white font-mono truncate block">
+                {{ imagePreview }}
+              </a>
+            </div>
+          </div>
         </div>
       </Transition>
     </Teleport>

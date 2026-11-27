@@ -34,6 +34,7 @@ const mapStatusToDb = (s) => {
 const getIssues = async (req, res) => {
   try {
     const { status, search, category, date_from, date_to, sort_by, sort_dir,
+            has_rejection, has_escalation, has_evidence, final_outcome,
             page = 1, per_page = 50 } = req.query;
     const limit  = Math.min(parseInt(per_page) || 50, 200);
     const offset = (Math.max(parseInt(page) || 1, 1) - 1) * limit;
@@ -71,10 +72,10 @@ const getIssues = async (req, res) => {
       [...params, limit, offset]
     );
 
-    // Enrich rows that have raw_payload but missing parsed fields
+    // Enrich rows — parse raw_payload for workflow, outcome, and missing fields
     const enriched = issues.map(row => {
       let parsed = null;
-      if (row.raw_payload && (!row.descriptor_code || !row.complainant_name)) {
+      if (row.raw_payload) {
         try {
           const raw = typeof row.raw_payload === 'string' ? JSON.parse(row.raw_payload) : row.raw_payload;
           parsed = parseIgm2Issue(raw);
@@ -93,6 +94,11 @@ const getIssues = async (req, res) => {
         complainant_name: maskPhone(row.complainant_name || parsed?.complainant?.name || null),
         complainant_phone: maskPhone(row.complainant_phone || parsed?.complainant?.phone || null),
         complainant_email: maskEmail(row.complainant_email || parsed?.complainant?.email || null),
+        workflow: parsed?.workflow || 'Standard',
+        final_outcome: parsed?.finalOutcome || 'Pending',
+        has_rejection: parsed?.hasRejection || false,
+        has_escalation: parsed?.hasEscalation || false,
+        has_evidence: parsed?.hasEvidence || false,
         resolved_at: row.resolved_at,
         closed_at: row.closed_at,
         created_at: row.created_at,
@@ -110,6 +116,15 @@ const getIssues = async (req, res) => {
        FROM issue_grievances WHERE tenant_id = ?`,
       [req.tenant.id]
     );
+
+    // Analytics: derive rejection/escalation/evidence counts from enriched list data
+    // These are computed from parsed payloads, not stored DB columns
+    const analytics = {
+      rejection_cases: enriched.filter(r => r.has_rejection).length,
+      escalated_cases: enriched.filter(r => r.has_escalation).length,
+      evidence_cases: enriched.filter(r => r.has_evidence).length,
+      is_filtered: !!(status || search || category || date_from || date_to),
+    };
 
     // Distinct categories for filter dropdown
     const [catRows] = await pool.query(
@@ -129,6 +144,7 @@ const getIssues = async (req, res) => {
         resolved:    summary.resolved_count || 0,
         closed:      summary.closed_count || 0,
       },
+      analytics,
       categories: catRows.map(r => r.descriptor_code),
     });
   } catch (err) {
